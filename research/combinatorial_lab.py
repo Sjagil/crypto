@@ -4312,6 +4312,30 @@ class LabRunner:
         )
         return payload
 
+    def write_worker_status(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        workers: int,
+        active: int,
+        completed: int,
+        failed: int,
+    ) -> None:
+        atomic_write_json(
+            self.worker_status_path,
+            {
+                "run_id": run_id,
+                "phase": phase,
+                "workers": workers,
+                "active": active,
+                "completed": completed,
+                "failed": failed,
+                "task_leaks": [],
+                "updated_at": utc_iso(),
+            },
+        )
+
     def status(self) -> dict[str, Any]:
         current = (
             read_json(self.current_status_path)
@@ -6197,6 +6221,14 @@ class LabRunner:
                 "live_orders": 0,
             },
         )
+        self.write_worker_status(
+            run_id=run_id,
+            phase="PREPARING_AND_HASHING_DATA",
+            workers=worker_limit,
+            active=0,
+            completed=0,
+            failed=0,
+        )
         for timeframe in timeframes:
             selected_rows: int | None = rows
             slice_start: pd.Timestamp | None = None
@@ -6352,8 +6384,18 @@ class LabRunner:
                             ),
                         )
                     )
+            self.write_worker_status(
+                run_id=run_id,
+                phase=f"SCREENING:{timeframe}",
+                workers=worker_limit,
+                active=min(worker_limit, len(tasks)),
+                completed=completed,
+                failed=failed,
+            )
+            timeframe_finished = 0
             for task in asyncio.as_completed(tasks):
                 job, payload = await task
+                timeframe_finished += 1
                 if payload is None:
                     failed += int(
                         job.get("status")
@@ -6372,6 +6414,17 @@ class LabRunner:
                     status="RUNNING",
                     completed_jobs=completed,
                     failed_jobs=failed,
+                )
+                self.write_worker_status(
+                    run_id=run_id,
+                    phase=f"SCREENING:{timeframe}",
+                    workers=worker_limit,
+                    active=min(
+                        worker_limit,
+                        max(0, len(tasks) - timeframe_finished),
+                    ),
+                    completed=completed,
+                    failed=failed,
                 )
         screening_executor.shutdown(wait=True, cancel_futures=True)
         combination_index = {combination.combination_id: combination for combination in valid}
@@ -6397,6 +6450,14 @@ class LabRunner:
             for payload in [*persisted_baselines, *baseline_payloads]
             if payload.get("experiment_hash")
         }
+        self.write_worker_status(
+            run_id=run_id,
+            phase="EXACT_BACKTEST",
+            workers=worker_limit,
+            active=1,
+            completed=completed,
+            failed=failed,
+        )
         screening_trials, exact_backtests, new_exact_payloads = await self._screen_and_validate(
             baseline_payloads=list(unique_baselines.values()),
             combinations=combination_index,
@@ -6409,6 +6470,14 @@ class LabRunner:
         research_passes = 0
         paper_candidates = 0
         if profile.casefold() != "quick":
+            self.write_worker_status(
+                run_id=run_id,
+                phase="OPTIMIZATION_AND_VALIDATION",
+                workers=worker_limit,
+                active=1,
+                completed=completed,
+                failed=failed,
+            )
             persisted_exact = [
                 payload
                 for payload in _payload_rows(
