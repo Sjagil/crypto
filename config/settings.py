@@ -453,12 +453,12 @@ class ResearchSettings(_SettingsBase):
         le=1.0,
     )
     maximum_white_reality_check_pvalue: float = Field(
-        default=0.05,
+        default=0.10,
         ge=0.0,
         le=1.0,
     )
     maximum_hansen_spa_pvalue: float = Field(
-        default=0.10,
+        default=0.05,
         ge=0.0,
         le=1.0,
     )

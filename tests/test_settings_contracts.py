@@ -122,3 +122,14 @@ def test_forward_only_intelligence_cannot_be_backdated() -> None:
             historical_coverage=HistoricalCoverage.FORWARD_ONLY,
             raw_hash="hash",
         )
+
+
+def test_strict_research_defaults_match_formal_campaign_specification(
+    isolated_settings: Settings,
+) -> None:
+    research = isolated_settings.research
+    assert research.minimum_positive_folds == 5
+    assert research.maximum_probability_of_backtest_overfitting == 0.10
+    assert research.maximum_white_reality_check_pvalue == 0.10
+    assert research.maximum_hansen_spa_pvalue == 0.05
+    assert research.multiple_testing_bootstrap_samples >= 2_000
