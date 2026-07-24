@@ -4117,7 +4117,13 @@ def screening_survivor_score(
 
     trades = int(screening.get("trades") or 0)
     score = float(screening.get("screening_score") or 0.0)
-    if trades < minimum_trades or not math.isfinite(score):
+    net_return = float(screening.get("screening_return") or 0.0)
+    if (
+        trades < minimum_trades
+        or not math.isfinite(score)
+        or not math.isfinite(net_return)
+        or net_return <= 0.0
+    ):
         return None
     return score
 

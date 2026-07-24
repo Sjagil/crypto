@@ -559,27 +559,38 @@ def test_fast_screen_uses_maximum_holding_exit_instead_of_holding_forever(
 def test_fast_screen_survivor_score_requires_minimum_trades_and_finite_score() -> None:
     assert (
         screening_survivor_score(
-            {"trades": 0, "screening_score": 0.0},
+            {"trades": 0, "screening_score": 0.0, "screening_return": 1.0},
             minimum_trades=30,
         )
         is None
     )
     assert (
         screening_survivor_score(
-            {"trades": 29, "screening_score": 100.0},
+            {"trades": 29, "screening_score": 100.0, "screening_return": 1.0},
             minimum_trades=30,
         )
         is None
     )
     assert (
         screening_survivor_score(
-            {"trades": 30, "screening_score": float("nan")},
+            {
+                "trades": 30,
+                "screening_score": float("nan"),
+                "screening_return": 1.0,
+            },
+            minimum_trades=30,
+        )
+        is None
+    )
+    assert (
+        screening_survivor_score(
+            {"trades": 30, "screening_score": 1.25, "screening_return": -0.01},
             minimum_trades=30,
         )
         is None
     )
     assert screening_survivor_score(
-        {"trades": 30, "screening_score": 1.25},
+        {"trades": 30, "screening_score": 1.25, "screening_return": 0.01},
         minimum_trades=30,
     ) == pytest.approx(1.25)
 
