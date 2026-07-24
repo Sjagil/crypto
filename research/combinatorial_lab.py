@@ -3067,7 +3067,7 @@ class LabStore:
             }
             and not (force or retest)
         ):
-            return existing | {
+            deduplicated = existing | {
                 "deduplicated": True,
                 "skip_reason": (
                     "ONLY_MISSING_ALREADY_COMPLETE"
@@ -3075,6 +3075,34 @@ class LabStore:
                     else "IDENTICAL_EXPERIMENT_COMPLETE"
                 ),
             }
+            if str(existing.get("run_id")) == run_id:
+                return deduplicated
+            alias_id = (
+                f"{base_job_id}-alias-"
+                f"{stable_hash([run_id, base_job_id], length=12)}"
+            )
+            alias = {
+                **deduplicated,
+                "job_id": alias_id,
+                "run_id": run_id,
+                "source_job_id": existing.get("job_id"),
+                "stage": "DEDUPLICATED_MEMBERSHIP",
+                "reason_code": "IDENTICAL_EXPERIMENT_REUSED_IN_CAMPAIGN",
+                "created_at": utc_iso(),
+                "updated_at": utc_iso(),
+            }
+            self.database.upsert_records(
+                "experiment_jobs",
+                [
+                    {
+                        **alias,
+                        "external_id": alias_id,
+                        "status": alias["status"],
+                        "timestamp": utc_now(),
+                    }
+                ],
+            )
+            return alias
         run_version = (
             stable_hash([utc_iso(), run_id, "force" if force else "retest"])[:10]
             if force or retest
@@ -6450,6 +6478,25 @@ class LabRunner:
             for payload in [*persisted_baselines, *baseline_payloads]
             if payload.get("experiment_hash")
         }
+        current_job_by_experiment = {
+            str(job.get("experiment_hash")): job
+            for job in self.store.jobs()
+            if str(job.get("run_id")) == run_id
+            and job.get("experiment_hash")
+        }
+        unique_baselines = {
+            experiment_hash: (
+                dict(payload)
+                | {
+                    "job_id": current_job_by_experiment[
+                        experiment_hash
+                    ]["job_id"]
+                }
+                if experiment_hash in current_job_by_experiment
+                else payload
+            )
+            for experiment_hash, payload in unique_baselines.items()
+        }
         self.write_worker_status(
             run_id=run_id,
             phase="EXACT_BACKTEST",
@@ -6498,6 +6545,19 @@ class LabRunner:
             exact_candidates = {
                 str(payload["experiment_hash"]): payload
                 for payload in [*persisted_exact, *new_exact_payloads]
+            }
+            exact_candidates = {
+                experiment_hash: (
+                    dict(payload)
+                    | {
+                        "job_id": current_job_by_experiment[
+                            experiment_hash
+                        ]["job_id"]
+                    }
+                    if experiment_hash in current_job_by_experiment
+                    else payload
+                )
+                for experiment_hash, payload in exact_candidates.items()
             }
             (
                 optimized_candidates,

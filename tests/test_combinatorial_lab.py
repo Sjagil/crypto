@@ -778,11 +778,14 @@ def test_durable_job_dedup_resume_and_half_step_trial_rows(
             parameters=parameters,
             data_hash="data",
         )
-        assert completed["job_id"] == duplicate["job_id"]
+        assert completed["job_id"] != duplicate["job_id"]
         assert duplicate["deduplicated"]
+        assert duplicate["source_job_id"] == completed["job_id"]
+        assert duplicate["run_id"] == "resume"
     assert len(hashes) == 5
     assert store.database.health()["table_counts"]["experiment_trials"] == 5
-    assert store.database.health()["table_counts"]["experiment_jobs"] == 5
+    assert store.database.health()["table_counts"]["experiment_jobs"] == 10
+    assert store.queue_status(run_id="resume")["total"] == 5
 
 
 def test_queue_status_is_run_scoped_and_old_incomplete_jobs_are_superseded(
