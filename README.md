@@ -38,8 +38,11 @@ with 4h trend and 1d regime confirmation. It uses public Bitvavo data only.
 4. Stop safely:
 
    ```powershell
-   .\.venv\Scripts\python.exe main.py operate drain --mode shadow
-   .\.venv\Scripts\python.exe main.py operate stop --mode shadow
+   .\.venv\Scripts\python.exe main.py operate drain --mode shadow --wait --timeout 60 --poll-seconds 0.2
+   .\.venv\Scripts\python.exe main.py operate stop --mode shadow --wait --timeout 60 --poll-seconds 0.2
+   .\.venv\Scripts\python.exe main.py operate lock-status
+   # Only after lock-status proves the owner process is stale:
+   .\.venv\Scripts\python.exe main.py operate recover-stale-lock
    ```
 
 5. Start paper mode only after a genuine candidate has passed the research and
@@ -424,7 +427,7 @@ python main.py lab universe coverage
 python main.py lab blocks list
 python main.py lab blocks validate
 python main.py lab data status --universe-size 5 --timeframes 1h,4h --minimum-rows 2000
-python main.py lab data prepare --universe-size 25 --timeframes 15m,30m,1h,2h,4h,6h,8h,12h,1d,1W --history-profile deep --minimum-rows 2000
+python main.py lab data prepare --markets BTC-EUR,ETH-EUR,SOL-EUR,LINK-EUR --allowed-universe --timeframes 5m,15m,1h,4h,1d --history-profile maximum --minimum-rows 500 --force
 python main.py lab data validate --universe-size 5 --timeframes 1h,4h --minimum-rows 2000
 python main.py lab indicators coverage
 python main.py lab indicators describe --id rsi
@@ -445,7 +448,23 @@ python main.py lab queue
 python main.py lab leaderboard --top 25
 python main.py lab leaderboard export
 python main.py lab report
+python main.py lab campaign plan --name microstructure-5m15m
+python main.py lab campaign run --name microstructure-5m15m --workers 4 --max-trials 20 --yes
+python main.py lab campaign plan --name formal-five-family
+python main.py lab campaign run --name formal-five-family --workers 4 --max-trials 20 --yes
+python main.py lab state
+python main.py lab state --apply
 ```
+
+The microstructure campaign screens every valid registered single/pair DNA on
+real common-history 5m and 15m candles before exact survivor tests. The formal
+campaign deliberately narrows the next stage to five economic hypotheses:
+trend breakout, pullback in an uptrend, range mean reversion, volatility
+expansion after prior contraction, and BTC-relative strength. It freezes data,
+feature, software, cost, gate, seed, and DNA hashes in a stage-0 plan before
+screening. Higher-timeframe 4h/1d state becomes visible only after the source
+candle closes. Zero accepted candidates is a valid result; no gate is weakened
+to manufacture profitability.
 
 `QUICK` runs static checks, canonical baselines, a bounded fast screen, and
 exact survivor backtests. `STANDARD`, `DEEP`, and `EXHAUSTIVE` progressively
