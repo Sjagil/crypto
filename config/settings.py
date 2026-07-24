@@ -232,9 +232,7 @@ class PathSettings(_SettingsBase):
 
 
 class MarketDataSettings(_SettingsBase):
-    providers: CsvList = Field(
-        default_factory=lambda: ["bitvavo", "kraken", "coinmarketcap"]
-    )
+    providers: CsvList = Field(default_factory=lambda: ["bitvavo", "kraken", "coinmarketcap"])
     symbols: CsvList = Field(
         default_factory=lambda: list(DEFAULT_MARKETS),
         validation_alias=AliasChoices("SYMBOLS", "MARKETS"),
@@ -243,9 +241,7 @@ class MarketDataSettings(_SettingsBase):
         default="EUR",
         validation_alias=AliasChoices("QUOTE_CURRENCY", "PORTFOLIO_BASE_CURRENCY"),
     )
-    timeframes: CsvList = Field(
-        default_factory=lambda: ["5m", "15m", "1h", "4h", "1d"]
-    )
+    timeframes: CsvList = Field(default_factory=lambda: ["5m", "15m", "1h", "4h", "1d"])
     base_timeframe: str = "1h"
     start_date: datetime | None = None
     end_date: datetime | None = None
@@ -440,7 +436,7 @@ class ResearchSettings(_SettingsBase):
     minimum_profit_factor: float = Field(default=1.15, gt=0.0)
     minimum_stressed_profit_factor: float = Field(default=1.00, gt=0.0)
     minimum_net_expectancy_r: float = 0.0
-    minimum_positive_folds: int = Field(default=4, ge=1)
+    minimum_positive_folds: int = Field(default=5, ge=1)
     minimum_cpcv_path_consistency: float = Field(
         default=0.60,
         ge=0.0,
@@ -452,12 +448,12 @@ class ResearchSettings(_SettingsBase):
         le=1.0,
     )
     maximum_probability_of_backtest_overfitting: float = Field(
-        default=0.25,
+        default=0.10,
         ge=0.0,
         le=1.0,
     )
     maximum_white_reality_check_pvalue: float = Field(
-        default=0.10,
+        default=0.05,
         ge=0.0,
         le=1.0,
     )
@@ -466,21 +462,13 @@ class ResearchSettings(_SettingsBase):
         ge=0.0,
         le=1.0,
     )
-    multiple_testing_bootstrap_samples: int = Field(default=1_000, ge=100)
+    multiple_testing_bootstrap_samples: int = Field(default=2_000, ge=2_000)
     multiple_testing_block_size: int = Field(default=5, ge=1, le=1_000)
     maximum_drawdown: float = Field(default=0.20, gt=0.0, le=1.0)
-    maximum_monte_carlo_probability_of_loss: float = Field(
-        default=0.35, ge=0.0, le=1.0
-    )
-    maximum_probability_of_30pct_drawdown: float = Field(
-        default=0.10, ge=0.0, le=1.0
-    )
-    maximum_symbol_profit_concentration: float = Field(
-        default=0.60, gt=0.0, le=1.0
-    )
-    maximum_fold_profit_concentration: float = Field(
-        default=0.50, gt=0.0, le=1.0
-    )
+    maximum_monte_carlo_probability_of_loss: float = Field(default=0.35, ge=0.0, le=1.0)
+    maximum_probability_of_30pct_drawdown: float = Field(default=0.10, ge=0.0, le=1.0)
+    maximum_symbol_profit_concentration: float = Field(default=0.60, gt=0.0, le=1.0)
+    maximum_fold_profit_concentration: float = Field(default=0.50, gt=0.0, le=1.0)
     bootstrap_samples: int = Field(default=10_000, ge=100)
     monte_carlo_runs: int = Field(default=10_000, ge=100)
     confidence_level: float = Field(default=0.95, gt=0.5, lt=1.0)
@@ -544,9 +532,7 @@ class OperationalSettings(_SettingsBase):
     model_config = SettingsConfigDict(env_prefix="OPERATE_")
 
     profile_name: str = "practical_spot_v1"
-    markets: CsvList = Field(
-        default_factory=lambda: ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"]
-    )
+    markets: CsvList = Field(default_factory=lambda: ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"])
     execution_timeframe: str = "1h"
     trend_timeframe: str = "4h"
     regime_timeframe: str = "1d"
@@ -588,12 +574,10 @@ class OperationalSettings(_SettingsBase):
     @classmethod
     def validate_markets(cls, values: list[str]) -> list[str]:
         normalized = [
-            str(value).strip().upper().replace("/", "-").replace("_", "-")
-            for value in values
+            str(value).strip().upper().replace("/", "-").replace("_", "-") for value in values
         ]
         if any(
-            len(market.split("-")) != 2
-            or not all(part.isalnum() for part in market.split("-"))
+            len(market.split("-")) != 2 or not all(part.isalnum() for part in market.split("-"))
             for market in normalized
         ):
             raise ValueError("operational markets must use BASE-QUOTE format")
@@ -613,8 +597,7 @@ class OperationalSettings(_SettingsBase):
         if self.maximum_total_open_risk < self.maximum_risk_per_trade:
             raise ValueError("operational open-risk cap is below per-trade cap")
         if (
-            self.drawdown_warning
-            >= self.drawdown_block_new_entries
+            self.drawdown_warning >= self.drawdown_block_new_entries
             or self.drawdown_block_new_entries >= self.drawdown_kill_switch
         ):
             raise ValueError("operational drawdown thresholds are not increasing")
@@ -721,9 +704,7 @@ class ProviderSettings(_SettingsBase):
     )
     eodhd_api_key: SecretStr | None = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "EODHD_API_KEY", "EOD_API_KEY", "EODHISTORICALDATA_API_KEY"
-        ),
+        validation_alias=AliasChoices("EODHD_API_KEY", "EOD_API_KEY", "EODHISTORICALDATA_API_KEY"),
     )
     fred_api_key: SecretStr | None = Field(
         default=None,
@@ -944,10 +925,7 @@ class Settings(BaseModel):
             if isinstance(value, timedelta):
                 return value.total_seconds()
             if isinstance(value, BaseModel):
-                return {
-                    name: redact(getattr(value, name))
-                    for name in type(value).model_fields
-                }
+                return {name: redact(getattr(value, name)) for name in type(value).model_fields}
             if isinstance(value, dict):
                 return {str(key): redact(item) for key, item in value.items()}
             if isinstance(value, (list, tuple)):

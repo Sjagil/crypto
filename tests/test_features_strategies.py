@@ -9,7 +9,11 @@ from core.contracts import (
     IntelligenceRecord,
     TimestampQuality,
 )
-from research.features import FeaturePipeline, confirmed_fractals
+from research.features import (
+    FeaturePipeline,
+    confirmed_fractals,
+    multi_timeframe_fractal_alignment,
+)
 from research.strategies import strategy_registry
 
 
@@ -47,6 +51,35 @@ def test_intelligence_is_causal(ohlcv: pd.DataFrame) -> None:
     )
     assert features.loc[: ohlcv.index[100], "intelligence_event_count"].sum() == 0
     assert features.loc[ohlcv.index[101], "intelligence_event_count"] == 1
+
+
+def test_higher_timeframe_state_waits_for_source_candle_close(
+    ohlcv: pd.DataFrame,
+) -> None:
+    higher = ohlcv.iloc[:9].copy()
+    higher.index = pd.date_range(
+        "2023-01-01",
+        periods=len(higher),
+        freq="4h",
+        tz="UTC",
+    )
+    higher.attrs["timeframe"] = "4h"
+    base_index = pd.date_range(
+        "2023-01-01",
+        periods=20,
+        freq="1h",
+        tz="UTC",
+    )
+    aligned = multi_timeframe_fractal_alignment(
+        base_index,
+        {"4h": higher},
+        base_timeframe="1h",
+    )
+    assert pd.isna(aligned.loc[base_index[2], "fractal_source_timestamp_4h"])
+    assert (
+        aligned.loc[base_index[3], "fractal_source_timestamp_4h"]
+        == higher.index[0]
+    )
 
 
 def test_every_registered_strategy_is_long_only(features: pd.DataFrame) -> None:

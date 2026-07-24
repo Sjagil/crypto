@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
+from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -113,9 +115,7 @@ class Database:
         retries: int = 3,
     ) -> None:
         if database_url:
-            if not database_url.startswith(
-                ("sqlite://", "postgresql://", "postgresql+")
-            ):
+            if not database_url.startswith(("sqlite://", "postgresql://", "postgresql+")):
                 raise ValueError("DATABASE_URL must be a SQLite or PostgreSQL SQLAlchemy URL")
             url = database_url
         else:
@@ -124,6 +124,13 @@ class Database:
             url = f"sqlite:///{path.as_posix()}"
         self.engine = create_engine(url, future=True, pool_pre_ping=True)
         self.retries = retries
+        self._latency_samples: dict[str, deque[float]] = {
+            "read": deque(maxlen=512),
+            "write": deque(maxlen=512),
+            "commit": deque(maxlen=512),
+        }
+        self._busy_errors = 0
+        self._retry_events = 0
         self.metadata = MetaData()
         self.version = Table(
             "schema_version",
@@ -153,7 +160,12 @@ class Database:
                 Column("updated_at", DateTime(timezone=True), nullable=False),
                 UniqueConstraint("external_id", name=f"uq_{name}_external_id"),
             )
-            Index(f"ix_{name}_provider_market_time", table.c.provider, table.c.market, table.c.timestamp)
+            Index(
+                f"ix_{name}_provider_market_time",
+                table.c.provider,
+                table.c.market,
+                table.c.timestamp,
+            )
             Index(f"ix_{name}_available_at", table.c.available_at)
             Index(f"ix_{name}_status_updated", table.c.status, table.c.updated_at)
             self.tables[name] = table
@@ -188,9 +200,7 @@ class Database:
                     insert(self.version).values(
                         version=SCHEMA_VERSION,
                         applied_at=utc_now(),
-                        description=(
-                            "provider capabilities, watermarks and data-service schemas"
-                        ),
+                        description=("provider capabilities, watermarks and data-service schemas"),
                     )
                 )
         return SCHEMA_VERSION
@@ -251,6 +261,7 @@ class Database:
         *,
         connection: Connection | None = None,
     ) -> int:
+        operation_started = time.perf_counter()
         if table_name not in self.tables:
             raise ValueError(f"unknown table: {table_name}")
         rows = [self._row(table_name, dict(record)) for record in records]
@@ -277,8 +288,7 @@ class Database:
                     previous = existing.get(str(row["external_id"]))
                     previous_payload = (
                         dict(previous.payload)
-                        if previous is not None
-                        and isinstance(previous.payload, dict)
+                        if previous is not None and isinstance(previous.payload, dict)
                         else {}
                     )
                     first_evaluated_at = (
@@ -286,8 +296,7 @@ class Database:
                         or previous_payload.get("evaluated_at")
                         or (
                             previous.created_at.isoformat()
-                            if previous is not None
-                            and previous.created_at is not None
+                            if previous is not None and previous.created_at is not None
                             else None
                         )
                         or payload.get("evaluated_at")
@@ -318,9 +327,7 @@ class Database:
             else:
                 for row in selected_rows:
                     existing = selected.scalar(
-                        select(table.c.id).where(
-                            table.c.external_id == row["external_id"]
-                        )
+                        select(table.c.id).where(table.c.external_id == row["external_id"])
                     )
                     if existing:
                         selected.execute(
@@ -349,23 +356,33 @@ class Database:
                 )
 
         if connection is not None:
+            commit_started = time.perf_counter()
             execute(connection, rows)
+            elapsed = (time.perf_counter() - commit_started) * 1_000
+            self._latency_samples["commit"].append(elapsed)
+            self._latency_samples["write"].append((time.perf_counter() - operation_started) * 1_000)
             return len(rows)
-        transaction_batch_size = (
-            200 if self.engine.dialect.name == "sqlite" else 2_000
-        )
+        transaction_batch_size = 200 if self.engine.dialect.name == "sqlite" else 2_000
         maximum_retry = 0
         for offset in range(0, len(rows), transaction_batch_size):
             batch = rows[offset : offset + transaction_batch_size]
             for attempt in range(1, self.retries + 1):
                 try:
+                    commit_started = time.perf_counter()
                     with self.engine.begin() as selected:
                         execute(selected, batch)
+                    self._latency_samples["commit"].append(
+                        (time.perf_counter() - commit_started) * 1_000
+                    )
                     maximum_retry = max(maximum_retry, attempt - 1)
                     break
-                except OperationalError:
+                except OperationalError as exc:
+                    self._busy_errors += int(
+                        "busy" in str(exc).casefold() or "locked" in str(exc).casefold()
+                    )
                     if attempt == self.retries:
                         raise
+                    self._retry_events += 1
                     time.sleep(0.05 * 2 ** (attempt - 1))
             else:
                 raise AssertionError("database retry loop exhausted")
@@ -379,11 +396,10 @@ class Database:
                 "retry_number": maximum_retry,
             },
         )
+        self._latency_samples["write"].append((time.perf_counter() - operation_started) * 1_000)
         return len(rows)
 
-    def fetch_records(
-        self, table_name: str, *, limit: int | None = None
-    ) -> list[dict[str, Any]]:
+    def fetch_records(self, table_name: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         table = self.tables[table_name]
         statement = select(table).order_by(table.c.id)
         if limit:
@@ -419,10 +435,7 @@ class Database:
         table = self.tables[table_name]
         statement = select(table).order_by(table.c.id.desc()).limit(limit)
         with self.engine.connect() as connection:
-            return [
-                dict(row._mapping)
-                for row in connection.execute(statement)
-            ]
+            return [dict(row._mapping) for row in connection.execute(statement)]
 
     def latest_closed_candles(
         self,
@@ -467,9 +480,18 @@ class Database:
                 for name, table in self.tables.items()
             }
             journal_mode = None
+            wal_checkpoint = None
             if self.engine.dialect.name == "sqlite":
                 journal_mode = connection.scalar(text("PRAGMA journal_mode"))
+                checkpoint = connection.execute(text("PRAGMA wal_checkpoint(PASSIVE)")).first()
+                if checkpoint is not None:
+                    wal_checkpoint = {
+                        "busy": int(checkpoint[0]),
+                        "log_frames": int(checkpoint[1]),
+                        "checkpointed_frames": int(checkpoint[2]),
+                    }
         read_latency_ms = (time.perf_counter() - read_started) * 1_000
+        self._latency_samples["read"].append(read_latency_ms)
 
         write_started = time.perf_counter()
         probe = self._row(
@@ -486,21 +508,106 @@ class Database:
         with self.engine.connect() as connection:
             transaction = connection.begin()
             try:
-                connection.execute(
-                    insert(self.tables["provider_health"]).values(**probe)
-                )
+                connection.execute(insert(self.tables["provider_health"]).values(**probe))
             finally:
                 transaction.rollback()
         write_latency_ms = (time.perf_counter() - write_started) * 1_000
+        self._latency_samples["write"].append(write_latency_ms)
+
+        def percentiles(samples: Iterable[float]) -> dict[str, float | int | None]:
+            values = sorted(float(value) for value in samples)
+            if not values:
+                return {"samples": 0, "p50": None, "p95": None, "p99": None}
+
+            def selected(fraction: float) -> float:
+                position = min(
+                    len(values) - 1,
+                    max(0, int(math.ceil(fraction * len(values))) - 1),
+                )
+                return values[position]
+
+            return {
+                "samples": len(values),
+                "p50": selected(0.50),
+                "p95": selected(0.95),
+                "p99": selected(0.99),
+            }
+
         return {
             "status": "PASSED",
             "dialect": self.engine.dialect.name,
             "schema_version": version,
             "journal_mode": journal_mode,
+            "wal_checkpoint": wal_checkpoint,
+            "contention": {
+                "busy_errors": self._busy_errors,
+                "retry_events": self._retry_events,
+            },
+            "rolling_latency_ms": {
+                name: percentiles(samples) for name, samples in self._latency_samples.items()
+            },
             "table_counts": counts,
             "read_latency_ms": read_latency_ms,
             "write_latency_ms": write_latency_ms,
             "latency_ms": (time.perf_counter() - total_started) * 1_000,
+        }
+
+    def signal_identity_audit(self, *, apply: bool = False) -> dict[str, Any]:
+        """Report and explicitly label pre-v3 operational signal identities."""
+
+        table = self.tables["strategy_signals"]
+        rows = self.fetch_records("strategy_signals")
+        counts: dict[str, int] = {
+            "CANONICAL_V3": 0,
+            "LEGACY_NONCANONICAL": 0,
+        }
+        legacy_ids: list[int] = []
+        for row in rows:
+            payload = (
+                dict(row["payload"])
+                if isinstance(row.get("payload"), dict)
+                else {}
+            )
+            if int(payload.get("signal_identity_schema_version") or 0) >= 3:
+                counts["CANONICAL_V3"] += 1
+            else:
+                counts["LEGACY_NONCANONICAL"] += 1
+                legacy_ids.append(int(row["id"]))
+        annotated = 0
+        if apply and legacy_ids:
+            with self.engine.begin() as connection:
+                for row_id in legacy_ids:
+                    row = next(item for item in rows if int(item["id"]) == row_id)
+                    payload = dict(row["payload"])
+                    payload.update(
+                        {
+                            "legacy_signal_identity_schema_version": (
+                                payload.get("signal_identity_schema_version") or 2
+                            ),
+                            "migration_status": (
+                                "LEGACY_ID_RETAINED_NONCANONICAL_NO_REPLAY"
+                            ),
+                        }
+                    )
+                    connection.execute(
+                        table.update()
+                        .where(table.c.id == row_id)
+                        .values(payload=payload, updated_at=utc_now())
+                    )
+                    annotated += 1
+        return {
+            "status": "APPLIED" if apply else "AUDIT_ONLY",
+            "identity_schema_version": 3,
+            "records": len(rows),
+            "counts": counts,
+            "legacy_records_annotated": annotated,
+            "new_writes_canonical": True,
+            "legacy_rekey_performed": False,
+            "legacy_rekey_reason": (
+                "Historical feature/context/decision hashes are unavailable; "
+                "fabricating canonical IDs would be non-auditable."
+            ),
+            "generated_at": utc_now().isoformat(),
         }
 
     def export(
@@ -522,18 +629,14 @@ class Database:
             raise ValueError("database export format must be CSV or Parquet")
         return target
 
-    def apply_retention(
-        self, table_name: str, *, older_than: timedelta
-    ) -> int:
+    def apply_retention(self, table_name: str, *, older_than: timedelta) -> int:
         if older_than <= timedelta(0):
             raise ValueError("retention age must be positive")
         table = self.tables[table_name]
         cutoff = utc_now() - older_than
         with self.engine.begin() as connection:
             result = connection.execute(
-                delete(table).where(
-                    func.coalesce(table.c.timestamp, table.c.created_at) < cutoff
-                )
+                delete(table).where(func.coalesce(table.c.timestamp, table.c.created_at) < cutoff)
             )
             return int(result.rowcount or 0)
 

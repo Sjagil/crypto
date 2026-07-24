@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from core.contracts import IntelligenceRecord
-from data.market_data import OHLCV_COLUMNS, validate_ohlcv
+from data.market_data import OHLCV_COLUMNS, timeframe_delta, validate_ohlcv
 from utils.common import atomic_write_json, stable_hash
 
 EPSILON = 1e-12
@@ -134,15 +134,11 @@ def true_range(data: pd.DataFrame) -> pd.Series:
     ).max(axis=1)
 
 
-def atr(
-    data: pd.DataFrame, period: int | float | Decimal = 14
-) -> pd.Series:
+def atr(data: pd.DataFrame, period: int | float | Decimal = 14) -> pd.Series:
     return wilder(true_range(data), period)
 
 
-def rsi(
-    series: pd.Series, period: int | float | Decimal = 14
-) -> pd.Series:
+def rsi(series: pd.Series, period: int | float | Decimal = 14) -> pd.Series:
     delta = series.diff()
     gains = delta.clip(lower=0)
     losses = -delta.clip(upper=0)
@@ -185,11 +181,7 @@ def parameterized_feature_series(
         ).values.tobytes()
     ).hexdigest()
     canonical = {
-        key: (
-            format(value, "f")
-            if isinstance(value, Decimal)
-            else str(value)
-        )
+        key: (format(value, "f") if isinstance(value, Decimal) else str(value))
         for key, value in sorted(parameters.items())
     }
     key_material = {
@@ -228,10 +220,14 @@ def parameterized_feature_series(
         period = int(parameters["period"])
         multiplier = float(parameters["multiplier"])
         center = sma(frame["close"], period)
-        deviation = frame["close"].rolling(
-            period,
-            min_periods=period,
-        ).std(ddof=0)
+        deviation = (
+            frame["close"]
+            .rolling(
+                period,
+                min_periods=period,
+            )
+            .std(ddof=0)
+        )
         result = center - multiplier * deviation
     else:
         raise KeyError(f"unsupported parameterized feature: {feature_id}")
@@ -279,6 +275,7 @@ def return_features(
     benchmark: pd.DataFrame | None = None,
     *,
     maximum_benchmark_age: timedelta = timedelta(days=3),
+    target_timeframe: str | None = None,
 ) -> pd.DataFrame:
     output = pd.DataFrame(index=data.index)
     close = data["close"]
@@ -293,14 +290,15 @@ def return_features(
     for period in (7, 20, 30):
         output[f"rolling_return_{period}"] = close.pct_change(period)
     realized = output["log_return"].rolling(20, min_periods=20).std(ddof=0)
-    output["volatility_adjusted_return_20"] = (
-        output["percentage_return"] / realized.replace(0, np.nan)
+    output["volatility_adjusted_return_20"] = output["percentage_return"] / realized.replace(
+        0, np.nan
     )
     if benchmark is not None:
         benchmark_close, _ = _causal_benchmark_close(
             data.index,
             benchmark,
             maximum_age=maximum_benchmark_age,
+            target_timeframe=target_timeframe,
         )
         benchmark_return = benchmark_close.pct_change()
         output["benchmark_relative_return"] = output["percentage_return"] - benchmark_return
@@ -353,13 +351,21 @@ def trend_features(data: pd.DataFrame) -> pd.DataFrame:
         position = int(np.argmax(values) if high else np.argmin(values))
         return 100.0 * position / max(1, len(values) - 1)
 
-    output["aroon_up_25"] = data["high"].rolling(25).apply(
-        lambda values: aroon_position(values, True),
-        raw=True,
+    output["aroon_up_25"] = (
+        data["high"]
+        .rolling(25)
+        .apply(
+            lambda values: aroon_position(values, True),
+            raw=True,
+        )
     )
-    output["aroon_down_25"] = data["low"].rolling(25).apply(
-        lambda values: aroon_position(values, False),
-        raw=True,
+    output["aroon_down_25"] = (
+        data["low"]
+        .rolling(25)
+        .apply(
+            lambda values: aroon_position(values, False),
+            raw=True,
+        )
     )
     total_range = true_range(data).rolling(period).sum()
     price_range = data["high"].rolling(period).max() - data["low"].rolling(period).min()
@@ -390,17 +396,27 @@ def supertrend(
         previous = index - 1
         if np.isnan(average_range.iloc[index]):
             continue
-        if np.isnan(final_upper.iloc[previous]) or upper.iloc[index] < final_upper.iloc[previous] or data["close"].iloc[previous] > final_upper.iloc[previous]:
+        if (
+            np.isnan(final_upper.iloc[previous])
+            or upper.iloc[index] < final_upper.iloc[previous]
+            or data["close"].iloc[previous] > final_upper.iloc[previous]
+        ):
             final_upper.iloc[index] = upper.iloc[index]
         else:
             final_upper.iloc[index] = final_upper.iloc[previous]
-        if np.isnan(final_lower.iloc[previous]) or lower.iloc[index] > final_lower.iloc[previous] or data["close"].iloc[previous] < final_lower.iloc[previous]:
+        if (
+            np.isnan(final_lower.iloc[previous])
+            or lower.iloc[index] > final_lower.iloc[previous]
+            or data["close"].iloc[previous] < final_lower.iloc[previous]
+        ):
             final_lower.iloc[index] = lower.iloc[index]
         else:
             final_lower.iloc[index] = final_lower.iloc[previous]
         if direction.iloc[previous] < 0 and data["close"].iloc[index] > final_upper.iloc[previous]:
             direction.iloc[index] = 1
-        elif direction.iloc[previous] > 0 and data["close"].iloc[index] < final_lower.iloc[previous]:
+        elif (
+            direction.iloc[previous] > 0 and data["close"].iloc[index] < final_lower.iloc[previous]
+        ):
             direction.iloc[index] = -1
         else:
             direction.iloc[index] = direction.iloc[previous]
@@ -427,9 +443,9 @@ def momentum_features(data: pd.DataFrame) -> pd.DataFrame:
     output["rsi_14"] = rsi(close, 14)
     rsi_min = output["rsi_14"].rolling(14).min()
     rsi_max = output["rsi_14"].rolling(14).max()
-    output["stoch_rsi_14"] = 100.0 * (output["rsi_14"] - rsi_min) / (
-        rsi_max - rsi_min
-    ).replace(0, np.nan)
+    output["stoch_rsi_14"] = (
+        100.0 * (output["rsi_14"] - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan)
+    )
     fast, slow = ema(close, 12), ema(close, 26)
     output["macd"] = fast - slow
     output["macd_signal"] = ema(output["macd"], 9)
@@ -445,9 +461,7 @@ def momentum_features(data: pd.DataFrame) -> pd.DataFrame:
     output["cci_20"] = (typical - typical_mean) / (0.015 * mean_deviation).replace(0, np.nan)
     highest = data["high"].rolling(14).max()
     lowest = data["low"].rolling(14).min()
-    output["williams_r_14"] = -100.0 * (highest - close) / (
-        highest - lowest
-    ).replace(0, np.nan)
+    output["williams_r_14"] = -100.0 * (highest - close) / (highest - lowest).replace(0, np.nan)
     raw_flow = typical * data["volume"]
     direction = np.sign(typical.diff()).fillna(0)
     positive_flow = raw_flow.where(direction > 0, 0.0).rolling(14).sum()
@@ -478,13 +492,20 @@ def volatility_features(data: pd.DataFrame) -> pd.DataFrame:
     output["bollinger_middle"] = middle
     output["bollinger_upper"] = middle + 2.0 * standard
     output["bollinger_lower"] = middle - 2.0 * standard
-    output["bollinger_width"] = (
-        output["bollinger_upper"] - output["bollinger_lower"]
-    ) / middle
+    output["bollinger_width"] = (output["bollinger_upper"] - output["bollinger_lower"]) / middle
     keltner_middle = ema(data["close"], 20)
     output["keltner_middle"] = keltner_middle
     output["keltner_upper"] = keltner_middle + 2.0 * atr(data, 10)
     output["keltner_lower"] = keltner_middle - 2.0 * atr(data, 10)
+    squeeze = (output["bollinger_upper"] < output["keltner_upper"]) & (
+        output["bollinger_lower"] > output["keltner_lower"]
+    )
+    output["bollinger_keltner_squeeze_state"] = squeeze
+    # The breakout candle itself is not allowed to manufacture its own
+    # contraction regime: only preceding, already closed candles count.
+    output["prior_squeeze_within_12"] = (
+        squeeze.shift(1, fill_value=False).rolling(12, min_periods=1).max().astype(bool)
+    )
 
     log_hl = np.log(data["high"] / data["low"])
     log_co = np.log(data["close"] / data["open"])
@@ -494,9 +515,7 @@ def volatility_features(data: pd.DataFrame) -> pd.DataFrame:
         log_hl.pow(2).rolling(20).mean() / (4.0 * np.log(2.0))
     )
     garman_klass = 0.5 * log_hl.pow(2) - (2.0 * np.log(2.0) - 1.0) * log_co.pow(2)
-    output["garman_klass_volatility_20"] = np.sqrt(
-        garman_klass.clip(lower=0).rolling(20).mean()
-    )
+    output["garman_klass_volatility_20"] = np.sqrt(garman_klass.clip(lower=0).rolling(20).mean())
     rogers_satchell = log_ho * np.log(data["high"] / data["close"]) + log_lo * np.log(
         data["low"] / data["close"]
     )
@@ -546,21 +565,17 @@ def volume_features(data: pd.DataFrame) -> pd.DataFrame:
     output["volume_average_20"] = volume_mean
     output["volume_zscore_20"] = rolling_zscore(data["volume"], 20)
     output["relative_volume_20"] = data["volume"] / volume_mean.replace(0, np.nan)
-    output["obv"] = (
-        np.sign(data["close"].diff()).fillna(0.0) * data["volume"]
-    ).cumsum()
-    money_flow_multiplier = (
-        (data["close"] - data["low"]) - (data["high"] - data["close"])
-    ) / (data["high"] - data["low"]).replace(0, np.nan)
-    output["chaikin_money_flow_20"] = (
-        (money_flow_multiplier * data["volume"]).rolling(20).sum()
-        / data["volume"].rolling(20).sum().replace(0, np.nan)
-    )
+    output["obv"] = (np.sign(data["close"].diff()).fillna(0.0) * data["volume"]).cumsum()
+    money_flow_multiplier = ((data["close"] - data["low"]) - (data["high"] - data["close"])) / (
+        data["high"] - data["low"]
+    ).replace(0, np.nan)
+    output["chaikin_money_flow_20"] = (money_flow_multiplier * data["volume"]).rolling(
+        20
+    ).sum() / data["volume"].rolling(20).sum().replace(0, np.nan)
     typical = (data["high"] + data["low"] + data["close"]) / 3.0
-    output["vwap_20"] = (
-        (typical * data["volume"]).rolling(20).sum()
-        / data["volume"].rolling(20).sum().replace(0, np.nan)
-    )
+    output["vwap_20"] = (typical * data["volume"]).rolling(20).sum() / data["volume"].rolling(
+        20
+    ).sum().replace(0, np.nan)
     output["anchored_vwap"] = anchored_vwap(data)
     return output
 
@@ -596,21 +611,15 @@ def candle_features(data: pd.DataFrame) -> pd.DataFrame:
     output["lower_wick_fraction"] = lower / candle_range
     output["doji"] = output["candle_body_fraction"] <= 0.10
     output["spinning_top"] = (
-        output["candle_body_fraction"].between(0.10, 0.30)
-        & (upper >= body)
-        & (lower >= body)
+        output["candle_body_fraction"].between(0.10, 0.30) & (upper >= body) & (lower >= body)
     )
-    output["high_wave"] = (
-        output["candle_body_fraction"] <= 0.30
-    ) & ((upper + lower) >= 0.70 * candle_range)
+    output["high_wave"] = (output["candle_body_fraction"] <= 0.30) & (
+        (upper + lower) >= 0.70 * candle_range
+    )
     output["hammer"] = (lower >= 2.0 * body) & (upper <= body) & (body > 0)
-    output["inverted_hammer"] = (
-        bullish & (upper >= 2.0 * body) & (lower <= body) & (body > 0)
-    )
+    output["inverted_hammer"] = bullish & (upper >= 2.0 * body) & (lower <= body) & (body > 0)
     output["shooting_star"] = (upper >= 2.0 * body) & (lower <= body) & (body > 0)
-    output["hanging_man"] = (
-        bearish & (lower >= 2.0 * body) & (upper <= body) & (body > 0)
-    )
+    output["hanging_man"] = bearish & (lower >= 2.0 * body) & (upper <= body) & (body > 0)
     output["bullish_engulfing"] = (
         bullish
         & bearish.shift(1, fill_value=False)
@@ -635,13 +644,11 @@ def candle_features(data: pd.DataFrame) -> pd.DataFrame:
         & (data["open"] <= data["close"].shift(1))
         & (data["close"] >= data["open"].shift(1))
     )
-    output["inside_bar"] = (
-        (data["high"] < data["high"].shift(1))
-        & (data["low"] > data["low"].shift(1))
+    output["inside_bar"] = (data["high"] < data["high"].shift(1)) & (
+        data["low"] > data["low"].shift(1)
     )
-    output["outside_bar"] = (
-        (data["high"] > data["high"].shift(1))
-        & (data["low"] < data["low"].shift(1))
+    output["outside_bar"] = (data["high"] > data["high"].shift(1)) & (
+        data["low"] < data["low"].shift(1)
     )
     output["morning_star_proxy"] = (
         bearish.shift(2, fill_value=False)
@@ -671,12 +678,8 @@ def candle_features(data: pd.DataFrame) -> pd.DataFrame:
     )
     output["bullish_pin_bar"] = bullish & (lower >= 2.5 * body) & (upper <= body)
     output["bearish_pin_bar"] = bearish & (upper >= 2.5 * body) & (lower <= body)
-    output["bullish_marubozu"] = bullish & (
-        output["candle_body_fraction"] >= 0.90
-    )
-    output["bearish_marubozu"] = bearish & (
-        output["candle_body_fraction"] >= 0.90
-    )
+    output["bullish_marubozu"] = bullish & (output["candle_body_fraction"] >= 0.90)
+    output["bearish_marubozu"] = bearish & (output["candle_body_fraction"] >= 0.90)
     output["rising_three_methods_proxy"] = (
         bullish
         & bullish.shift(4, fill_value=False)
@@ -706,14 +709,26 @@ def confirmed_fractals(
         raise ValueError("fractal left and right lags must be positive")
     output = pd.DataFrame(index=data.index)
     window = left + right + 1
-    raw_high = data["high"].rolling(window, center=True).apply(
-        lambda values: float(np.argmax(values) == left),
-        raw=True,
-    ).fillna(0).astype(bool)
-    raw_low = data["low"].rolling(window, center=True).apply(
-        lambda values: float(np.argmin(values) == left),
-        raw=True,
-    ).fillna(0).astype(bool)
+    raw_high = (
+        data["high"]
+        .rolling(window, center=True)
+        .apply(
+            lambda values: float(np.argmax(values) == left),
+            raw=True,
+        )
+        .fillna(0)
+        .astype(bool)
+    )
+    raw_low = (
+        data["low"]
+        .rolling(window, center=True)
+        .apply(
+            lambda values: float(np.argmin(values) == left),
+            raw=True,
+        )
+        .fillna(0)
+        .astype(bool)
+    )
     # A pivot at t becomes knowable only at t + right.
     confirmed_high = raw_high.shift(right, fill_value=False)
     confirmed_low = raw_low.shift(right, fill_value=False)
@@ -791,20 +806,16 @@ def market_structure_features(
         & (data["open"] <= previous_high)
     )
     average_range = atr(data, 14)
-    output["distance_to_last_fractal_high_atr"] = (
-        last_high - close
-    ) / average_range.replace(0, np.nan)
-    output["distance_to_last_fractal_low_atr"] = (
-        close - last_low
-    ) / average_range.replace(0, np.nan)
+    output["distance_to_last_fractal_high_atr"] = (last_high - close) / average_range.replace(
+        0, np.nan
+    )
+    output["distance_to_last_fractal_low_atr"] = (close - last_low) / average_range.replace(
+        0, np.nan
+    )
     output["distance_to_last_fractal_high_price"] = last_high - close
     output["distance_to_last_fractal_low_price"] = close - last_low
-    output["distance_to_last_fractal_high_percent"] = (
-        last_high / close.replace(0, np.nan) - 1.0
-    )
-    output["distance_to_last_fractal_low_percent"] = (
-        close / last_low.replace(0, np.nan) - 1.0
-    )
+    output["distance_to_last_fractal_high_percent"] = last_high / close.replace(0, np.nan) - 1.0
+    output["distance_to_last_fractal_low_percent"] = close / last_low.replace(0, np.nan) - 1.0
 
     def bars_since(events: pd.Series) -> pd.Series:
         positions = np.arange(len(events), dtype=float)
@@ -816,9 +827,9 @@ def market_structure_features(
 
     output["bars_since_fractal_high"] = bars_since(confirmed_high)
     output["bars_since_fractal_low"] = bars_since(confirmed_low)
-    output["fractal_density_50"] = (
-        confirmed_high.astype(int) + confirmed_low.astype(int)
-    ).rolling(50, min_periods=1).sum() / 50.0
+    output["fractal_density_50"] = (confirmed_high.astype(int) + confirmed_low.astype(int)).rolling(
+        50, min_periods=1
+    ).sum() / 50.0
     opposite = last_low.where(confirmed_high, last_high.where(confirmed_low))
     event_level = event_high.where(confirmed_high, event_low.where(confirmed_low))
     output["fractal_amplitude_atr"] = (
@@ -836,12 +847,8 @@ def market_structure_features(
                 output.loc[timestamp, name] = abs(float(value) - previous) <= tolerance
             previous = float(value)
     body = (data["close"] - data["open"]).abs()
-    output["bullish_displacement"] = (data["close"] > data["open"]) & (
-        body > 1.25 * average_range
-    )
-    output["bearish_displacement"] = (data["close"] < data["open"]) & (
-        body > 1.25 * average_range
-    )
+    output["bullish_displacement"] = (data["close"] > data["open"]) & (body > 1.25 * average_range)
+    output["bearish_displacement"] = (data["close"] < data["open"]) & (body > 1.25 * average_range)
     output["bullish_fvg"] = data["low"] > data["high"].shift(2)
     output["bearish_fvg"] = data["high"] < data["low"].shift(2)
     output["bullish_fvg_lower"] = data["high"].shift(2).where(output["bullish_fvg"])
@@ -860,32 +867,34 @@ def market_structure_features(
     )
     range_high = data["high"].rolling(50).max()
     range_low = data["low"].rolling(50).min()
-    output["range_position_50"] = (close - range_low) / (
-        range_high - range_low
-    ).replace(0, np.nan)
+    output["range_position_50"] = (close - range_low) / (range_high - range_low).replace(0, np.nan)
     output["discount_zone"] = output["range_position_50"] < 0.5
     output["premium_zone"] = output["range_position_50"] > 0.5
-    output["fractal_range_position"] = (
-        (close - last_low) / (last_high - last_low).replace(0, np.nan)
+    output["fractal_range_position"] = (close - last_low) / (last_high - last_low).replace(
+        0, np.nan
     )
     output["fractal_trend_score"] = (
-        output["higher_high"].astype(int)
-        + output["higher_low"].astype(int)
-        - output["lower_high"].astype(int)
-        - output["lower_low"].astype(int)
-    ).rolling(20, min_periods=1).sum()
+        (
+            output["higher_high"].astype(int)
+            + output["higher_low"].astype(int)
+            - output["lower_high"].astype(int)
+            - output["lower_low"].astype(int)
+        )
+        .rolling(20, min_periods=1)
+        .sum()
+    )
     output["fractal_high_breakout"] = output["bullish_bos"]
     output["fractal_low_breakdown"] = output["bearish_bos"]
     output["bullish_fractal_sweep"] = output["bullish_liquidity_sweep"]
     output["bearish_fractal_sweep"] = output["bearish_liquidity_sweep"]
     relative_volume = data["volume"] / data["volume"].rolling(20).mean().replace(0, np.nan)
-    output["fractal_breakout_volume_confirmation"] = (
-        output["fractal_high_breakout"] & (relative_volume > 1.0)
+    output["fractal_breakout_volume_confirmation"] = output["fractal_high_breakout"] & (
+        relative_volume > 1.0
     )
     if "open_interest" in data:
         oi_change = pd.to_numeric(data["open_interest"], errors="coerce").pct_change()
-        output["fractal_breakout_open_interest_confirmation"] = (
-            output["fractal_high_breakout"] & (oi_change > 0)
+        output["fractal_breakout_open_interest_confirmation"] = output["fractal_high_breakout"] & (
+            oi_change > 0
         )
     else:
         output["fractal_breakout_open_interest_confirmation"] = np.nan
@@ -899,11 +908,20 @@ def market_structure_features(
 def multi_timeframe_fractal_alignment(
     base_index: pd.DatetimeIndex,
     higher_timeframes: Mapping[str, pd.DataFrame] | None,
+    *,
+    base_timeframe: str | None = None,
 ) -> pd.DataFrame:
-    """Backward-only alignment of confirmed higher-timeframe fractal state."""
+    """Align only higher-timeframe candles available by the base-candle close."""
 
     output = pd.DataFrame(index=base_index)
     states: list[pd.Series] = []
+    if base_timeframe:
+        base_delta = pd.Timedelta(timeframe_delta(base_timeframe))
+    elif len(base_index) > 1:
+        base_delta = pd.Timedelta(base_index.to_series().diff().dropna().median())
+    else:
+        base_delta = pd.Timedelta(0)
+    decision_index = base_index + base_delta
     for timeframe, source in sorted((higher_timeframes or {}).items()):
         source.attrs.setdefault("timeframe", timeframe)
         frame = validate_ohlcv(
@@ -915,17 +933,72 @@ def multi_timeframe_fractal_alignment(
         state = pd.Series(np.nan, index=frame.index, dtype=float)
         state.loc[fractals["confirmed_fractal_low"]] = 1.0
         state.loc[fractals["confirmed_fractal_high"]] = -1.0
-        aligned = state.ffill().reindex(base_index, method="ffill")
+        available_index = frame.index + pd.Timedelta(timeframe_delta(timeframe))
+        available_state = pd.Series(
+            state.to_numpy(),
+            index=available_index,
+            dtype=float,
+        ).ffill()
+        aligned = available_state.reindex(decision_index, method="ffill")
+        aligned.index = base_index
         output[f"fractal_alignment_{timeframe}"] = aligned
-        output[f"fractal_source_timestamp_{timeframe}"] = pd.Series(
+        source_timestamp = pd.Series(
             frame.index,
-            index=frame.index,
+            index=available_index,
             dtype="datetime64[ns, UTC]",
-        ).reindex(base_index, method="ffill")
+        ).reindex(decision_index, method="ffill")
+        source_timestamp.index = base_index
+        output[f"fractal_source_timestamp_{timeframe}"] = source_timestamp
         states.append(aligned)
     output["multi_timeframe_fractal_alignment"] = (
         pd.concat(states, axis=1).mean(axis=1) if states else np.nan
     )
+    return output
+
+
+def higher_timeframe_regime_features(
+    base_index: pd.DatetimeIndex,
+    higher_timeframes: Mapping[str, pd.DataFrame] | None,
+    *,
+    base_timeframe: str | None = None,
+) -> pd.DataFrame:
+    """Causally expose completed 4h/1d trend and regime state."""
+
+    output = pd.DataFrame(index=base_index)
+    if base_timeframe:
+        base_delta = pd.Timedelta(timeframe_delta(base_timeframe))
+    elif len(base_index) > 1:
+        base_delta = pd.Timedelta(base_index.to_series().diff().dropna().median())
+    else:
+        base_delta = pd.Timedelta(0)
+    decision_index = base_index + base_delta
+    for timeframe, source in sorted((higher_timeframes or {}).items()):
+        frame = validate_ohlcv(
+            source,
+            timeframe=timeframe,
+            closed_candles_only=True,
+        )
+        trend = trend_features(frame)
+        regime = (
+            (frame["close"] > trend["ema_200"])
+            & (trend["ema_50"] > trend["ema_200"])
+            & (trend["ema_50_slope"] > 0)
+            & (trend["adx_14"] >= 20)
+        )
+        available_index = frame.index + pd.Timedelta(timeframe_delta(timeframe))
+        aligned = pd.Series(
+            regime.to_numpy(dtype=bool),
+            index=available_index,
+        ).reindex(decision_index, method="ffill")
+        aligned.index = base_index
+        output[f"htf_{timeframe}_regime_bullish"] = aligned.fillna(False)
+        source_timestamp = pd.Series(
+            frame.index,
+            index=available_index,
+            dtype="datetime64[ns, UTC]",
+        ).reindex(decision_index, method="ffill")
+        source_timestamp.index = base_index
+        output[f"htf_{timeframe}_source_timestamp"] = source_timestamp
     return output
 
 
@@ -1010,9 +1083,7 @@ def fractal_dimension_features(
     if window < 32:
         raise ValueError("fractal-dimension window must be at least 32")
     output = pd.DataFrame(index=close.index)
-    output["katz_fractal_dimension"] = _rolling_estimator(
-        close, window, katz_fractal_dimension
-    )
+    output["katz_fractal_dimension"] = _rolling_estimator(close, window, katz_fractal_dimension)
     output["petrosian_fractal_dimension"] = _rolling_estimator(
         close, window, petrosian_fractal_dimension
     )
@@ -1055,16 +1126,15 @@ def fractal_research_labels(
     future_high = data["high"].shift(-1).rolling(horizon).max().shift(-(horizon - 1))
     future_low = data["low"].shift(-1).rolling(horizon).min().shift(-(horizon - 1))
     labels = pd.DataFrame(index=data.index)
-    labels["post_fractal_mfe"] = (
-        future_high / data["close"] - 1.0
-    ).where(fractals["confirmed_fractal_low"])
-    labels["post_fractal_mae"] = (
-        future_low / data["close"] - 1.0
-    ).where(fractals["confirmed_fractal_low"])
-    labels["fractal_efficiency"] = (
-        labels["post_fractal_mfe"]
-        / labels["post_fractal_mae"].abs().replace(0, np.nan)
+    labels["post_fractal_mfe"] = (future_high / data["close"] - 1.0).where(
+        fractals["confirmed_fractal_low"]
     )
+    labels["post_fractal_mae"] = (future_low / data["close"] - 1.0).where(
+        fractals["confirmed_fractal_low"]
+    )
+    labels["fractal_efficiency"] = labels["post_fractal_mfe"] / labels[
+        "post_fractal_mae"
+    ].abs().replace(0, np.nan)
     labels.attrs["research_labels_only"] = True
     labels.attrs["available_after_bars"] = horizon
     return labels
@@ -1075,6 +1145,7 @@ def _causal_benchmark_close(
     benchmark: pd.DataFrame,
     *,
     maximum_age: timedelta,
+    target_timeframe: str | None = None,
 ) -> tuple[pd.Series, pd.Series]:
     benchmark_timeframe = benchmark.attrs.get("timeframe")
     benchmark_frame = validate_ohlcv(
@@ -1082,12 +1153,27 @@ def _causal_benchmark_close(
         timeframe=str(benchmark_timeframe) if benchmark_timeframe else None,
         closed_candles_only=bool(benchmark_timeframe),
     )
-    close = benchmark_frame["close"].reindex(index, method="ffill")
+    source_delta = (
+        pd.Timedelta(timeframe_delta(str(benchmark_timeframe)))
+        if benchmark_timeframe
+        else pd.Timedelta(0)
+    )
+    target_delta = (
+        pd.Timedelta(timeframe_delta(target_timeframe)) if target_timeframe else pd.Timedelta(0)
+    )
+    decision_index = index + target_delta
+    available_index = benchmark_frame.index + source_delta
+    close = pd.Series(
+        benchmark_frame["close"].to_numpy(dtype=float),
+        index=available_index,
+    ).reindex(decision_index, method="ffill")
+    close.index = index
     source_timestamp = pd.Series(
         benchmark_frame.index,
-        index=benchmark_frame.index,
+        index=available_index,
         dtype="datetime64[ns, UTC]",
-    ).reindex(index, method="ffill")
+    ).reindex(decision_index, method="ffill")
+    source_timestamp.index = index
     age = index.to_series(index=index) - source_timestamp
     stale = age > pd.Timedelta(maximum_age)
     return close.mask(stale), source_timestamp.mask(stale)
@@ -1098,6 +1184,7 @@ def relative_strength_features(
     benchmark: pd.DataFrame | None,
     *,
     maximum_benchmark_age: timedelta = timedelta(days=3),
+    target_timeframe: str | None = None,
 ) -> pd.DataFrame:
     output = pd.DataFrame(index=data.index)
     if benchmark is None:
@@ -1108,10 +1195,14 @@ def relative_strength_features(
         data.index,
         benchmark,
         maximum_age=maximum_benchmark_age,
+        target_timeframe=target_timeframe,
     )
     ratio = data["close"] / benchmark_close
     output["btc_relative_strength"] = ratio
     output["btc_relative_momentum_20"] = ratio.pct_change(20)
+    output["btc_relative_momentum_persistence_5"] = (
+        output["btc_relative_momentum_20"].rolling(5, min_periods=5).min()
+    )
     output["btc_benchmark_source_timestamp"] = source_timestamp
     return output
 
@@ -1167,7 +1258,12 @@ def intelligence_features(
         )
     events = pd.DataFrame(event_rows).sort_values("timestamp").set_index("timestamp")
     combined_index = index.union(events.index).sort_values()
-    numeric = events.drop(columns=["source"]).groupby(level=0).sum().reindex(combined_index, fill_value=0.0)
+    numeric = (
+        events.drop(columns=["source"])
+        .groupby(level=0)
+        .sum()
+        .reindex(combined_index, fill_value=0.0)
+    )
     rolled = numeric.rolling(window, closed="both").sum().reindex(index)
     output["intelligence_event_count"] = rolled["event_count"]
     output["intelligence_relevance_weighted_sentiment"] = (
@@ -1219,7 +1315,11 @@ class FeaturePipeline:
         )
         features = [
             frame.loc[:, OHLCV_COLUMNS],
-            return_features(frame, benchmark),
+            return_features(
+                frame,
+                benchmark,
+                target_timeframe=str(timeframe) if timeframe else None,
+            ),
             trend_features(frame),
             momentum_features(frame),
             volatility_features(frame),
@@ -1231,11 +1331,22 @@ class FeaturePipeline:
                 fractal_left=self.fractal_left,
                 fractal_right=self.fractal_right,
             ),
-            fractal_dimension_features(
-                frame["close"], window=self.fractal_dimension_window
+            fractal_dimension_features(frame["close"], window=self.fractal_dimension_window),
+            multi_timeframe_fractal_alignment(
+                frame.index,
+                higher_timeframes,
+                base_timeframe=str(timeframe) if timeframe else None,
             ),
-            multi_timeframe_fractal_alignment(frame.index, higher_timeframes),
-            relative_strength_features(frame, benchmark),
+            higher_timeframe_regime_features(
+                frame.index,
+                higher_timeframes,
+                base_timeframe=str(timeframe) if timeframe else None,
+            ),
+            relative_strength_features(
+                frame,
+                benchmark,
+                target_timeframe=str(timeframe) if timeframe else None,
+            ),
             intelligence_features(frame.index, intelligence, market=market),
         ]
         result = pd.concat(features, axis=1)
@@ -1252,9 +1363,7 @@ class FeaturePipeline:
             else:
                 from research.macro_context import MacroContextEngine
 
-                macro_features = MacroContextEngine().build(
-                    result.index, **dict(macro_context)
-                )
+                macro_features = MacroContextEngine().build(result.index, **dict(macro_context))
             duplicate = sorted(set(result.columns).intersection(macro_features.columns))
             if duplicate:
                 raise ValueError(f"macro feature names collide with market features: {duplicate}")
@@ -1278,9 +1387,7 @@ class FeaturePipeline:
         result.attrs["benchmark_staleness_integrity"] = (
             "PASSED" if benchmark is not None else "NOT_USED"
         )
-        result.attrs["higher_timeframe_integrity"] = (
-            "PASSED" if higher_timeframes else "NOT_USED"
-        )
+        result.attrs["higher_timeframe_integrity"] = "PASSED" if higher_timeframes else "NOT_USED"
         result.attrs["feature_knowability"] = {
             column: {
                 "available_at": "candle_close",
@@ -1296,12 +1403,12 @@ class FeaturePipeline:
                     "lookahead_safe": True,
                     "repaint": False,
                 }
-        result.attrs["feature_knowability"]["confirmed_fractal_high"][
-            "confirmation_lag_bars"
-        ] = self.fractal_right
-        result.attrs["feature_knowability"]["confirmed_fractal_low"][
-            "confirmation_lag_bars"
-        ] = self.fractal_right
+        result.attrs["feature_knowability"]["confirmed_fractal_high"]["confirmation_lag_bars"] = (
+            self.fractal_right
+        )
+        result.attrs["feature_knowability"]["confirmed_fractal_low"]["confirmation_lag_bars"] = (
+            self.fractal_right
+        )
         result.attrs["research_labels_excluded"] = (
             "post_fractal_mfe",
             "post_fractal_mae",

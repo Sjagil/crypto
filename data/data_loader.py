@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import socket
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -128,7 +129,7 @@ def _iso(value: Any) -> datetime:
 def _market(value: str, quote: str = "EUR") -> str:
     cleaned = value.upper().replace("/", "-").replace("_", "-")
     if "-" not in cleaned and cleaned.endswith(quote):
-        cleaned = f"{cleaned[:-len(quote)]}-{quote}"
+        cleaned = f"{cleaned[: -len(quote)]}-{quote}"
     aliases = {"XBT": "BTC", "XDG": "DOGE"}
     parts = cleaned.split("-")
     if len(parts) == 2:
@@ -251,11 +252,7 @@ class BitvavoAdapter(ProviderAdapter):
         end_ms = int(end.timestamp() * 1_000)
         cursor_end = end_ms // interval_ms * interval_ms
         while cursor_end >= start_ms:
-            query_end = (
-                cursor_end
-                if cursor_end > start_ms
-                else start_ms + interval_ms - 1
-            )
+            query_end = cursor_end if cursor_end > start_ms else start_ms + interval_ms - 1
             page = await self.request(
                 "GET",
                 f"{BITVAVO_REST}/{symbol}/candles",
@@ -294,8 +291,7 @@ class BitvavoAdapter(ProviderAdapter):
                 run_id=run_id,
                 raw=row,
                 timeframe=timeframe,
-                closed=_epoch(row[0]) + timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
-                <= observed,
+                closed=_epoch(row[0]) + timedelta(seconds=TIMEFRAME_SECONDS[timeframe]) <= observed,
                 values={
                     "open": row[1],
                     "high": row[2],
@@ -333,9 +329,7 @@ class BitvavoAdapter(ProviderAdapter):
     async def ticker(self, market: str, run_id: str) -> NormalizedDataRecord:
         observed = utc_now()
         symbol = self.symbol(market)
-        raw = await self.request(
-            "GET", f"{BITVAVO_REST}/ticker/24h", {"market": symbol}, None
-        )
+        raw = await self.request("GET", f"{BITVAVO_REST}/ticker/24h", {"market": symbol}, None)
         return self._record(
             source_symbol=symbol,
             market=market,
@@ -355,9 +349,7 @@ class BitvavoAdapter(ProviderAdapter):
     async def orderbook(self, market: str, depth: int, run_id: str) -> NormalizedDataRecord:
         observed = utc_now()
         symbol = self.symbol(market)
-        raw = await self.request(
-            "GET", f"{BITVAVO_REST}/{symbol}/book", {"depth": depth}, None
-        )
+        raw = await self.request("GET", f"{BITVAVO_REST}/{symbol}/book", {"depth": depth}, None)
         return self._record(
             source_symbol=symbol,
             market=market,
@@ -404,10 +396,7 @@ class KrakenAdapter(ProviderAdapter):
         errors = [str(item) for item in payload.get("error", []) if item]
         if errors:
             message = "; ".join(errors)
-            if any(
-                marker in message.casefold()
-                for marker in ("rate limit", "too many requests")
-            ):
+            if any(marker in message.casefold() for marker in ("rate limit", "too many requests")):
                 raise RuntimeError(f"BLOCKED_RATE_LIMIT:{message}")
             raise ValueError(f"KRAKEN_PROVIDER_ERROR:{message}")
         result = payload.get("result", {})
@@ -441,14 +430,9 @@ class KrakenAdapter(ProviderAdapter):
                     },
                     None,
                 )
-                errors = [
-                    str(item) for item in raw.get("error", []) if item
-                ]
+                errors = [str(item) for item in raw.get("error", []) if item]
                 rate_limited = any(
-                    any(
-                        marker in item.casefold()
-                        for marker in ("rate limit", "too many requests")
-                    )
+                    any(marker in item.casefold() for marker in ("rate limit", "too many requests"))
                     for item in errors
                 )
                 if not rate_limited or retry == 3:
@@ -666,9 +650,7 @@ class MexcAdapter(ProviderAdapter):
     async def ticker(self, market: str, run_id: str) -> NormalizedDataRecord:
         observed = utc_now()
         symbol = self.symbol(market)
-        raw = await self.request(
-            "GET", f"{MEXC_REST}/ticker/24hr", {"symbol": symbol}, None
-        )
+        raw = await self.request("GET", f"{MEXC_REST}/ticker/24hr", {"symbol": symbol}, None)
         return self._record(
             source_symbol=symbol,
             market=market,
@@ -1071,13 +1053,15 @@ class DataLoader:
         if self.database is not None:
             for stored in self.database.fetch_records("data_watermarks"):
                 payload = dict(stored.get("payload") or {})
-                provider = str(
-                    payload.get("provider") or stored.get("provider") or ""
-                )
+                provider = str(payload.get("provider") or stored.get("provider") or "")
                 earliest = payload.get("earliest_stored_timestamp")
-                if provider and earliest and (
-                    provider not in earliest_by_provider
-                    or str(earliest) < earliest_by_provider[provider]
+                if (
+                    provider
+                    and earliest
+                    and (
+                        provider not in earliest_by_provider
+                        or str(earliest) < earliest_by_provider[provider]
+                    )
                 ):
                     earliest_by_provider[provider] = str(earliest)
         rows: list[dict[str, Any]] = []
@@ -1090,10 +1074,20 @@ class DataLoader:
                     "CONFIGURED"
                     if configured
                     and templates[provider]["authentication_requirement"]
-                    not in {"NONE", "PUBLIC_ENDPOINTS_NO_AUTH", "NONE_FOR_PUBLIC_MARKET_DATA", "NONE_FOR_PUBLIC_ENDPOINTS"}
+                    not in {
+                        "NONE",
+                        "PUBLIC_ENDPOINTS_NO_AUTH",
+                        "NONE_FOR_PUBLIC_MARKET_DATA",
+                        "NONE_FOR_PUBLIC_ENDPOINTS",
+                    }
                     else "NOT_REQUIRED"
                     if templates[provider]["authentication_requirement"]
-                    in {"NONE", "PUBLIC_ENDPOINTS_NO_AUTH", "NONE_FOR_PUBLIC_MARKET_DATA", "NONE_FOR_PUBLIC_ENDPOINTS"}
+                    in {
+                        "NONE",
+                        "PUBLIC_ENDPOINTS_NO_AUTH",
+                        "NONE_FOR_PUBLIC_MARKET_DATA",
+                        "NONE_FOR_PUBLIC_ENDPOINTS",
+                    }
                     else "MISSING"
                 ),
                 "supported_markets": [],
@@ -1168,18 +1162,14 @@ class DataLoader:
                 {"X-CMC_PRO_API_KEY": key.get_secret_value()} if key else None,
             )
             markets = [
-                f"{row.get('symbol')}-EUR"
-                for row in raw.get("data", [])
-                if row.get("symbol")
+                f"{row.get('symbol')}-EUR" for row in raw.get("data", []) if row.get("symbol")
             ]
         elif provider == "eodhd":
             key = self.settings.providers.eodhd_api_key
             raw = await self.request(
                 "GET",
                 f"{EODHD_REST}/economic-events",
-                {"api_token": key.get_secret_value(), "fmt": "json", "limit": 1}
-                if key
-                else None,
+                {"api_token": key.get_secret_value(), "fmt": "json", "limit": 1} if key else None,
                 None,
             )
             markets = ["ECONOMIC_EVENTS"] if isinstance(raw, list) else []
@@ -1205,15 +1195,11 @@ class DataLoader:
                 "GET",
                 f"{SEC_REST}/submissions/CIK0000320193.json",
                 None,
-                {"User-Agent": agent, "Accept-Encoding": "gzip, deflate"}
-                if agent
-                else None,
+                {"User-Agent": agent, "Accept-Encoding": "gzip, deflate"} if agent else None,
             )
             markets = [str(raw.get("name") or "SEC_SUBMISSIONS")]
         elif provider == "alternative_me":
-            raw = await self.request(
-                "GET", f"{ALTERNATIVE_ME_REST}/fng/", {"limit": 1}, None
-            )
+            raw = await self.request("GET", f"{ALTERNATIVE_ME_REST}/fng/", {"limit": 1}, None)
             markets = ["CRYPTO_FEAR_GREED"] if raw.get("data") else []
         elif provider == "defillama":
             raw = await self.request("GET", f"{DEFILLAMA_REST}/protocols", None, None)
@@ -1385,15 +1371,15 @@ class DataLoader:
         if timeframe not in TIMEFRAME_SECONDS:
             raise ValueError("unsupported timeframe")
         if timeframe not in PROVIDER_NATIVE_TIMEFRAMES[name]:
-            raise ValueError(
-                f"{timeframe} is not native for {name}; use download_canonical_ohlcv"
-            )
+            raise ValueError(f"{timeframe} is not native for {name}; use download_canonical_ohlcv")
         run = run_id or str(uuid.uuid4())
         cache = self._cache_path(name, normalize_market(market), timeframe, "ohlcv")
         cached: list[NormalizedDataRecord] = []
         requested_start = start
         requested_end = end
-        if resume and (cache.with_suffix(".parquet").is_file() or cache.with_suffix(".csv").is_file()):
+        if resume and (
+            cache.with_suffix(".parquet").is_file() or cache.with_suffix(".csv").is_file()
+        ):
             frame = self.load_local_dataset(cache)
             cached = self._records_from_frame(frame)
         interval = timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
@@ -1428,21 +1414,16 @@ class DataLoader:
             seconds=self.settings.market_data.candle_close_grace_for(timeframe)
         )
         new = [
-            record.model_copy(
-                update={"closed": record.timestamp + interval <= close_cutoff}
-            )
+            record.model_copy(update={"closed": record.timestamp + interval <= close_cutoff})
             for record in new
         ]
         result = [
-            record.model_copy(
-                update={"closed": record.timestamp + interval <= close_cutoff}
-            )
+            record.model_copy(update={"closed": record.timestamp + interval <= close_cutoff})
             for record in self._deduplicate([*cached, *new])
         ]
         if persist:
             cache_exists = (
-                cache.with_suffix(".parquet").is_file()
-                or cache.with_suffix(".csv").is_file()
+                cache.with_suffix(".parquet").is_file() or cache.with_suffix(".csv").is_file()
             )
             if new or not cache_exists:
                 self._persist_dataset(cache, result)
@@ -1479,17 +1460,11 @@ class DataLoader:
                 "inserted_rows": len(new),
                 "updated_rows": max(0, len(result) - len(new)),
                 "duplicate_rows": max(0, len(cached) + len(new) - len(result)),
-                "earliest_timestamp": (
-                    result[0].timestamp.isoformat() if result else None
-                ),
-                "latest_timestamp": (
-                    result[-1].timestamp.isoformat() if result else None
-                ),
+                "earliest_timestamp": (result[0].timestamp.isoformat() if result else None),
+                "latest_timestamp": (result[-1].timestamp.isoformat() if result else None),
                 "status": "READY" if result else "PARTIAL",
                 "reason_code": (
-                    "CLOSED_CANDLE_BATCH_PERSISTED"
-                    if result
-                    else "EMPTY_PROVIDER_RESPONSE"
+                    "CLOSED_CANDLE_BATCH_PERSISTED" if result else "EMPTY_PROVIDER_RESPONSE"
                 ),
                 "retry_number": 0,
             },
@@ -1534,9 +1509,7 @@ class DataLoader:
             resume=resume,
             persist=persist,
         )
-        closed_source_records = [
-            record for record in source_records if record.closed is True
-        ]
+        closed_source_records = [record for record in source_records if record.closed is True]
         if native:
             return closed_source_records, {
                 "provider": name,
@@ -1604,22 +1577,26 @@ class DataLoader:
             raise ValueError("source timeframe is unavailable")
         if TIMEFRAME_SECONDS[source] >= TIMEFRAME_SECONDS[target]:
             raise ValueError("resampling target must be coarser than source")
-        frame = pd.DataFrame(
-            [
-                {
-                    "timestamp": item.timestamp,
-                    "open": float(item.values["open"]),
-                    "high": float(item.values["high"]),
-                    "low": float(item.values["low"]),
-                    "close": float(item.values["close"]),
-                    "volume": float(item.values.get("volume") or 0),
-                    "raw_hash": item.raw_hash,
-                    "retrieval_run_id": item.retrieval_run_id,
-                    "observed_at": item.observed_at,
-                }
-                for item in selected
-            ]
-        ).set_index("timestamp").sort_index()
+        frame = (
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": item.timestamp,
+                        "open": float(item.values["open"]),
+                        "high": float(item.values["high"]),
+                        "low": float(item.values["low"]),
+                        "close": float(item.values["close"]),
+                        "volume": float(item.values.get("volume") or 0),
+                        "raw_hash": item.raw_hash,
+                        "retrieval_run_id": item.retrieval_run_id,
+                        "observed_at": item.observed_at,
+                    }
+                    for item in selected
+                ]
+            )
+            .set_index("timestamp")
+            .sort_index()
+        )
         rule = {
             "1W": "W-MON",
             "1M": "MS",
@@ -1640,8 +1617,7 @@ class DataLoader:
             target_end = (
                 timestamp + pd.offsets.MonthBegin(1)
                 if target == "1M"
-                else timestamp
-                + pd.to_timedelta(TIMEFRAME_SECONDS[target], unit="s")
+                else timestamp + pd.to_timedelta(TIMEFRAME_SECONDS[target], unit="s")
             )
             if target_end.to_pydatetime().astimezone(UTC) > now:
                 continue
@@ -1708,7 +1684,8 @@ class DataLoader:
         target = HISTORY_TARGETS[selected][normalized]
         provider_floor = {
             "bitvavo": datetime(2018, 1, 1, tzinfo=UTC),
-            "kraken": end - timedelta(
+            "kraken": end
+            - timedelta(
                 seconds=TIMEFRAME_SECONDS[
                     normalized
                     if normalized in PROVIDER_NATIVE_TIMEFRAMES["kraken"]
@@ -1729,9 +1706,7 @@ class DataLoader:
         history_profile: str,
         timeframes: Iterable[str],
     ) -> dict[str, Any]:
-        selected_providers = [
-            name for name in providers if name in PROVIDER_NATIVE_TIMEFRAMES
-        ]
+        selected_providers = [name for name in providers if name in PROVIDER_NATIVE_TIMEFRAMES]
         selected_timeframes = [normalize_timeframe(item) for item in timeframes]
         now = utc_now()
         rows = 0
@@ -1757,15 +1732,10 @@ class DataLoader:
                 )
                 count = max(
                     0,
-                    int(
-                        (now - start).total_seconds()
-                        / TIMEFRAME_SECONDS[source]
-                    ),
+                    int((now - start).total_seconds() / TIMEFRAME_SECONDS[source]),
                 )
                 provider_rows += count * universe_size
-                provider_calls += (
-                    max(1, (count + maximum - 1) // maximum) * universe_size
-                )
+                provider_calls += max(1, (count + maximum - 1) // maximum) * universe_size
             rows += provider_rows
             calls += provider_calls
             by_provider[provider] = {
@@ -1799,13 +1769,11 @@ class DataLoader:
             "storage_allowed": (
                 compressed + raw + normalized
                 <= self.settings.market_data.maximum_storage_gb * 1024**3
-                and free
-                - (compressed + raw + normalized)
+                and free - (compressed + raw + normalized)
                 >= self.settings.market_data.minimum_free_disk_gb * 1024**3
             ),
             "requires_confirmation": (
-                history_profile.casefold() == HistoryProfile.MAXIMUM
-                or calls > 10_000
+                history_profile.casefold() == HistoryProfile.MAXIMUM or calls > 10_000
             ),
         }
 
@@ -1828,9 +1796,7 @@ class DataLoader:
             ),
         )
         records = [
-            record.model_copy(
-                update={"values": {**record.values, "mode": mode}}
-            )
+            record.model_copy(update={"values": {**record.values, "mode": mode}})
             for record in self._deduplicate(records)
         ]
         if persist:
@@ -1856,9 +1822,7 @@ class DataLoader:
                 normalize_market(market), run_id or str(uuid.uuid4())
             ),
         )
-        record = record.model_copy(
-            update={"values": {**record.values, "mode": mode}}
-        )
+        record = record.model_copy(update={"values": {**record.values, "mode": mode}})
         if persist:
             self._persist_raw_batch([record])
             self._database_upsert("ticker_events", [record])
@@ -1881,9 +1845,7 @@ class DataLoader:
                 normalize_market(market), depth, run_id or str(uuid.uuid4())
             ),
         )
-        record = record.model_copy(
-            update={"values": {**record.values, "mode": mode}}
-        )
+        record = record.model_copy(update={"values": {**record.values, "mode": mode}})
         if persist:
             self._persist_raw_batch([record])
             self._database_upsert("orderbook_snapshots", [record])
@@ -2105,22 +2067,16 @@ class DataLoader:
         )
         from research.macro_context import summarize_gex_contracts
 
-        contracts = await DeribitOptionsCollector(
-            requester=self.request
-        ).collect(underlying)
+        contracts = await DeribitOptionsCollector(requester=self.request).collect(underlying)
         summary = CryptoGEXAnalyzer().calculate(contracts)
         if persist and contracts:
-            contract_frame = pd.DataFrame(
-                [item.model_dump(mode="json") for item in contracts]
-            )
+            contract_frame = pd.DataFrame([item.model_dump(mode="json") for item in contracts])
             contract_target = (
                 self.settings.paths.context_data_dir
                 / f"options_deribit_{underlying.upper()}.parquet"
             )
             self._atomic_parquet(contract_frame, contract_target)
-            summary_frame = summarize_gex_contracts(contracts).reset_index(
-                names="available_at"
-            )
+            summary_frame = summarize_gex_contracts(contracts).reset_index(names="available_at")
             summary_frame["provider"] = "deribit"
             summary_frame["point_in_time_status"] = "FORWARD_ONLY"
             summary_frame["observed_at"] = summary_frame["available_at"]
@@ -2129,8 +2085,7 @@ class DataLoader:
             )
             self._atomic_parquet(
                 summary_frame,
-                self.settings.paths.context_data_dir
-                / f"gex_{underlying.upper()}.parquet",
+                self.settings.paths.context_data_dir / f"gex_{underlying.upper()}.parquet",
             )
             if self.database is not None:
                 self.database.upsert_records(
@@ -2174,9 +2129,7 @@ class DataLoader:
         from data.derivatives_context import FundingRateCollector
 
         collector = FundingRateCollector(requester=self.request)
-        records = await collector.collect(
-            provider=provider, market=market, run_id=run_id
-        )
+        records = await collector.collect(provider=provider, market=market, run_id=run_id)
         if persist:
             self._persist_raw_batch(records)
             self._persist_context_records(
@@ -2242,14 +2195,10 @@ class DataLoader:
     ) -> list[NormalizedDataRecord]:
         cutoff = utc_now() - maximum_age
         return [
-            record
-            for record in records
-            if (record.available_at or record.observed_at) < cutoff
+            record for record in records if (record.available_at or record.observed_at) < cutoff
         ]
 
-    def write_manifest(
-        self, path: Path | str, records: Iterable[NormalizedDataRecord]
-    ) -> Path:
+    def write_manifest(self, path: Path | str, records: Iterable[NormalizedDataRecord]) -> Path:
         selected = list(records)
         return atomic_write_json(
             Path(path),
@@ -2262,20 +2211,11 @@ class DataLoader:
         )
 
     def _cache_path(self, provider: str, market: str, timeframe: str, kind: str) -> Path:
-        return (
-            self.settings.paths.cache_dir
-            / provider
-            / f"{market}_{timeframe}_{kind}"
-        )
+        return self.settings.paths.cache_dir / provider / f"{market}_{timeframe}_{kind}"
 
-    def _persist_dataset(
-        self, path: Path, records: Iterable[NormalizedDataRecord]
-    ) -> None:
+    def _persist_dataset(self, path: Path, records: Iterable[NormalizedDataRecord]) -> None:
         frame = pd.DataFrame(
-            [
-                item.model_dump(mode="json", exclude={"raw_payload"})
-                for item in records
-            ]
+            [item.model_dump(mode="json", exclude={"raw_payload"}) for item in records]
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -2289,9 +2229,7 @@ class DataLoader:
     @staticmethod
     def _atomic_parquet(frame: pd.DataFrame, target: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(
-            f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet"
-        )
+        temporary = target.with_name(f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet")
         frame.to_parquet(temporary, index=False)
         os.replace(temporary, target)
         return target
@@ -2308,12 +2246,7 @@ class DataLoader:
         selected = list(records)
         if not selected:
             return None
-        target = (
-            self.settings.paths.processed_data_dir
-            / provider
-            / market
-            / f"{timeframe}.parquet"
-        )
+        target = self.settings.paths.processed_data_dir / provider / market / f"{timeframe}.parquet"
         frame = pd.DataFrame(
             [
                 {
@@ -2322,9 +2255,7 @@ class DataLoader:
                     "source_timeframe": source_timeframe,
                     "quote_currency": market.split("-")[-1],
                     "source_classification": (
-                        "PROVIDER_NATIVE"
-                        if item.data_kind == "ohlcv"
-                        else "RESAMPLED_FROM_NATIVE"
+                        "PROVIDER_NATIVE" if item.data_kind == "ohlcv" else "RESAMPLED_FROM_NATIVE"
                     ),
                 }
                 for item in selected
@@ -2366,9 +2297,7 @@ class DataLoader:
                     ),
                     "point_in_time_status": item.values.get(
                         "point_in_time_status",
-                        "SOURCE_AVAILABLE_AT"
-                        if item.available_at is not None
-                        else "FORWARD_ONLY",
+                        "SOURCE_AVAILABLE_AT" if item.available_at is not None else "FORWARD_ONLY",
                     ),
                     "raw_hash": item.raw_hash,
                     "data_kind": item.data_kind,
@@ -2397,9 +2326,7 @@ class DataLoader:
         )
         return self._atomic_parquet(frame, target)
 
-    def _persist_raw_batch(
-        self, records: Iterable[NormalizedDataRecord]
-    ) -> list[Path]:
+    def _persist_raw_batch(self, records: Iterable[NormalizedDataRecord]) -> list[Path]:
         selected = list(records)
         if not selected:
             return []
@@ -2457,10 +2384,7 @@ class DataLoader:
                             "timestamp": min(item.timestamp for item in rows),
                             "observed_at": max(item.observed_at for item in rows),
                             "available_at": max(
-                                (
-                                    item.available_at or item.observed_at
-                                    for item in rows
-                                )
+                                (item.available_at or item.observed_at for item in rows)
                             ),
                             "status": "IMMUTABLE_RAW_BATCH",
                             "raw_hash": batch_hash,
@@ -2486,9 +2410,7 @@ class DataLoader:
         selected = list(records)
         if not selected or self.database is None:
             return
-        external_id = stable_hash(
-            [provider, market, timeframe, data_kind], length=64
-        )
+        external_id = stable_hash([provider, market, timeframe, data_kind], length=64)
         ordered_timestamps = sorted({item.timestamp for item in selected})
         missing_ranges: list[list[str]] = []
         if timeframe != "1M":
@@ -2512,51 +2434,33 @@ class DataLoader:
             "timeframe": timeframe,
             "timestamp": max(item.timestamp for item in selected),
             "observed_at": max(item.observed_at for item in selected),
-            "available_at": max(
-                item.available_at or item.observed_at for item in selected
-            ),
+            "available_at": max(item.available_at or item.observed_at for item in selected),
             "status": (
-                ProviderStatus.READY.value
-                if not missing_ranges
-                else ProviderStatus.PARTIAL.value
+                ProviderStatus.READY.value if not missing_ranges else ProviderStatus.PARTIAL.value
             ),
             "data_kind": data_kind,
-            "earliest_stored_timestamp": min(
-                item.timestamp for item in selected
-            ).isoformat(),
-            "latest_stored_timestamp": max(
-                item.timestamp for item in selected
-            ).isoformat(),
-            "last_successful_cursor": max(
-                item.timestamp for item in selected
-            ).isoformat(),
+            "earliest_stored_timestamp": min(item.timestamp for item in selected).isoformat(),
+            "latest_stored_timestamp": max(item.timestamp for item in selected).isoformat(),
+            "last_successful_cursor": max(item.timestamp for item in selected).isoformat(),
             "next_cursor": (
                 max(item.timestamp for item in selected)
                 + timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
             ).isoformat(),
             "completed_page_ranges": [
-                [start.isoformat(), end.isoformat()]
-                for start, end in completed_ranges
+                [start.isoformat(), end.isoformat()] for start, end in completed_ranges
             ],
             "missing_ranges": missing_ranges,
             "retry_ranges": [],
-            "source_hash": stable_hash(
-                [item.raw_hash for item in selected], length=64
-            ),
+            "source_hash": stable_hash([item.raw_hash for item in selected], length=64),
             "updated_at": utc_now().isoformat(),
         }
         self.database.upsert_records("data_watermarks", [record])
 
-    def _database_upsert(
-        self, table: str, records: Iterable[NormalizedDataRecord]
-    ) -> None:
+    def _database_upsert(self, table: str, records: Iterable[NormalizedDataRecord]) -> None:
         if self.database is not None:
             self.database.upsert_records(
                 table,
-                [
-                    item.model_dump(mode="json", exclude={"raw_payload"})
-                    for item in records
-                ],
+                [item.model_dump(mode="json", exclude={"raw_payload"}) for item in records],
             )
 
     @staticmethod
@@ -2573,9 +2477,7 @@ class DataLoader:
             records.append(NormalizedDataRecord.model_validate(row))
         return records
 
-    async def _fear_and_greed(
-        self, run_id: str
-    ) -> list[NormalizedDataRecord]:
+    async def _fear_and_greed(self, run_id: str) -> list[NormalizedDataRecord]:
         observed = utc_now()
         raw = await self._tracked(
             "alternative_me",
@@ -2612,9 +2514,7 @@ class DataLoader:
             )
         return records
 
-    async def _defillama(
-        self, series: str, run_id: str
-    ) -> list[NormalizedDataRecord]:
+    async def _defillama(self, series: str, run_id: str) -> list[NormalizedDataRecord]:
         observed = utc_now()
         selected = series.casefold()
         if selected in {"stablecoins", "stablecoin", "stablecoin_history"}:
@@ -2634,9 +2534,7 @@ class DataLoader:
                     row.get("date") or row.get("timestamp"),
                     milliseconds=False,
                 )
-                total = row.get("totalCirculatingUSD") or row.get(
-                    "total_circulating_usd"
-                )
+                total = row.get("totalCirculatingUSD") or row.get("total_circulating_usd")
                 if isinstance(total, dict):
                     total = total.get("peggedUSD") or sum(
                         float(value or 0) for value in total.values()
@@ -2664,9 +2562,7 @@ class DataLoader:
         if selected in {"protocols", "tvl"}:
             raw = await self._tracked(
                 "defillama",
-                lambda: self.request(
-                    "GET", f"{DEFILLAMA_REST}/protocols", None, None
-                ),
+                lambda: self.request("GET", f"{DEFILLAMA_REST}/protocols", None, None),
             )
             rows = raw if isinstance(raw, list) else []
             return [
@@ -2773,9 +2669,7 @@ class DataLoader:
             params.update({"limit": 1_000, "offset": 0})
             raw = await self._tracked(
                 "eodhd",
-                lambda: self.request(
-                    "GET", f"{EODHD_REST}/economic-events", params, None
-                ),
+                lambda: self.request("GET", f"{EODHD_REST}/economic-events", params, None),
             )
             records = []
             for row in raw if isinstance(raw, list) else []:
@@ -2820,9 +2714,7 @@ class DataLoader:
         else:
             raw = await self._tracked(
                 "eodhd",
-                lambda: self.request(
-                    "GET", f"{EODHD_REST}/eod/{series}", params, None
-                ),
+                lambda: self.request("GET", f"{EODHD_REST}/eod/{series}", params, None),
             )
         return [
             NormalizedDataRecord(
@@ -2880,9 +2772,7 @@ class DataLoader:
                 "source_url": url,
                 "crypto_entities": entities,
                 "category": "crypto_regulatory_filing" if entities else "filing",
-                "point_in_time_status": "SOURCE_ACCEPTED_TIME"
-                if accepted
-                else "OBSERVED_ONLY",
+                "point_in_time_status": "SOURCE_ACCEPTED_TIME" if accepted else "OBSERVED_ONLY",
             }
             records.append(
                 NormalizedDataRecord(
@@ -2997,9 +2887,7 @@ class DataLoader:
             )
         ]
 
-    async def _cmc_metadata(
-        self, market: str | None, run_id: str
-    ) -> list[NormalizedDataRecord]:
+    async def _cmc_metadata(self, market: str | None, run_id: str) -> list[NormalizedDataRecord]:
         key = self.settings.providers.coinmarketcap_api_key
         if key is None:
             raise PermissionError("SKIPPED_MISSING_CREDENTIALS")
@@ -3138,9 +3026,7 @@ class ContinuousDataService:
         self._active_tasks: set[asyncio.Task[Any]] = set()
         self._lock_owner_token = uuid.uuid4().hex
         self.lock_path = settings.paths.checkpoints_dir / "data_service.lock"
-        self.heartbeat_path = (
-            settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
-        )
+        self.heartbeat_path = settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
         self.control_path = settings.paths.checkpoints_dir / f"{service_id}_control.json"
 
     @staticmethod
@@ -3193,11 +3079,28 @@ class ContinuousDataService:
             "exists": True,
             "stale": not alive,
             "reason_code": (
-                "LOCK_HELD_BY_LIVE_PROCESS"
-                if alive
-                else "STALE_PROCESS_LOCK_RECOVERABLE"
+                "LOCK_HELD_BY_LIVE_PROCESS" if alive else "STALE_PROCESS_LOCK_RECOVERABLE"
             ),
             "owner": owner,
+        }
+
+    @classmethod
+    def recover_stale_lock_path(cls, lock_path: Path) -> dict[str, Any]:
+        """Archive a provably stale lock; never remove a live owner's lock."""
+
+        inspection = cls.inspect_lock_path(lock_path)
+        if not inspection["exists"]:
+            return inspection | {"recovered": False}
+        if not inspection["available"] or not inspection["stale"]:
+            raise RuntimeError("DATA_SERVICE_LIVE_LOCK_CANNOT_BE_RECOVERED")
+        archive = lock_path.with_name(
+            f"{lock_path.name}.stale.{utc_now().strftime('%Y%m%dT%H%M%SZ')}"
+        )
+        os.replace(lock_path, archive)
+        return inspection | {
+            "recovered": True,
+            "archive_path": str(archive),
+            "reason_code": "STALE_LOCK_ARCHIVED",
         }
 
     def _acquire_lock(self) -> None:
@@ -3205,10 +3108,8 @@ class ContinuousDataService:
         if self.lock_path.is_file():
             inspection = self.inspect_lock_path(self.lock_path)
             if inspection["available"] and inspection["stale"]:
-                self.lock_path.unlink(missing_ok=True)
-                self._heartbeat(reason_code="STALE_LOCK_RECOVERED")
-            else:
-                raise RuntimeError("DATA_SERVICE_SINGLE_INSTANCE_LOCKED")
+                raise RuntimeError("DATA_SERVICE_STALE_LOCK_REQUIRES_EXPLICIT_RECOVERY")
+            raise RuntimeError("DATA_SERVICE_SINGLE_INSTANCE_LOCKED")
         try:
             descriptor = os.open(
                 self.lock_path,
@@ -3225,6 +3126,9 @@ class ContinuousDataService:
                     "service_id": self.service_id,
                     "mode": self.mode,
                     "hostname": socket.gethostname(),
+                    "executable": sys.executable,
+                    "command": sys.argv,
+                    "lock_version": 2,
                 },
                 handle,
             )
@@ -3320,13 +3224,9 @@ class ContinuousDataService:
                     )
                 except TimeoutError:
                     pass
-            self.state = "STOPPED"
+            self.state = "DRAINED" if self._drain_requested else "STOPPED"
             self._heartbeat(
-                reason_code=(
-                    "SERVICE_DRAINED"
-                    if self._drain_requested
-                    else "SERVICE_STOPPED"
-                )
+                reason_code=("SERVICE_DRAINED" if self._drain_requested else "SERVICE_STOPPED")
             )
         finally:
             for task in tuple(self._active_tasks):

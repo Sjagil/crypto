@@ -16,6 +16,7 @@ import tracemalloc
 import urllib.parse
 import urllib.request
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,7 +27,13 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
-from config.settings import CostSettings, ResearchSettings, RiskSettings, Settings
+from config.settings import (
+    TIMEFRAME_SECONDS,
+    CostSettings,
+    ResearchSettings,
+    RiskSettings,
+    Settings,
+)
 from core.contracts import (
     CandidateArtifact,
     CandidateLifecycle,
@@ -111,15 +118,12 @@ def csv_values(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
     selected = [value] if isinstance(value, str) else value
-    return [
-        item.strip()
-        for group in selected
-        for item in group.split(",")
-        if item.strip()
-    ]
+    return [item.strip() for group in selected for item in group.split(",") if item.strip()]
 
 
-def _provider_selection(value: str | list[str] | None, available: list[str] | tuple[str, ...]) -> list[str]:
+def _provider_selection(
+    value: str | list[str] | None, available: list[str] | tuple[str, ...]
+) -> list[str]:
     requested = [item.casefold() for item in csv_values(value)]
     if not requested or "all" in requested:
         return list(available)
@@ -135,9 +139,7 @@ def _timeframe_selection(value: str | list[str] | None) -> list[str]:
     requested = csv_values(value)
     if not requested or any(item.casefold() == "all" for item in requested):
         return list(SUPPORTED_TIMEFRAMES)
-    normalized = list(
-        dict.fromkeys(normalize_timeframe(item) for item in requested)
-    )
+    normalized = list(dict.fromkeys(normalize_timeframe(item) for item in requested))
     unknown = sorted(set(normalized) - set(SUPPORTED_TIMEFRAMES))
     if unknown:
         raise ValueError(f"unsupported timeframes: {unknown}")
@@ -177,9 +179,7 @@ def supported_database_url(settings: Settings) -> str | None:
         return None
     candidate = settings.providers.database_url.get_secret_value()
     return (
-        candidate
-        if candidate.startswith(("sqlite://", "postgresql://", "postgresql+"))
-        else None
+        candidate if candidate.startswith(("sqlite://", "postgresql://", "postgresql+")) else None
     )
 
 
@@ -251,9 +251,7 @@ def load_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.D
     if getattr(args, "data", None):
         if len(markets) != 1:
             raise ValueError("one --data file can only be paired with one market")
-        return {
-            markets[0]: load_ohlcv(args.data, market=markets[0], validate=True)
-        }
+        return {markets[0]: load_ohlcv(args.data, market=markets[0], validate=True)}
     if getattr(args, "providers", None):
         timeframes = csv_values(getattr(args, "timeframes", None))
         selected_timeframe = (
@@ -263,8 +261,7 @@ def load_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.D
         )
         return {
             market: load_ohlcv(
-                settings.paths.processed_data_dir
-                / f"{market}_{selected_timeframe}.parquet",
+                settings.paths.processed_data_dir / f"{market}_{selected_timeframe}.parquet",
                 market=market,
                 timeframe=selected_timeframe,
                 validate=True,
@@ -513,9 +510,7 @@ def command_features(args: argparse.Namespace, settings: Settings) -> int:
                 column for column in features if column.startswith("raw_fractal_")
             ],
             "research_labels_in_frame": sorted(
-                set(features.attrs.get("research_labels_excluded", ())).intersection(
-                    features
-                )
+                set(features.attrs.get("research_labels_excluded", ())).intersection(features)
             ),
             "unsafe_metadata": [
                 column
@@ -531,8 +526,10 @@ def command_features(args: argparse.Namespace, settings: Settings) -> int:
             payload["status"] = "FAILED"
         emit(payload)
         return 0 if payload["status"] == "PASSED" else 2
-    target = Path(args.output) if args.output else (
-        settings.paths.processed_data_dir / f"{market}_features.parquet"
+    target = (
+        Path(args.output)
+        if args.output
+        else (settings.paths.processed_data_dir / f"{market}_features.parquet")
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     features.to_parquet(target, engine="pyarrow")
@@ -565,9 +562,7 @@ def command_features(args: argparse.Namespace, settings: Settings) -> int:
                 event_column = f"{prefix}confirmed_fractal_{kind}"
                 price_column = f"{event_column}_price"
                 pivot_column = f"{prefix}fractal_{kind}_pivot_timestamp"
-                confirmation_column = (
-                    f"{prefix}fractal_{kind}_confirmation_timestamp"
-                )
+                confirmation_column = f"{prefix}fractal_{kind}_confirmation_timestamp"
                 for timestamp in features.index[features[event_column].astype(bool)]:
                     events.append(
                         {
@@ -582,9 +577,7 @@ def command_features(args: argparse.Namespace, settings: Settings) -> int:
                                 "window": window,
                                 "kind": kind,
                                 "price": features.at[timestamp, price_column],
-                                "pivot_timestamp": str(
-                                    features.at[timestamp, pivot_column]
-                                ),
+                                "pivot_timestamp": str(features.at[timestamp, pivot_column]),
                                 "confirmation_timestamp": str(
                                     features.at[timestamp, confirmation_column]
                                 ),
@@ -633,14 +626,8 @@ def command_indicators(args: argparse.Namespace, settings: Settings) -> int:
             and (not args.research_only or item.research_only)
             and (
                 args.provider_availability is None
-                or (
-                    args.provider_availability == "required"
-                    and item.external_data_required
-                )
-                or (
-                    args.provider_availability == "internal"
-                    and not item.external_data_required
-                )
+                or (args.provider_availability == "required" and item.external_data_required)
+                or (args.provider_availability == "internal" and not item.external_data_required)
             )
             and (
                 args.role is None
@@ -740,9 +727,7 @@ def command_indicators(args: argparse.Namespace, settings: Settings) -> int:
             "generated_reports",
             [
                 {
-                    "external_id": payload.get(
-                        "registry_hash", stable_hash(payload, length=64)
-                    ),
+                    "external_id": payload.get("registry_hash", stable_hash(payload, length=64)),
                     "status": "INDICATOR_COVERAGE_AUDIT",
                     "values": payload,
                 }
@@ -960,17 +945,13 @@ def command_research(args: argparse.Namespace, settings: Settings) -> int:
         else csv_values(requested) or [args.strategy]
     )
     base_directory = (
-        Path(args.output)
-        if args.output
-        else selected_settings.paths.reports_dir / "research"
+        Path(args.output) if args.output else selected_settings.paths.reports_dir / "research"
     )
     results: list[dict[str, Any]] = []
     for strategy_id in strategy_ids:
         strategy = get_strategy(strategy_id)
         checkpoint = (
-            Path(args.checkpoint).with_name(
-                f"{Path(args.checkpoint).stem}_{strategy_id}.jsonl"
-            )
+            Path(args.checkpoint).with_name(f"{Path(args.checkpoint).stem}_{strategy_id}.jsonl")
             if args.checkpoint and len(strategy_ids) > 1
             else (Path(args.checkpoint) if args.checkpoint else None)
         )
@@ -986,9 +967,7 @@ def command_research(args: argparse.Namespace, settings: Settings) -> int:
             checkpoint_path=checkpoint,
             promote_to_paper=args.promote_to_paper,
         )
-        directory = (
-            base_directory / strategy_id if len(strategy_ids) > 1 else base_directory
-        )
+        directory = base_directory / strategy_id if len(strategy_ids) > 1 else base_directory
         paths = write_research_report(outcome, selected_settings, directory)
         results.append(
             {
@@ -1014,8 +993,7 @@ async def command_research_async(
 
         await CanonicalDownloader(selected_settings).download_all(
             markets=selected_markets(args),
-            timeframes=csv_values(args.timeframes)
-            or selected_settings.market_data.timeframes,
+            timeframes=csv_values(args.timeframes) or selected_settings.market_data.timeframes,
             provider_preference=csv_values(args.providers),
         )
     if args.scrapers == "all":
@@ -1115,18 +1093,14 @@ def _synthetic_reporting_data() -> dict[str, pd.DataFrame]:
     }
 
 
-def command_operational_report(
-    args: argparse.Namespace, settings: Settings
-) -> int:
+def command_operational_report(args: argparse.Namespace, settings: Settings) -> int:
     from reporting.visualizations import VisualizationReporter
 
     action = args.path
     target = settings.paths.reports_dir / "charts"
     if action in {"charts", "full", "build"}:
         datasets = _synthetic_reporting_data()
-        sources: dict[str, Any] = {
-            "non_context_diagnostics": "SYNTHETIC_DIAGNOSTIC_ONLY"
-        }
+        sources: dict[str, Any] = {"non_context_diagnostics": "SYNTHETIC_DIAGNOSTIC_ONLY"}
         macro_path = settings.paths.context_data_dir / "macro_context_1h.parquet"
         if macro_path.is_file():
             datasets["macro"] = pd.read_parquet(macro_path)
@@ -1135,9 +1109,7 @@ def command_operational_report(
                 "path": macro_path,
                 "sha256": sha256_file(macro_path),
             }
-        option_paths = sorted(
-            settings.paths.context_data_dir.glob("options_deribit_*.parquet")
-        )
+        option_paths = sorted(settings.paths.context_data_dir.glob("options_deribit_*.parquet"))
         option_frames = [pd.read_parquet(path) for path in option_paths]
         if option_frames:
             options = pd.concat(option_frames, ignore_index=True)
@@ -1155,14 +1127,10 @@ def command_operational_report(
                 * 0.01
             )
             datasets["gex_strike"] = (
-                options.groupby("strike", as_index=False)["gross_gex"]
-                .sum()
-                .sort_index()
+                options.groupby("strike", as_index=False)["gross_gex"].sum().sort_index()
             )
             datasets["gex_expiry"] = (
-                options.groupby("expiry", as_index=False)["gross_gex"]
-                .sum()
-                .sort_index()
+                options.groupby("expiry", as_index=False)["gross_gex"].sum().sort_index()
             )
             sources["gex"] = {
                 "source_type": "REAL_DERIBIT_OPTIONS_CHAIN",
@@ -1184,10 +1152,7 @@ def command_operational_report(
 
 def _test_run_tree(settings: Settings, run_id: str) -> dict[str, Path]:
     root = settings.paths.test_runs_dir / run_id
-    directories = {
-        name: root / name
-        for name in ("logs", "charts", "csv", "html", "manifests")
-    }
+    directories = {name: root / name for name in ("logs", "charts", "csv", "html", "manifests")}
     for directory in directories.values():
         directory.mkdir(parents=True, exist_ok=True)
     directories["root"] = root
@@ -1266,9 +1231,7 @@ def _configured_secret_values(settings: Settings) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _safe_exception_message(
-    exc: BaseException, settings: Settings | None
-) -> str:
+def _safe_exception_message(exc: BaseException, settings: Settings | None) -> str:
     secrets = _configured_secret_values(settings) if settings is not None else ()
     return str(redact(str(exc), secrets))
 
@@ -1284,9 +1247,7 @@ def _secret_audit(
 
     def permitted(path: Path) -> bool:
         resolved = path.resolve()
-        return not any(
-            resolved == root or root in resolved.parents for root in excluded
-        )
+        return not any(resolved == root or root in resolved.parents for root in excluded)
 
     findings: list[str] = []
     scanned = 0
@@ -1317,11 +1278,7 @@ def _secret_audit(
         files = (
             [root]
             if root.is_file()
-            else [
-                path
-                for path in root.rglob("*")
-                if path.is_file() and permitted(path)
-            ]
+            else [path for path in root.rglob("*") if path.is_file() and permitted(path)]
         )
         for path in files:
             if path.suffix.casefold() in binary_suffixes:
@@ -1492,9 +1449,7 @@ async def _provider_checks(settings: Settings) -> dict[str, Any]:
     return providers
 
 
-async def _websocket_checks(
-    settings: Settings, *, duration: float = 10.0
-) -> dict[str, Any]:
+async def _websocket_checks(settings: Settings, *, duration: float = 10.0) -> dict[str, Any]:
     from data.websocket_manager import WebSocketManager
 
     manager = WebSocketManager(
@@ -1524,21 +1479,16 @@ async def _websocket_checks(
     ]
     providers = {
         name: {
-            "status": "PASSED"
-            if health["messages"] > 0
-            else "FAILED",
+            "status": "PASSED" if health["messages"] > 0 else "FAILED",
             "reason_code": (
-                "NORMALIZED_MESSAGES_RECEIVED"
-                if health["messages"] > 0
-                else "NO_MESSAGES"
+                "NORMALIZED_MESSAGES_RECEIVED" if health["messages"] > 0 else "NO_MESSAGES"
             ),
             **health,
         }
         for name, health in first.items()
     }
     reconnect_verified = (
-        second["bitvavo"]["connections"] >= 2
-        and second["bitvavo"]["subscriptions"] >= 2
+        second["bitvavo"]["connections"] >= 2 and second["bitvavo"]["subscriptions"] >= 2
     )
     return {
         "status": (
@@ -1607,9 +1557,7 @@ async def _local_component_checks(
             "reason_code": "SNAPSHOT_DELTA_FEATURES_VALID",
             **book.health(),
             "microprice": str(book.microprice),
-            "estimated_slippage": str(
-                book.estimated_slippage(side="buy", quantity="1.5")
-            ),
+            "estimated_slippage": str(book.estimated_slippage(side="buy", quantity="1.5")),
         }
     except Exception as exc:
         results["orderbook"] = {
@@ -1692,9 +1640,7 @@ async def _local_component_checks(
             "message": _safe_exception_message(exc, settings),
         }
     try:
-        index = VisualizationReporter(tree["charts"]).generate(
-            _synthetic_reporting_data()
-        )
+        index = VisualizationReporter(tree["charts"]).generate(_synthetic_reporting_data())
         results["reporting"] = {
             "status": "FAILED" if index["failed"] else "PASSED",
             "reason_code": "CHARTS_GENERATED",
@@ -1766,9 +1712,7 @@ async def command_test(args: argparse.Namespace, settings: Settings) -> int:
         components = await _local_component_checks(settings, tree)
         if mode == "full":
             providers = await _provider_checks(settings)
-            components["websocket"] = await _websocket_checks(
-                settings, duration=10
-            )
+            components["websocket"] = await _websocket_checks(settings, duration=10)
     elif mode == "database":
         components = await _local_component_checks(settings, tree)
         components = {"database": components["database"]}
@@ -1799,9 +1743,9 @@ async def command_test(args: argparse.Namespace, settings: Settings) -> int:
         )
         components["soak"].update(
             {
-            "reason_code": "CONFIGURED_SOAK_DURATION_COMPLETE",
-            "configured_duration_seconds": duration,
-            "live_orders": 0,
+                "reason_code": "CONFIGURED_SOAK_DURATION_COMPLETE",
+                "configured_duration_seconds": duration,
+                "live_orders": 0,
             }
         )
     current_memory, peak_memory = tracemalloc.get_traced_memory()
@@ -1818,7 +1762,8 @@ async def command_test(args: argparse.Namespace, settings: Settings) -> int:
             "FAILED"
             if any(item.get("status") == "FAILED" for item in providers.values())
             else "PARTIAL"
-            if providers and any(
+            if providers
+            and any(
                 item.get("status") in {"SKIPPED", "PARTIAL", "BLOCKED"}
                 for item in providers.values()
             )
@@ -1984,8 +1929,7 @@ async def command_providers(args: argparse.Namespace, settings: Settings) -> int
                 {
                     "runtime": loader.provider_status(),
                     "persisted_capabilities": [
-                        row["payload"]
-                        for row in database.fetch_records("provider_capabilities")
+                        row["payload"] for row in database.fetch_records("provider_capabilities")
                     ],
                 }
             )
@@ -2060,11 +2004,7 @@ def _watermark_report(
             row["age_seconds"] = max(0.0, (now - parsed.astimezone(UTC)).total_seconds())
         rows.append(row)
     if mode == "gaps":
-        rows = [
-            row
-            for row in rows
-            if row.get("missing_ranges") or row.get("retry_ranges")
-        ]
+        rows = [row for row in rows if row.get("missing_ranges") or row.get("retry_ranges")]
     if mode == "freshness":
         rows.sort(key=lambda row: float(row.get("age_seconds", math.inf)), reverse=True)
     coverage = {
@@ -2113,14 +2053,8 @@ async def _universe_provider_markets(
                 "mexc": ("USDT",),
             }[provider]
             preferred = sorted(
-                (
-                    market
-                    for market in available
-                    if market.split("-")[-1] in quote_preference
-                ),
-                key=lambda market: quote_preference.index(
-                    market.split("-")[-1]
-                ),
+                (market for market in available if market.split("-")[-1] in quote_preference),
+                key=lambda market: quote_preference.index(market.split("-")[-1]),
             )
             if preferred:
                 markets[provider].append(preferred[0])
@@ -2165,12 +2099,8 @@ async def _fetch_price_history(
     )
     now = utc_now()
     results: list[dict[str, Any]] = []
-    semaphore = asyncio.Semaphore(
-        settings.market_data.maximum_concurrent_providers
-    )
-    provider_semaphores = {
-        provider: asyncio.Semaphore(1) for provider in price_providers
-    }
+    semaphore = asyncio.Semaphore(settings.market_data.maximum_concurrent_providers)
+    provider_semaphores = {provider: asyncio.Semaphore(1) for provider in price_providers}
 
     async def fetch_one(
         provider: str,
@@ -2204,15 +2134,11 @@ async def _fetch_price_history(
                     "latest_timestamp": records[-1].timestamp if records else None,
                     "duration": time.perf_counter() - started,
                     "status": (
-                        ProviderStatus.READY.value
-                        if records
-                        else ProviderStatus.PARTIAL.value
+                        ProviderStatus.READY.value if records else ProviderStatus.PARTIAL.value
                     ),
                     "reason_code": provenance.get(
                         "reason_code",
-                        "HISTORICAL_BATCH_COMPLETE"
-                        if records
-                        else "EMPTY_PROVIDER_RESPONSE",
+                        "HISTORICAL_BATCH_COMPLETE" if records else "EMPTY_PROVIDER_RESPONSE",
                     ),
                 }
             except Exception as exc:
@@ -2241,10 +2167,7 @@ async def _fetch_price_history(
         for market in provider_markets.get(provider, []):
             for timeframe in timeframes:
                 source = (
-                    settings.paths.processed_data_dir
-                    / provider
-                    / market
-                    / f"{timeframe}.parquet"
+                    settings.paths.processed_data_dir / provider / market / f"{timeframe}.parquet"
                 )
                 if not source.is_file():
                     continue
@@ -2253,9 +2176,7 @@ async def _fetch_price_history(
                     if "values" in stored:
                         expanded = pd.json_normalize(
                             stored["values"].map(
-                                lambda value: value
-                                if isinstance(value, dict)
-                                else {}
+                                lambda value: value if isinstance(value, dict) else {}
                             )
                         )
                         expanded.index = stored.index
@@ -2282,9 +2203,7 @@ async def _fetch_price_history(
                         }
                     )
                     if "closed" in stored:
-                        frame = frame.loc[
-                            stored["closed"].fillna(False).astype(bool).to_numpy()
-                        ]
+                        frame = frame.loc[stored["closed"].fillna(False).astype(bool).to_numpy()]
                     frame = validate_ohlcv(
                         frame,
                         timeframe=timeframe,
@@ -2292,8 +2211,7 @@ async def _fetch_price_history(
                     )
                     target, manifest = save_ohlcv(
                         frame,
-                        settings.paths.processed_data_dir
-                        / f"{market}_{timeframe}.parquet",
+                        settings.paths.processed_data_dir / f"{market}_{timeframe}.parquet",
                         market=market,
                         timeframe=timeframe,
                         maximum_staleness=max(
@@ -2364,7 +2282,9 @@ async def _fetch_price_history(
                     "provider": "coinmarketcap",
                     "dataset": "rankings",
                     "received_rows": len(records),
-                    "status": ProviderStatus.READY.value if records else ProviderStatus.PARTIAL.value,
+                    "status": ProviderStatus.READY.value
+                    if records
+                    else ProviderStatus.PARTIAL.value,
                     "reason_code": "UNIVERSE_SNAPSHOT_STORED",
                 }
             )
@@ -2380,7 +2300,9 @@ async def _fetch_price_history(
             )
     succeeded = sum(row["status"] == ProviderStatus.READY.value for row in results)
     return {
-        "status": ProviderStatus.READY.value if succeeded == len(results) else ProviderStatus.PARTIAL.value,
+        "status": ProviderStatus.READY.value
+        if succeeded == len(results)
+        else ProviderStatus.PARTIAL.value,
         "universe": universe,
         "estimate": estimate,
         "datasets": results,
@@ -2430,7 +2352,9 @@ async def _fetch_context(
                     "dataset": dataset,
                     "received_rows": count,
                     "status": ProviderStatus.READY.value if count else ProviderStatus.PARTIAL.value,
-                    "reason_code": "CONTEXT_DATASET_PERSISTED" if count else "EMPTY_PROVIDER_RESPONSE",
+                    "reason_code": "CONTEXT_DATASET_PERSISTED"
+                    if count
+                    else "EMPTY_PROVIDER_RESPONSE",
                     "duration": time.perf_counter() - started,
                 }
             )
@@ -2628,7 +2552,9 @@ async def _fetch_context(
             )
     ready = sum(row["status"] == ProviderStatus.READY.value for row in results)
     return {
-        "status": ProviderStatus.READY.value if ready == len(results) else ProviderStatus.PARTIAL.value,
+        "status": ProviderStatus.READY.value
+        if ready == len(results)
+        else ProviderStatus.PARTIAL.value,
         "history_profile": profile,
         "datasets": results,
         "context_directory": settings.paths.context_data_dir,
@@ -2722,6 +2648,7 @@ async def command_extended_data(args: argparse.Namespace, settings: Settings) ->
             emit(await _fetch_context(args, settings, loader))
             return 0
         if args.data_command == "sync":
+
             async def sync_cycle() -> dict[str, Any]:
                 price = await _fetch_price_history(
                     args,
@@ -2735,12 +2662,8 @@ async def command_extended_data(args: argparse.Namespace, settings: Settings) ->
                 }:
                     return price
                 context_providers = (
-                    "coinmarketcap,eodhd,fred,sec,alternative_me,"
-                    "defillama,deribit,mexc"
-                    if any(
-                        item.casefold() == "all"
-                        for item in context_selection
-                    )
+                    "coinmarketcap,eodhd,fred,sec,alternative_me,defillama,deribit,mexc"
+                    if any(item.casefold() == "all" for item in context_selection)
                     else ",".join(context_selection)
                 )
                 context_arguments = argparse.Namespace(
@@ -2782,9 +2705,7 @@ async def command_extended_data(args: argparse.Namespace, settings: Settings) ->
             market=args.market,
             timeframe=args.timeframe,
             start=datetime.fromisoformat(args.start.replace("Z", "+00:00")),
-            end=datetime.fromisoformat(
-                (args.end or utc_now().isoformat()).replace("Z", "+00:00")
-            ),
+            end=datetime.fromisoformat((args.end or utc_now().isoformat()).replace("Z", "+00:00")),
             resume=not args.no_resume,
             persist=True,
         )
@@ -2820,9 +2741,7 @@ async def command_websocket(args: argparse.Namespace, settings: Settings) -> int
         await manager.stop()
     emit(
         {
-            "status": "PASSED"
-            if manager.health(args.provider)["messages"] > 0
-            else "PARTIAL",
+            "status": "PASSED" if manager.health(args.provider)["messages"] > 0 else "PARTIAL",
             "health": manager.health(args.provider),
             "live_orders": 0,
         }
@@ -3062,9 +2981,7 @@ def command_paper(args: argparse.Namespace, settings: Settings) -> int:
         args.strategy = str(candidate.get("strategy_id") or args.strategy)
     broker = PaperBroker(
         initial_balances={"EUR": Decimal(str(args.capital))},
-        market_rules={
-            args.market: ExecutionMarketRules(minimum_order_value_eur=Decimal("5"))
-        },
+        market_rules={args.market: ExecutionMarketRules(minimum_order_value_eur=Decimal("5"))},
         fee_fraction=Decimal(str(settings.costs.default_fee)),
         slippage_bps=Decimal(str(settings.costs.slippage_bps)),
         spread_bps=Decimal(str(settings.costs.spread_bps)),
@@ -3123,9 +3040,7 @@ def research_status_from_report(path: str | None) -> tuple[ResearchStatus, bool]
         manifest = report.with_name(report.name.replace("_summary.json", "_manifest.json"))
         manifest_payload = read_json(manifest)
         artifact = next(
-            item
-            for item in manifest_payload["artifacts"]
-            if Path(item["path"]).resolve() == report
+            item for item in manifest_payload["artifacts"] if Path(item["path"]).resolve() == report
         )
         verified = (
             manifest_payload.get("run_kind") == "research"
@@ -3283,9 +3198,7 @@ async def live_runtime(
             order_type=OrderType.MARKET,
             quantity=quantity,
             strategy_id=args.strategy,
-            maximum_notional_eur=Decimal(
-                str(settings.execution.maximum_live_order_eur)
-            ),
+            maximum_notional_eur=Decimal(str(settings.execution.maximum_live_order_eur)),
             reason_codes=risk.reason_codes,
         )
         result["order"] = await client.submit_order(
@@ -3373,12 +3286,9 @@ def _lab_generation_arguments(args: argparse.Namespace) -> dict[str, Any]:
         "workers": args.workers,
         "data_mode": args.data_mode,
         "max_trials": args.max_trials,
-        "universe_scope": (
-            "allowed" if args.allowed_universe else "discovery"
-        ),
+        "universe_scope": ("allowed" if args.allowed_universe else "discovery"),
         "include_review_required_research_only": (
-            args.include_review_required_research_only
-            or not args.allowed_universe
+            args.include_review_required_research_only or not args.allowed_universe
         ),
         "resume": args.resume,
         "force": args.force,
@@ -3391,6 +3301,7 @@ def _lab_generation_arguments(args: argparse.Namespace) -> dict[str, Any]:
 
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
+        ECONOMIC_HYPOTHESIS_TEMPLATES,
         CombinationGenerator,
         CombinationState,
         GenerationMode,
@@ -3443,9 +3354,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         else:
             markets = runner._markets(
                 args.universe_size,
-                universe_scope=(
-                    "allowed" if args.allowed_universe else "discovery"
-                ),
+                universe_scope=("allowed" if args.allowed_universe else "discovery"),
                 include_review_required_research_only=not args.allowed_universe,
             )
         if args.allowed_universe:
@@ -3455,12 +3364,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 if settings.shariah.eligibility(market).status.value != "ALLOWED"
             ]
             if rejected:
-                raise ValueError(
-                    f"non-ALLOWED markets requested for allowed research: {rejected}"
-                )
-        timeframes = tuple(
-            csv_values(args.timeframes) or settings.market_data.timeframes
-        )
+                raise ValueError(f"non-ALLOWED markets requested for allowed research: {rejected}")
+        timeframes = tuple(csv_values(args.timeframes) or settings.market_data.timeframes)
         if action == "prepare":
             emit(
                 await runner.prepare_real_data(
@@ -3527,9 +3432,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "id": item.canonical_name,
-                        "parameters": [
-                            asdict(parameter) for parameter in item.parameters
-                        ],
+                        "parameters": [asdict(parameter) for parameter in item.parameters],
                     }
                 )
             else:
@@ -3593,9 +3496,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             rows: list[dict[str, Any]] = []
             for member in latest.get("members") or []:
-                if (
-                    UniverseType.DISCOVERY_UNIVERSE.value
-                    not in set(member.get("universe_types") or [])
+                if UniverseType.DISCOVERY_UNIVERSE.value not in set(
+                    member.get("universe_types") or []
                 ):
                     continue
                 availability = member.get("market_availability") or {}
@@ -3618,9 +3520,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             atomic_write_json(json_path, rows)
             csv_frame = pd.DataFrame(rows)
             for column in csv_frame:
-                if csv_frame[column].map(
-                    lambda value: isinstance(value, (list, dict))
-                ).any():
+                if csv_frame[column].map(lambda value: isinstance(value, (list, dict))).any():
                     csv_frame[column] = csv_frame[column].map(stable_json)
             csv_frame.to_csv(csv_path, index=False)
             emit(
@@ -3666,13 +3566,10 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         generator = CombinationGenerator(registry)
         sizes = _lab_sizes(args.combination_sizes, (1, 2, 3))
         logic_modes = _lab_logic_modes(args.logic_modes)
-        blocks = (
-            csv_values(getattr(args, "blocks", None))
-            or list(runner._profile_blocks(args.profile))
+        blocks = csv_values(getattr(args, "blocks", None)) or list(
+            runner._profile_blocks(args.profile)
         )
-        generator = CombinationGenerator(
-            {block_id: registry[block_id] for block_id in blocks}
-        )
+        generator = CombinationGenerator({block_id: registry[block_id] for block_id in blocks})
         timeframes = csv_values(args.timeframes) or ["1h", "4h", "1d"]
         if action == "estimate":
             estimate = generator.estimate(
@@ -3712,16 +3609,12 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 2
-            generation_checkpoint = (
-                store.paths.checkpoints / "generation_cursor.json"
-            )
+            generation_checkpoint = store.paths.checkpoints / "generation_cursor.json"
             continuation_cursor = None
             if args.resume and generation_checkpoint.is_file():
                 generation_state = read_json(generation_checkpoint)
                 if generation_state.get("status") == "PARTIAL_GENERATION":
-                    continuation_cursor = generation_state.get(
-                        "continuation_cursor"
-                    )
+                    continuation_cursor = generation_state.get("continuation_cursor")
             combinations = generator.generate(
                 sizes=sizes,
                 logic_modes=logic_modes,
@@ -3749,8 +3642,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     "by_state": dict(
                         sorted(
                             Counter(
-                                combination.eligibility_status.value
-                                for combination in combinations
+                                combination.eligibility_status.value for combination in combinations
                             ).items()
                         )
                     ),
@@ -3758,16 +3650,11 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         combinations = [
-            dict(row["payload"])
-            for row in store.database.fetch_records("strategy_combinations")
+            dict(row["payload"]) for row in store.database.fetch_records("strategy_combinations")
         ]
         if action == "inspect":
             selected = next(
-                (
-                    row
-                    for row in combinations
-                    if row.get("combination_id") == args.id
-                ),
+                (row for row in combinations if row.get("combination_id") == args.id),
                 None,
             )
             emit(selected or {"status": "NOT_FOUND", "combination_id": args.id})
@@ -3777,10 +3664,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 "count": len(combinations),
                 "by_state": dict(
                     sorted(
-                        Counter(
-                            str(row.get("eligibility_status"))
-                            for row in combinations
-                        ).items()
+                        Counter(str(row.get("eligibility_status")) for row in combinations).items()
                     )
                 ),
             }
@@ -3788,51 +3672,92 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         return 0
     if section == "campaign":
         campaign_action = action or "status"
-        campaign_timeframes = ("5m", "15m")
+        campaign_name = getattr(
+            args,
+            "name",
+            "microstructure-5m15m",
+        )
+        formal_campaign = campaign_name == "formal-five-family"
+        campaign_timeframes = ("1h",) if formal_campaign else ("5m", "15m")
+        campaign_label = (
+            "FORMAL_CAUSAL_FIVE_FAMILY_V1" if formal_campaign else "ALLOWED_5M_15M_FULL_HISTORY_V2"
+        )
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
         )
-        if campaign_action == "estimate":
+        if campaign_action in {"plan", "estimate"}:
             registry = signal_block_registry()
-            selected_blocks = list(runner._profile_blocks("hypotheses"))
-            estimate = CombinationGenerator(
-                {
-                    block_id: registry[block_id]
-                    for block_id in selected_blocks
+            if formal_campaign:
+                selected_blocks = sorted(
+                    {
+                        block
+                        for membership in ECONOMIC_HYPOTHESIS_TEMPLATES.values()
+                        for block in membership
+                    }
+                )
+                estimate = {
+                    "registered_signal_blocks": len(selected_blocks),
+                    "economic_hypotheses": len(ECONOMIC_HYPOTHESIS_TEMPLATES),
+                    "baseline_experiments_upper_bound": (
+                        len(ECONOMIC_HYPOTHESIS_TEMPLATES) * 4 * len(campaign_timeframes)
+                    ),
+                    "templates": {
+                        name: list(blocks)
+                        for name, blocks in sorted(ECONOMIC_HYPOTHESIS_TEMPLATES.items())
+                    },
                 }
-            ).estimate(
-                campaign_sizes,
-                logic_modes=(LogicMode.LAYERED,),
-                assets=4,
-                timeframes=len(campaign_timeframes),
-            )
+            else:
+                selected_blocks = list(runner._profile_blocks("hypotheses"))
+                estimate = CombinationGenerator(
+                    {block_id: registry[block_id] for block_id in selected_blocks}
+                ).estimate(
+                    campaign_sizes,
+                    logic_modes=(LogicMode.LAYERED,),
+                    assets=4,
+                    timeframes=len(campaign_timeframes),
+                )
             emit(
                 estimate
                 | {
-                    "status": "CAMPAIGN_ESTIMATE",
-                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
-                    "profile": "HYPOTHESES",
+                    "status": (
+                        "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
+                    ),
+                    "campaign": campaign_label,
+                    "profile": ("FORMAL_ECONOMIC_HYPOTHESES" if formal_campaign else "HYPOTHESES"),
                     "markets": ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"],
                     "timeframes": list(campaign_timeframes),
                     "history_mode": "common_full_history",
+                    "closed_candles_only": True,
+                    "live_orders": 0,
                 }
             )
             return 0
         if campaign_action == "run":
             registry = signal_block_registry()
-            selected_blocks = list(runner._profile_blocks("hypotheses"))
-            estimate = CombinationGenerator(
-                {
-                    block_id: registry[block_id]
-                    for block_id in selected_blocks
+            if formal_campaign:
+                selected_blocks = sorted(
+                    {
+                        block
+                        for membership in ECONOMIC_HYPOTHESIS_TEMPLATES.values()
+                        for block in membership
+                    }
+                )
+                estimate = {
+                    "baseline_experiments_upper_bound": (
+                        len(ECONOMIC_HYPOTHESIS_TEMPLATES) * 4 * len(campaign_timeframes)
+                    )
                 }
-            ).estimate(
-                campaign_sizes,
-                logic_modes=(LogicMode.LAYERED,),
-                assets=4,
-                timeframes=len(campaign_timeframes),
-            )
+            else:
+                selected_blocks = list(runner._profile_blocks("hypotheses"))
+                estimate = CombinationGenerator(
+                    {block_id: registry[block_id] for block_id in selected_blocks}
+                ).estimate(
+                    campaign_sizes,
+                    logic_modes=(LogicMode.LAYERED,),
+                    assets=4,
+                    timeframes=len(campaign_timeframes),
+                )
             confirmation_required = (
                 estimate["baseline_experiments_upper_bound"]
                 > settings.lab.confirmation_job_threshold
@@ -3845,13 +3770,13 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         if confirmation_required and not args.yes
                         else "CAMPAIGN_ACCEPTED"
                     ),
-                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "campaign": campaign_label,
                 }
             )
             if confirmation_required and not args.yes:
                 return 2
             result = await runner.run_once_guarded(
-                profile="hypotheses",
+                profile=("deep" if formal_campaign else "hypotheses"),
                 universe_size=4,
                 combination_sizes=campaign_sizes,
                 logic_modes=(LogicMode.LAYERED,),
@@ -3867,17 +3792,20 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 force=False,
                 retest=args.retest,
                 only_missing=not args.retest,
-                block_ids=None,
+                block_ids=selected_blocks,
                 parameter_overrides=None,
+                combination_templates=(ECONOMIC_HYPOTHESIS_TEMPLATES if formal_campaign else None),
             )
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
             emit(
                 {
-                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "campaign": campaign_label,
                     "leaderboards": store.export_leaderboards(),
-                    "report": store.generate_report(),
+                    "report": store.generate_report(
+                        run_id=getattr(args, "run_id", None)
+                    ),
                     "status": runner.status(),
                 }
             )
@@ -3885,15 +3813,13 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         if campaign_action == "status":
             emit(
                 {
-                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "campaign": campaign_label,
                     "status": runner.status(),
                     "queue": store.queue_status(),
                 }
             )
             return 0
-        raise AssertionError(
-            f"unhandled lab campaign action: {campaign_action}"
-        )
+        raise AssertionError(f"unhandled lab campaign action: {campaign_action}")
     if section == "run":
         arguments = _lab_generation_arguments(args)
         registry = signal_block_registry()
@@ -3911,8 +3837,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             timeframes=len(arguments["timeframes"]),
         )
         confirmation_required = (
-            estimate["baseline_experiments_upper_bound"]
-            > settings.lab.confirmation_job_threshold
+            estimate["baseline_experiments_upper_bound"] > settings.lab.confirmation_job_threshold
             or args.profile == "exhaustive"
         )
         emit(
@@ -3943,6 +3868,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         return 0
     if section == "status":
         emit(runner.status())
+        return 0
+    if section == "state":
+        emit(
+            store.reconcile_state(
+                run_id=getattr(args, "run_id", None),
+                apply=bool(getattr(args, "apply", False)),
+            )
+        )
         return 0
     if section == "queue":
         emit(store.queue_status())
@@ -3981,11 +3914,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
         elif leaderboard_action == "inspect":
             selected = next(
-                (
-                    row
-                    for row in store.leaderboard()
-                    if row.get("combination_id") == args.id
-                ),
+                (row for row in store.leaderboard() if row.get("combination_id") == args.id),
                 None,
             )
             emit(selected or {"status": "NOT_FOUND", "combination_id": args.id})
@@ -4001,9 +3930,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
     if section == "retest":
         arguments = _lab_generation_arguments(args)
         arguments.update(resume=True, retest=True)
-        emit(
-            await runner.run_once_guarded(**arguments)
-        )
+        emit(await runner.run_once_guarded(**arguments))
         return 0
     if section == "validate":
         emit(
@@ -4020,9 +3947,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             {
                 "leaderboards": store.export_leaderboards(),
                 "report": store.generate_report(),
-                "legacy_migration_report": str(
-                    write_legacy_migration_report(settings)
-                ),
+                "legacy_migration_report": str(write_legacy_migration_report(settings)),
                 "status": runner.status(),
                 "output_root": str(store.paths.root),
             }
@@ -4083,9 +4008,7 @@ async def self_test(settings: Settings) -> int:
         BacktestConfig(monte_carlo_runs=100),
         settings=test_settings,
     ).run({"BTC-EUR": features}, get_strategy("ema_trend_pullback"))
-    broker = PaperBroker(
-        ledger_path=test_settings.paths.checkpoints_dir / "self_test_paper.jsonl"
-    )
+    broker = PaperBroker(ledger_path=test_settings.paths.checkpoints_dir / "self_test_paper.jsonl")
     paper = broker.submit(
         OrderIntent(
             intent_id="self-test",
@@ -4106,9 +4029,7 @@ async def self_test(settings: Settings) -> int:
         "long_only_spot": result.integrity["long_only_spot"],
         "paper_fill": paper.status.value == "FILLED",
         "paper_reconciliation": broker.reconcile().healthy,
-        "live_blocked_without_all_gates": bool(
-            test_settings.static_live_preflight_failures()
-        ),
+        "live_blocked_without_all_gates": bool(test_settings.static_live_preflight_failures()),
     }
     temporary.cleanup()
     emit({"status": "OK" if all(checks.values()) else "FAILED", "checks": checks})
@@ -4252,9 +4173,7 @@ def _configured_alert_secrets(settings: Settings) -> tuple[str, ...]:
 
 
 def _alerter(settings: Settings) -> AlertThrottle:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
-        "TELEGRAM_TOKEN"
-    )
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     def deliver(event_type: str, payload: dict[str, Any]) -> None:
@@ -4263,10 +4182,7 @@ def _alerter(settings: Settings) -> AlertThrottle:
         body = urllib.parse.urlencode(
             {
                 "chat_id": chat_id,
-                "text": (
-                    f"{event_type}\n"
-                    f"{stable_json(payload, indent=2)[:3500]}"
-                ),
+                "text": (f"{event_type}\n{stable_json(payload, indent=2)[:3500]}"),
                 "disable_web_page_preview": "true",
             }
         ).encode("utf-8")
@@ -4313,9 +4229,7 @@ def _operational_profile(settings: Settings, profile: str) -> dict[str, Any]:
         "reserve_cash_fraction": settings.operational.reserve_cash_fraction,
         "maximum_daily_loss": settings.operational.maximum_daily_loss,
         "drawdown_warning": settings.operational.drawdown_warning,
-        "drawdown_block_new_entries": (
-            settings.operational.drawdown_block_new_entries
-        ),
+        "drawdown_block_new_entries": (settings.operational.drawdown_block_new_entries),
         "drawdown_kill_switch": settings.operational.drawdown_kill_switch,
     }
 
@@ -4345,15 +4259,9 @@ async def _operate_preflight(
         checks["database"] = health
         if health["status"] != "PASSED":
             failures.append("DATABASE_UNHEALTHY")
-        if (
-            health["read_latency_ms"]
-            > settings.operational.database_read_latency_limit_ms
-        ):
+        if health["read_latency_ms"] > settings.operational.database_read_latency_limit_ms:
             failures.append("DATABASE_READ_LATENCY_EXCEEDED")
-        if (
-            health["write_latency_ms"]
-            > settings.operational.database_write_latency_limit_ms
-        ):
+        if health["write_latency_ms"] > settings.operational.database_write_latency_limit_ms:
             failures.append("DATABASE_WRITE_LATENCY_EXCEEDED")
         disk = shutil.disk_usage(settings.paths.project_root)
         free_gb = disk.free / 1024**3
@@ -4369,9 +4277,7 @@ async def _operate_preflight(
         checks["single_instance_lock_available"] = lock_inspection["available"]
         if not lock_inspection["available"]:
             failures.append("SINGLE_INSTANCE_LOCK_UNAVAILABLE")
-        kill_switch = KillSwitch(
-            settings.paths.checkpoints_dir / "kill_switch.json"
-        )
+        kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
         checks["kill_switch"] = {
             "active": kill_switch.active,
             "reason": kill_switch.reason,
@@ -4395,9 +4301,7 @@ async def _operate_preflight(
         checks["candidate"] = {
             "candidate_id": candidate.candidate_id if candidate else None,
             "status": (
-                candidate.lifecycle_state.value
-                if candidate
-                else "IDLE_NO_APPROVED_CANDIDATE"
+                candidate.lifecycle_state.value if candidate else "IDLE_NO_APPROVED_CANDIDATE"
             ),
         }
         if probe_public:
@@ -4441,15 +4345,11 @@ async def _operate_preflight(
                             "ticker_at": ticker.timestamp,
                             "orderbook_at": book.timestamp,
                             "orderbook_valid": valid_book,
-                            "latest_closed_candle": (
-                                closed[-1].timestamp if closed else None
-                            ),
+                            "latest_closed_candle": (closed[-1].timestamp if closed else None),
                         }
                     )
                 except Exception as exc:
-                    failures.append(
-                        f"BITVAVO_PUBLIC_DATA_UNHEALTHY:{market}:{type(exc).__name__}"
-                    )
+                    failures.append(f"BITVAVO_PUBLIC_DATA_UNHEALTHY:{market}:{type(exc).__name__}")
             checks["bitvavo_public"] = public_checks
         else:
             checks["bitvavo_public"] = {"status": "NOT_PROBED"}
@@ -4473,15 +4373,17 @@ async def _operate_preflight(
                 failures.append("PAPER_RECONCILIATION_FAILED")
         checks["private_exchange_requests"] = 0
         checks["live_orders"] = 0
+        already_running = (
+            "SINGLE_INSTANCE_LOCK_UNAVAILABLE" in failures
+            and lock_inspection.get("reason_code") == "LOCK_HELD_BY_LIVE_PROCESS"
+        )
         return {
-            "status": "PASSED" if not failures else "FAILED",
+            "status": (
+                "PASSED" if not failures else "ALREADY_RUNNING" if already_running else "FAILED"
+            ),
             "mode": mode,
             "profile": selected_profile,
-            "service_state": (
-                "IDLE_NO_APPROVED_CANDIDATE"
-                if candidate is None
-                else "READY"
-            ),
+            "service_state": ("IDLE_NO_APPROVED_CANDIDATE" if candidate is None else "READY"),
             "failures": list(dict.fromkeys(failures)),
             "checks": checks,
         }
@@ -4497,6 +4399,7 @@ async def _operational_cycle(
     mode: str,
     profile: dict[str, Any],
     candidate_id: str | None,
+    candidate_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from data.orderbook_l2 import Level2OrderBook
     from risk.risk_manager import OperationalDegradation
@@ -4516,6 +4419,23 @@ async def _operational_cycle(
         )
         closed_candles = [record for record in candle_records if record.closed]
         latest_closed = closed_candles[-1] if closed_candles else None
+        interval_seconds = TIMEFRAME_SECONDS[profile["execution_timeframe"]]
+        grace_seconds = settings.market_data.candle_close_grace_for(
+            profile["execution_timeframe"]
+        )
+        trusted_epoch = cycle_at.timestamp() - grace_seconds
+        expected_open_epoch = (
+            math.floor(trusted_epoch / interval_seconds) * interval_seconds
+            - interval_seconds
+        )
+        expected_latest_closed_open = datetime.fromtimestamp(
+            expected_open_epoch,
+            tz=UTC,
+        )
+        candle_fresh = bool(
+            latest_closed
+            and latest_closed.timestamp >= expected_latest_closed_open
+        )
         ticker = await loader.download_ticker(
             provider="bitvavo", market=market, persist=True, mode=mode
         )
@@ -4564,22 +4484,11 @@ async def _operational_cycle(
             "sequence_health": "VALID" if book.valid else "INVALID",
         }
         database.upsert_records("orderbook_statistics", [stats])
-        buys = [
-            item
-            for item in trades
-            if str(item.values.get("side") or "").casefold() == "buy"
-        ]
-        sells = [
-            item
-            for item in trades
-            if str(item.values.get("side") or "").casefold() == "sell"
-        ]
+        buys = [item for item in trades if str(item.values.get("side") or "").casefold() == "buy"]
+        sells = [item for item in trades if str(item.values.get("side") or "").casefold() == "sell"]
         buy_volume = sum(float(item.values.get("quantity") or 0) for item in buys)
         sell_volume = sum(float(item.values.get("quantity") or 0) for item in sells)
-        quantities = [
-            float(item.values.get("quantity") or 0)
-            for item in trades
-        ]
+        quantities = [float(item.values.get("quantity") or 0) for item in trades]
         trade_aggregate = {
             "external_id": stable_hash(
                 ["trade-aggregate", market, cycle_at.isoformat()],
@@ -4600,25 +4509,63 @@ async def _operational_cycle(
                 if buy_volume + sell_volume
                 else 0.0
             ),
-            "average_trade_size": (
-                sum(quantities) / len(quantities) if quantities else 0.0
-            ),
+            "average_trade_size": (sum(quantities) / len(quantities) if quantities else 0.0),
             "large_trade_count": sum(
-                quantity > np.quantile(quantities, 0.95)
-                for quantity in quantities
+                quantity > np.quantile(quantities, 0.95) for quantity in quantities
             )
             if quantities
             else 0,
             "trade_intensity": len(trades),
         }
         database.upsert_records("trades", [trade_aggregate])
+        context_hash = stable_hash(
+            {
+                "ticker": ticker.raw_hash,
+                "orderbook": snapshot.raw_hash,
+                "trades": [item.raw_hash for item in trades],
+            },
+            length=64,
+        )
+        data_hash = latest_closed.raw_hash if latest_closed else ticker.raw_hash
+        feature_snapshot_hash = stable_hash(
+            [
+                market,
+                profile["execution_timeframe"],
+                data_hash,
+                context_hash,
+                [],
+            ],
+            length=64,
+        )
+        decision_hash = stable_hash(
+            {
+                "action": "NO_ENTRY",
+                "entry_state": False,
+                "exit_state": False,
+                "risk_decision": "BLOCKED",
+                "reason": (
+                    "STALE_OR_MISSING_CLOSED_CANDLE"
+                    if not candle_fresh
+                    else (
+                        "IDLE_NO_APPROVED_CANDIDATE"
+                        if candidate_id is None
+                        else "NO_ENTRY_SIGNAL"
+                    )
+                ),
+            },
+            length=64,
+        )
+        identity = dict(candidate_identity or {})
         signal_records.append(
             {
                 "external_id": stable_hash(
                     [
-                        "operational-signal-v2",
+                        "operational-signal-v3",
                         mode,
                         candidate_id,
+                        identity.get("manifest_hash"),
+                        identity.get("software_version"),
+                        identity.get("parameter_hash"),
                         market,
                         profile["execution_timeframe"],
                         (
@@ -4626,6 +4573,10 @@ async def _operational_cycle(
                             if latest_closed
                             else "NO_CLOSED_CANDLE"
                         ),
+                        data_hash,
+                        context_hash,
+                        feature_snapshot_hash,
+                        decision_hash,
                     ],
                     length=32,
                 ),
@@ -4637,16 +4588,17 @@ async def _operational_cycle(
                 "status": "NO_ENTRY",
                 "mode": mode,
                 "candidate_id": candidate_id,
+                "candidate_manifest_hash": identity.get("manifest_hash"),
+                "strategy_dna_hash": identity.get("strategy_dna_hash"),
+                "strategy_software_version": identity.get("software_version"),
+                "parameter_hash": identity.get("parameter_hash"),
+                "signal_identity_schema_version": 3,
                 "candle_timestamp": (
-                    latest_closed.timestamp.isoformat()
-                    if latest_closed
-                    else None
+                    latest_closed.timestamp.isoformat() if latest_closed else None
                 ),
                 "evaluated_at": cycle_at.isoformat(),
                 "evaluation_key": (
-                    latest_closed.timestamp.isoformat()
-                    if latest_closed
-                    else "NO_CLOSED_CANDLE"
+                    latest_closed.timestamp.isoformat() if latest_closed else "NO_CLOSED_CANDLE"
                 ),
                 "action": "NO_ENTRY",
                 "entry_state": False,
@@ -4654,17 +4606,20 @@ async def _operational_cycle(
                 "regime_state": "NOT_EVALUATED" if candidate_id is None else "NEUTRAL",
                 "active_blocks": [],
                 "inactive_blocks": [],
-                "feature_snapshot_hash": None,
-                "data_hash": (
-                    latest_closed.raw_hash if latest_closed else ticker.raw_hash
-                ),
-                "context_hash": None,
+                "feature_snapshot_hash": feature_snapshot_hash,
+                "data_hash": data_hash,
+                "context_hash": context_hash,
+                "decision_hash": decision_hash,
                 "size_multiplier": 0.0,
                 "risk_decision": "BLOCKED",
                 "final_reason_code": (
-                    "IDLE_NO_APPROVED_CANDIDATE"
-                    if candidate_id is None
-                    else "NO_ENTRY_SIGNAL"
+                    "STALE_OR_MISSING_CLOSED_CANDLE"
+                    if not candle_fresh
+                    else (
+                        "IDLE_NO_APPROVED_CANDIDATE"
+                        if candidate_id is None
+                        else "NO_ENTRY_SIGNAL"
+                    )
                 ),
             }
         )
@@ -4675,6 +4630,14 @@ async def _operational_cycle(
                 "latest_closed_candle": (
                     latest_closed.timestamp if latest_closed else None
                 ),
+                "closed_candle_freshness": {
+                    "status": "FRESH" if candle_fresh else "STALE",
+                    "expected_latest_open": expected_latest_closed_open,
+                    "observed_latest_open": (
+                        latest_closed.timestamp if latest_closed else None
+                    ),
+                    "grace_seconds": grace_seconds,
+                },
                 "trade_count": len(trades),
                 "orderbook": stats,
             }
@@ -4685,10 +4648,17 @@ async def _operational_cycle(
         audit_path=settings.paths.logs_dir / "degradation_audit.jsonl",
     )
     degradation_status = degradation.evaluate(
-        block_new_entries=tuple(
-            f"ORDERBOOK_INVALID:{row['market']}"
-            for row in market_results
-            if row["orderbook"]["sequence_health"] != "VALID"
+        block_new_entries=(
+            tuple(
+                f"ORDERBOOK_INVALID:{row['market']}"
+                for row in market_results
+                if row["orderbook"]["sequence_health"] != "VALID"
+            )
+            + tuple(
+                f"CLOSED_CANDLE_STALE:{row['market']}"
+                for row in market_results
+                if row["closed_candle_freshness"]["status"] != "FRESH"
+            )
         ),
     )
     if degradation_status["state"] != "NORMAL":
@@ -4710,9 +4680,7 @@ async def _operational_cycle(
         )
     database.apply_retention(
         "orderbook_snapshots",
-        older_than=timedelta(
-            days=settings.market_data.maximum_orderbook_retention_days
-        ),
+        older_than=timedelta(days=settings.market_data.maximum_orderbook_retention_days),
     )
     database.apply_retention(
         "trades",
@@ -4738,9 +4706,7 @@ def _operational_status(
 
     selected_profile = _operational_profile(settings, profile)
     service_id = _operation_service_id(mode)
-    heartbeat_path = (
-        settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
-    )
+    heartbeat_path = settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
     heartbeat = read_json(heartbeat_path) if heartbeat_path.is_file() else {}
     database = Database(
         supported_database_url(settings),
@@ -4748,12 +4714,9 @@ def _operational_status(
     )
     database.migrate()
     try:
-        provider_rows = [
-            row["payload"] for row in database.fetch_records("provider_health")
-        ]
+        provider_rows = [row["payload"] for row in database.fetch_records("provider_health")]
         latest_signals = [
-            row["payload"]
-            for row in database.fetch_recent_records("strategy_signals", limit=20)
+            row["payload"] for row in database.fetch_recent_records("strategy_signals", limit=20)
         ]
         latest_candles = database.latest_closed_candles(
             markets=selected_profile["markets"],
@@ -4764,25 +4727,39 @@ def _operational_status(
             ),
             provider="bitvavo",
         )
+        now = utc_now()
+        closed_candle_freshness: dict[str, Any] = {}
+        for key, value in latest_candles.items():
+            timeframe = key.rsplit(":", 1)[-1]
+            timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            interval_seconds = TIMEFRAME_SECONDS[timeframe]
+            grace_seconds = settings.market_data.candle_close_grace_for(timeframe)
+            expected_epoch = (
+                math.floor((now.timestamp() - grace_seconds) / interval_seconds)
+                * interval_seconds
+                - interval_seconds
+            )
+            expected = datetime.fromtimestamp(expected_epoch, tz=UTC)
+            closed_candle_freshness[key] = {
+                "status": "FRESH" if timestamp >= expected else "STALE",
+                "observed_latest_open": timestamp,
+                "expected_latest_open": expected,
+                "grace_seconds": grace_seconds,
+            }
         counts = database.health()["table_counts"]
         active = _active_candidate_record(settings, mode)
-        kill_switch = KillSwitch(
-            settings.paths.checkpoints_dir / "kill_switch.json"
-        )
+        kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
         heartbeat_at = heartbeat.get("heartbeat_at")
         heartbeat_age = None
         if heartbeat_at:
             heartbeat_age = (
-                utc_now()
-                - datetime.fromisoformat(str(heartbeat_at).replace("Z", "+00:00"))
+                utc_now() - datetime.fromisoformat(str(heartbeat_at).replace("Z", "+00:00"))
             ).total_seconds()
         uptime = None
         if heartbeat.get("started_at"):
             uptime = (
                 utc_now()
-                - datetime.fromisoformat(
-                    str(heartbeat["started_at"]).replace("Z", "+00:00")
-                )
+                - datetime.fromisoformat(str(heartbeat["started_at"]).replace("Z", "+00:00"))
             ).total_seconds()
         heartbeat_state = heartbeat.get("state")
         service_state = (
@@ -4805,6 +4782,7 @@ def _operational_status(
             ],
             "provider_health": provider_rows,
             "latest_closed_candles": latest_candles,
+            "closed_candle_freshness": closed_candle_freshness,
             "context_freshness": {},
             "latest_signals": latest_signals,
             "open_paper_positions": [],
@@ -4816,13 +4794,9 @@ def _operational_status(
             "daily_pnl": 0.0,
             "drawdown": 0.0,
             "risk_state": "KILL_SWITCH" if kill_switch.active else "NORMAL",
-            "kill_switch_state": (
-                "ACTIVE" if kill_switch.active else "INACTIVE"
-            ),
+            "kill_switch_state": ("ACTIVE" if kill_switch.active else "INACTIVE"),
             "recent_errors": [
-                row
-                for row in provider_rows
-                if row.get("status") not in {"READY", "PASSED"}
+                row for row in provider_rows if row.get("status") not in {"READY", "PASSED"}
             ][-10:],
             "next_scheduled_jobs": heartbeat.get("next_scheduled_operation"),
             "table_counts": counts,
@@ -4860,7 +4834,7 @@ async def _operate_start(
     )
     if preflight["failures"]:
         emit(preflight)
-        return 2
+        return 0 if preflight["status"] == "ALREADY_RUNNING" else 2
     profile = _operational_profile(settings, args.profile)
     database = Database(
         supported_database_url(settings),
@@ -4876,11 +4850,18 @@ async def _operate_start(
     )
     active = _active_candidate_record(settings, args.mode)
     candidate_id = str(active["candidate_id"]) if active else None
+    candidate_identity: dict[str, Any] | None = None
+    if candidate_id is not None:
+        candidate = _load_candidate(settings, candidate_id)
+        candidate_identity = {
+            "manifest_hash": candidate.manifest_hash,
+            "strategy_dna_hash": candidate.strategy_dna_hash,
+            "software_version": candidate.software_version,
+            "parameter_hash": candidate.parameter_hash,
+        }
     service.active_candidate = candidate_id
     service.kill_switch_state = "INACTIVE"
-    service.next_scheduled_operation = (
-        "RISK_RECONCILIATION_THEN_NEXT_CLOSED_1H_CANDLE"
-    )
+    service.next_scheduled_operation = "RISK_RECONCILIATION_THEN_NEXT_CLOSED_1H_CANDLE"
     started = time.monotonic()
     soak_seconds = max(0.0, float(args.soak_minutes or 0.0) * 60.0)
     last_cycle: dict[str, Any] = {}
@@ -4900,6 +4881,7 @@ async def _operate_start(
                 mode=args.mode,
                 profile=profile,
                 candidate_id=candidate_id,
+                candidate_identity=candidate_identity,
             )
             service.kill_switch_state = last_cycle["risk_state"]["state"]
         except Exception as exc:
@@ -4963,9 +4945,7 @@ async def _operate_start(
                     "candidate_id": candidate_id,
                     "started_monotonic": started,
                     "completed_at": utc_now(),
-                    "operation": "OPERATIONAL_SHADOW_SOAK"
-                    if soak_seconds
-                    else "OPERATIONAL_CYCLE",
+                    "operation": "OPERATIONAL_SHADOW_SOAK" if soak_seconds else "OPERATIONAL_CYCLE",
                     "private_exchange_requests": 0,
                     "live_orders": 0,
                 }
@@ -4982,9 +4962,7 @@ async def _operate_start(
         profile=args.profile,
     )
     status["last_cycle"] = last_cycle
-    status["service_state"] = (
-        "IDLE_NO_APPROVED_CANDIDATE" if candidate_id is None else "STOPPED"
-    )
+    status["service_state"] = "IDLE_NO_APPROVED_CANDIDATE" if candidate_id is None else "STOPPED"
     emit(status)
     return 0
 
@@ -4997,10 +4975,7 @@ def _task_xml(settings: Settings, *, mode: str, profile: str) -> str:
         if settings.operational.task_start_trigger == "logon"
         else "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
     )
-    arguments = (
-        f'"{main}" operate start --mode {mode} --profile {profile} '
-        "--continuous --resume"
-    )
+    arguments = f'"{main}" operate start --mode {mode} --profile {profile} --continuous --resume'
     return (
         '<?xml version="1.0" encoding="UTF-16"?>'
         '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
@@ -5012,7 +4987,7 @@ def _task_xml(settings: Settings, *, mode: str, profile: str) -> str:
         "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
         "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"
         f"<RestartOnFailure><Interval>PT1M</Interval><Count>{settings.operational.task_restart_count}</Count></RestartOnFailure>"
-        "</Settings><Actions Context=\"Author\"><Exec>"
+        '</Settings><Actions Context="Author"><Exec>'
         f"<Command>{html.escape(str(python))}</Command>"
         f"<Arguments>{html.escape(arguments)}</Arguments>"
         f"<WorkingDirectory>{html.escape(str(settings.paths.project_root))}</WorkingDirectory>"
@@ -5022,6 +4997,49 @@ def _task_xml(settings: Settings, *, mode: str, profile: str) -> str:
 
 async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
     action = args.operate_command
+    if action in {"lock-status", "recover-stale-lock"}:
+        from data.data_loader import ContinuousDataService
+
+        lock_path = settings.paths.checkpoints_dir / "data_service.lock"
+        if action == "lock-status":
+            emit(
+                {
+                    "status": "LOCK_STATUS",
+                    "lock_path": lock_path,
+                    "lock": ContinuousDataService.inspect_lock_path(lock_path),
+                }
+            )
+            return 0
+        try:
+            recovery = ContinuousDataService.recover_stale_lock_path(lock_path)
+        except RuntimeError as exc:
+            emit(
+                {
+                    "status": "BLOCKED",
+                    "reason_code": str(exc),
+                    "lock": ContinuousDataService.inspect_lock_path(lock_path),
+                }
+            )
+            return 2
+        emit({"status": "RECOVERED" if recovery.get("recovered") else "NOOP", **recovery})
+        return 0
+    if action == "signal-identity":
+        from data.database import Database
+
+        database = Database(
+            supported_database_url(settings),
+            sqlite_path=settings.paths.database_path,
+        )
+        database.migrate()
+        try:
+            emit(
+                database.signal_identity_audit(
+                    apply=bool(getattr(args, "apply", False))
+                )
+            )
+        finally:
+            database.close()
+        return 0
     if action == "preflight":
         result = await _operate_preflight(
             settings,
@@ -5074,26 +5092,24 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             "requested_at": utc_now(),
             "requested_by": "CLI",
         }
-        path = (
-            settings.paths.checkpoints_dir
-            / f"{service_id}_control.json"
-        )
+        path = settings.paths.checkpoints_dir / f"{service_id}_control.json"
         atomic_write_json(path, request)
+        explicit_wait = bool(getattr(args, "wait", False)) or (
+            getattr(args, "wait_seconds", None) is not None
+        )
         wait_seconds = (
             float(
-                getattr(args, "wait_seconds", None)
-                if getattr(args, "wait_seconds", None) is not None
-                else settings.operational.control_wait_seconds
+                getattr(args, "timeout", None)
+                or getattr(args, "wait_seconds", None)
+                or settings.operational.control_wait_seconds
             )
-            if action in {"drain", "stop"}
+            if action in {"drain", "stop"} and explicit_wait
             else 0.0
         )
         if wait_seconds <= 0:
             emit({"status": "REQUESTED", **request, "control_path": path})
             return 0
-        heartbeat_path = (
-            settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
-        )
+        heartbeat_path = settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
         deadline = time.monotonic() + wait_seconds
         last_heartbeat: dict[str, Any] = {}
         while time.monotonic() < deadline:
@@ -5103,27 +5119,23 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                 except (OSError, ValueError, TypeError):
                     last_heartbeat = {}
             lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
+            expected_terminal_state = "DRAINED" if action == "drain" else "STOPPED"
             if (
-                str(last_heartbeat.get("state") or "").upper() == "STOPPED"
+                str(last_heartbeat.get("state") or "").upper() == expected_terminal_state
                 and lock_inspection["available"]
             ):
                 emit(
                     {
-                        "status": "ACKNOWLEDGED",
+                        "status": expected_terminal_state,
                         **request,
-                        "service_state": "STOPPED",
+                        "service_state": expected_terminal_state,
                         "reason_code": last_heartbeat.get("reason_code"),
-                        "waited_seconds": (
-                            settings.operational.control_wait_seconds
-                            if getattr(args, "wait_seconds", None) is None
-                            else float(args.wait_seconds)
-                        )
-                        - max(0.0, deadline - time.monotonic()),
+                        "waited_seconds": (wait_seconds) - max(0.0, deadline - time.monotonic()),
                         "control_path": path,
                     }
                 )
                 return 0
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(float(getattr(args, "poll_seconds", 0.2)))
         emit(
             {
                 "status": "TIMEOUT",
@@ -5138,9 +5150,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
     if action == "reconcile":
         from execution.execution import PaperBroker
 
-        broker = PaperBroker(
-            ledger_path=settings.paths.checkpoints_dir / "paper_execution.jsonl"
-        )
+        broker = PaperBroker(ledger_path=settings.paths.checkpoints_dir / "paper_execution.jsonl")
         emit(asdict(broker.reconcile()))
         return 0
     if action == "candidates":
@@ -5168,9 +5178,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                 )
         emit(
             {
-                "status": (
-                    "IDLE_NO_APPROVED_CANDIDATE" if not candidates else "READY"
-                ),
+                "status": ("IDLE_NO_APPROVED_CANDIDATE" if not candidates else "READY"),
                 "candidates": candidates,
             }
         )
@@ -5187,8 +5195,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
         )
         if candidate.lifecycle_state is not expected:
             raise PermissionError(
-                f"candidate must be {expected.value}, got "
-                f"{candidate.lifecycle_state.value}"
+                f"candidate must be {expected.value}, got {candidate.lifecycle_state.value}"
             )
         if candidate.expires_at <= utc_now():
             raise PermissionError("candidate is expired")
@@ -5263,18 +5270,10 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             mode=args.mode,
             profile=args.profile,
         )
-        unresolved = [
-            reason
-            for reason in health["failures"]
-            if reason != "KILL_SWITCH_ACTIVE"
-        ]
+        unresolved = [reason for reason in health["failures"] if reason != "KILL_SWITCH_ACTIVE"]
         if unresolved:
-            raise RuntimeError(
-                f"kill-switch health checks unresolved: {unresolved}"
-            )
-        kill_switch = KillSwitch(
-            settings.paths.checkpoints_dir / "kill_switch.json"
-        )
+            raise RuntimeError(f"kill-switch health checks unresolved: {unresolved}")
+        kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
         kill_switch.reset(
             approval_phrase="OPERATOR_CONFIRMED_RESET",
             required_phrase="OPERATOR_CONFIRMED_RESET",
@@ -5330,10 +5329,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                         "mode": args.mode,
                         "live_default": False,
                         "virtualenv_python": str(
-                            settings.paths.project_root
-                            / ".venv"
-                            / "Scripts"
-                            / "python.exe"
+                            settings.paths.project_root / ".venv" / "Scripts" / "python.exe"
                         ),
                         "working_directory": settings.paths.project_root,
                         "xml": xml,
@@ -5381,9 +5377,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("doctor")
     commands.add_parser("self-test")
 
-    config = commands.add_parser("config").add_subparsers(
-        dest="config_command", required=True
-    )
+    config = commands.add_parser("config").add_subparsers(dest="config_command", required=True)
     config.add_parser("show")
     config.add_parser("validate")
 
@@ -5457,7 +5451,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name in ("run", "soak"):
         selected = websocket.add_parser(name)
-        selected.add_argument("--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo")
+        selected.add_argument(
+            "--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo"
+        )
         selected.add_argument("--market", default="BTC-EUR")
         selected.add_argument("--duration", type=float, default=60.0 if name == "run" else 900.0)
     websocket.add_parser("status")
@@ -5467,20 +5463,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name in ("snapshot", "stream", "inspect"):
         selected = orderbook.add_parser(name)
-        selected.add_argument("--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo")
+        selected.add_argument(
+            "--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo"
+        )
         selected.add_argument("--market", default="BTC-EUR")
         selected.add_argument("--depth", type=int, default=100)
 
-    macro = commands.add_parser("macro").add_subparsers(
-        dest="macro_command", required=True
-    )
+    macro = commands.add_parser("macro").add_subparsers(dest="macro_command", required=True)
     macro_build = macro.add_parser("build")
     macro_build.add_argument("--timeframes", default="1h,4h,12h,1d")
     macro.add_parser("inspect")
 
-    gex = commands.add_parser("gex").add_subparsers(
-        dest="gex_command", required=True
-    )
+    gex = commands.add_parser("gex").add_subparsers(dest="gex_command", required=True)
     gex_collect = gex.add_parser("collect")
     gex_collect.add_argument("--underlying", choices=("BTC", "ETH"), default="BTC")
     gex.add_parser("inspect")
@@ -5491,15 +5485,11 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("status", "reconcile", "pnl"):
         positions.add_parser(name)
 
-    risk_command = commands.add_parser("risk").add_subparsers(
-        dest="risk_command", required=True
-    )
+    risk_command = commands.add_parser("risk").add_subparsers(dest="risk_command", required=True)
     for name in ("correlation", "drawdown", "kill-switch-status"):
         risk_command.add_parser(name)
 
-    scrape = commands.add_parser("scrape").add_subparsers(
-        dest="scrape_command", required=True
-    )
+    scrape = commands.add_parser("scrape").add_subparsers(dest="scrape_command", required=True)
     scrape_run = scrape.add_parser("run")
     scrape_run.add_argument("--no-rss", action="store_true")
     scrape_run.add_argument("--sources", default="all")
@@ -5531,9 +5521,7 @@ def build_parser() -> argparse.ArgumentParser:
     indicator_list.add_argument("--family")
     indicator_list.add_argument("--status")
     indicator_list.add_argument("--role")
-    indicator_list.add_argument(
-        "--provider-availability", choices=("required", "internal")
-    )
+    indicator_list.add_argument("--provider-availability", choices=("required", "internal"))
     indicator_list.add_argument("--tradable-only", action="store_true")
     indicator_list.add_argument("--research-only", action="store_true")
     indicator_describe = indicators.add_parser("describe")
@@ -5563,7 +5551,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     optimize = commands.add_parser("optimize")
     add_research_arguments(optimize)
-    optimize.add_argument("--method", choices=("grid", "random", "coordinate", "optuna"), default="random")
+    optimize.add_argument(
+        "--method", choices=("grid", "random", "coordinate", "optuna"), default="random"
+    )
     optimize.add_argument("--trials", type=int, default=20)
     optimize.add_argument("--rounds", type=int, default=2)
     optimize.add_argument("--minimum-trades", type=int, default=1)
@@ -5592,7 +5582,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="run",
     )
     add_research_arguments(research)
-    research.add_argument("--method", choices=("grid", "random", "coordinate", "optuna"), default="random")
+    research.add_argument(
+        "--method", choices=("grid", "random", "coordinate", "optuna"), default="random"
+    )
     research.add_argument("--trials", type=int, default=20)
     research.add_argument("--purge-bars", type=int, default=1)
     research.add_argument("--embargo-bars", type=int, default=1)
@@ -5610,9 +5602,7 @@ def build_parser() -> argparse.ArgumentParser:
     report = commands.add_parser("report")
     report.add_argument("path")
 
-    tests = commands.add_parser("test").add_subparsers(
-        dest="test_mode", required=True
-    )
+    tests = commands.add_parser("test").add_subparsers(dest="test_mode", required=True)
     for name in (
         "offline",
         "network",
@@ -5624,15 +5614,11 @@ def build_parser() -> argparse.ArgumentParser:
         "paper",
         "secrets",
     ):
-        tests.add_parser(name).set_defaults(
-            duration=10 if name in {"network", "websockets"} else 0
-        )
+        tests.add_parser(name).set_defaults(duration=10 if name in {"network", "websockets"} else 0)
     soak = tests.add_parser("soak")
     soak.add_argument("--duration", type=float, default=900.0)
 
-    paper = commands.add_parser("paper").add_subparsers(
-        dest="paper_command", required=True
-    )
+    paper = commands.add_parser("paper").add_subparsers(dest="paper_command", required=True)
     paper.add_parser("status")
     paper.add_parser("reconcile")
     paper_run = paper.add_parser("run")
@@ -5676,6 +5662,8 @@ def build_parser() -> argparse.ArgumentParser:
         "stop",
         "reconcile",
         "report",
+        "lock-status",
+        "recover-stale-lock",
     ):
         selected = operate.add_parser(name)
         selected.add_argument(
@@ -5685,7 +5673,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         selected.add_argument("--profile", default="practical_spot_v1")
         if name in {"drain", "stop"}:
+            selected.add_argument("--wait", action="store_true")
+            selected.add_argument("--timeout", type=float)
+            selected.add_argument("--poll-seconds", type=float, default=0.2)
             selected.add_argument("--wait-seconds", type=float)
+    signal_identity = operate.add_parser("signal-identity")
+    signal_identity.add_argument("--apply", action="store_true")
     operate_start = operate.add_parser("start")
     operate_start.add_argument(
         "--mode",
@@ -5804,20 +5797,32 @@ def build_parser() -> argparse.ArgumentParser:
         selected.add_argument("--yes", action="store_true")
     for name in ("pause", "resume", "drain", "stop", "status"):
         lab.add_parser(name)
+    lab_state = lab.add_parser("state")
+    lab_state.add_argument("--run-id")
+    lab_state.add_argument("--apply", action="store_true")
     campaign = lab.add_parser("campaign").add_subparsers(
         dest="lab_action",
         required=True,
     )
+    campaign_names = ("microstructure-5m15m", "formal-five-family")
+    campaign_plan = campaign.add_parser("plan")
+    campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])
+    campaign_plan.add_argument("--combination-sizes", default="1,2")
     campaign_estimate = campaign.add_parser("estimate")
+    campaign_estimate.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_estimate.add_argument("--combination-sizes", default="1,2")
     campaign_run = campaign.add_parser("run")
+    campaign_run.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_run.add_argument("--combination-sizes", default="1,2")
     campaign_run.add_argument("--workers", type=int, default=4)
     campaign_run.add_argument("--max-trials", type=int, default=20)
     campaign_run.add_argument("--retest", action="store_true")
     campaign_run.add_argument("--yes", action="store_true")
-    campaign.add_parser("status")
-    campaign.add_parser("report")
+    campaign_status = campaign.add_parser("status")
+    campaign_status.add_argument("--name", choices=campaign_names, default=campaign_names[0])
+    campaign_report = campaign.add_parser("report")
+    campaign_report.add_argument("--name", choices=campaign_names, default=campaign_names[0])
+    campaign_report.add_argument("--run-id")
     lab.add_parser("queue")
     lab.add_parser("workers")
     lab.add_parser("failures")
@@ -5929,9 +5934,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = Settings.load()
         assert settings is not None
-        process_run_id = stable_hash(
-            [settings.app.app_name, time.time_ns()], length=16
-        )
+        process_run_id = stable_hash([settings.app.app_name, time.time_ns()], length=16)
         logger = configure_logging(
             log_file=settings.paths.logs_dir / "application.log",
             jsonl_file=settings.paths.logs_dir / "application.jsonl",

@@ -17,6 +17,7 @@ from data.database import TABLE_NAMES, Database
 from data.market_data import save_ohlcv
 from research.backtest import BacktestConfig, BacktestEngine
 from research.combinatorial_lab import (
+    ECONOMIC_HYPOTHESIS_TEMPLATES,
     HYPOTHESIS_BLOCKS,
     BlockDirection,
     BlockRole,
@@ -186,6 +187,32 @@ def test_signal_block_registry_is_safe_complete_and_constrained() -> None:
         registry["ema_trend"].parameters(
             {"fast": Decimal("50.0"), "slow": Decimal("20.0")}
         )
+
+
+def test_economic_hypothesis_templates_are_exact_and_statically_valid() -> None:
+    registry = signal_block_registry()
+    assert set(ECONOMIC_HYPOTHESIS_TEMPLATES) == {
+        "TREND_BREAKOUT",
+        "PULLBACK_IN_UPTREND",
+        "RANGE_MEAN_REVERSION",
+        "VOLATILITY_EXPANSION",
+        "BTC_RELATIVE_STRENGTH",
+    }
+    for membership in ECONOMIC_HYPOTHESIS_TEMPLATES.values():
+        generated = CombinationGenerator(registry).generate(
+            sizes=(len(membership),),
+            logic_modes=(LogicMode.LAYERED,),
+            mode=GenerationMode.FAMILY_AWARE,
+            block_ids=membership,
+            timeframes=("1h",),
+        )
+        exact = [
+            item
+            for item in generated
+            if item.block_ids == tuple(sorted(membership))
+        ]
+        assert len(exact) == 1
+        assert exact[0].eligibility_status is CombinationState.GENERATED
 
 
 def test_combinations_one_through_five_are_canonical_and_accounted() -> None:

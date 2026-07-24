@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -101,7 +102,7 @@ async def test_unsupported_native_timeframe_rejected_and_canonical_resample_is_c
 
 
 @pytest.mark.asyncio
-async def test_continuous_service_recovers_stale_lock_and_stops_cleanly(
+async def test_continuous_service_requires_explicit_stale_lock_recovery(
     isolated_settings: Settings,
     tmp_path,
 ) -> None:
@@ -118,6 +119,14 @@ async def test_continuous_service_recovers_stale_lock_and_stops_cleanly(
         nonlocal calls
         calls += 1
 
+    with pytest.raises(
+        RuntimeError,
+        match="DATA_SERVICE_STALE_LOCK_REQUIRES_EXPLICIT_RECOVERY",
+    ):
+        await service.start(operation, interval_seconds=0.01, once=True)
+    recovery = ContinuousDataService.recover_stale_lock_path(service.lock_path)
+    assert recovery["recovered"]
+    assert Path(recovery["archive_path"]).is_file()
     await service.start(operation, interval_seconds=0.01, once=True)
     assert calls == 1
     assert service.status()["status"] == "STOPPED"
@@ -182,7 +191,7 @@ async def test_continuous_service_pause_resume_drain_and_state_payload(
     service.drain()
     await asyncio.wait_for(task, timeout=1.0)
     status = service.status()
-    assert status["state"] == "STOPPED"
+    assert status["state"] == "DRAINED"
     assert status["mode"] == "shadow"
     assert status["current_cycle"] >= 1
     assert not service._active_tasks

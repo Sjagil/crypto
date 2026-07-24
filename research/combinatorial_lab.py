@@ -40,6 +40,7 @@ from data.database import Database
 from data.market_data import (
     load_ohlcv,
     quality_report,
+    resample_ohlcv,
     save_ohlcv,
     timeframe_delta,
     validate_ohlcv,
@@ -231,10 +232,7 @@ def _finite_json(value: Any) -> Any:
 
 
 def canonical_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        str(key): _canonical_value(parameters[key])
-        for key in sorted(parameters)
-    }
+    return {str(key): _canonical_value(parameters[key]) for key in sorted(parameters)}
 
 
 def parameter_hash(parameters: Mapping[str, Any]) -> str:
@@ -262,11 +260,15 @@ class ParameterSpec:
                 raise ValueError("HALF_STEP requires an exact Decimal 0.5 step")
         if self.integer_only and self.kind is not ParameterKind.INTEGER:
             raise ValueError("integer-only parameters must use INTEGER kind")
-        if self.kind in {
-            ParameterKind.CHOICE,
-            ParameterKind.TIMEFRAME,
-            ParameterKind.BOOLEAN,
-        } and not self.choices:
+        if (
+            self.kind
+            in {
+                ParameterKind.CHOICE,
+                ParameterKind.TIMEFRAME,
+                ParameterKind.BOOLEAN,
+            }
+            and not self.choices
+        ):
             raise ValueError(f"{self.kind} requires choices")
         if self.default is not None:
             self.validate(self.default)
@@ -296,8 +298,7 @@ class ParameterSpec:
         step = float(self.step or 1.0)
         count = int(math.floor((float(self.maximum) - float(self.minimum)) / step))
         return tuple(
-            self.validate(float(self.minimum) + index * step)
-            for index in range(count + 1)
+            self.validate(float(self.minimum) + index * step) for index in range(count + 1)
         )
 
     def validate(self, value: Any) -> Any:
@@ -391,12 +392,9 @@ class SignalBlock:
         unknown = sorted(set(selected) - set(specs))
         if unknown:
             raise ValueError(f"unknown parameters for {self.block_id}: {unknown}")
-        validated = {
-            name: specs[name].validate(value) for name, value in selected.items()
-        }
-        if (
-            self.block_id == "ema_trend"
-            and _decimal(validated["fast"]) >= _decimal(validated["slow"])
+        validated = {name: specs[name].validate(value) for name, value in selected.items()}
+        if self.block_id == "ema_trend" and _decimal(validated["fast"]) >= _decimal(
+            validated["slow"]
         ):
             raise ValueError("ema_trend.fast must be below ema_trend.slow")
         return validated
@@ -459,9 +457,7 @@ class SignalBlock:
                 {"period": params["period"]},
                 market=features.attrs.get("market"),
                 timeframe=features.attrs.get("timeframe"),
-                provider_context_hash=stable_hash(
-                    features.attrs.get("data_provenance") or {}
-                ),
+                provider_context_hash=stable_hash(features.attrs.get("data_provenance") or {}),
             )
             signal = value < float(params["value"])
         elif self.signal_kind == "DYNAMIC_EMA_ABOVE":
@@ -471,9 +467,7 @@ class SignalBlock:
                 {"period": params["period"]},
                 market=features.attrs.get("market"),
                 timeframe=features.attrs.get("timeframe"),
-                provider_context_hash=stable_hash(
-                    features.attrs.get("data_provenance") or {}
-                ),
+                provider_context_hash=stable_hash(features.attrs.get("data_provenance") or {}),
             )
             signal = features["close"] > value
         elif self.signal_kind == "DYNAMIC_EMA_CROSS":
@@ -499,9 +493,7 @@ class SignalBlock:
                 {"period": params["period"]},
                 market=features.attrs.get("market"),
                 timeframe=features.attrs.get("timeframe"),
-                provider_context_hash=stable_hash(
-                    features.attrs.get("data_provenance") or {}
-                ),
+                provider_context_hash=stable_hash(features.attrs.get("data_provenance") or {}),
             )
             signal = value / features["close"] > float(params["value"])
         elif self.signal_kind == "DYNAMIC_BOLLINGER_CROSS":
@@ -514,13 +506,9 @@ class SignalBlock:
                 },
                 market=features.attrs.get("market"),
                 timeframe=features.attrs.get("timeframe"),
-                provider_context_hash=stable_hash(
-                    features.attrs.get("data_provenance") or {}
-                ),
+                provider_context_hash=stable_hash(features.attrs.get("data_provenance") or {}),
             )
-            signal = (features["close"] > lower) & (
-                features["close"].shift(1) <= lower.shift(1)
-            )
+            signal = (features["close"] > lower) & (features["close"].shift(1) <= lower.shift(1))
         else:
             raise ValueError(f"unsupported signal kind: {self.signal_kind}")
         return signal.fillna(False).astype(bool)
@@ -661,38 +649,421 @@ def signal_block_registry() -> dict[str, SignalBlock]:
     """Return only blocks whose formulas or source columns are implemented."""
 
     blocks = [
-        _block("positive_return_20", family="PRICE_RETURNS", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="close", signal_kind="PCT_CHANGE_POSITIVE_20", warmup=20, redundancy="return_momentum"),
-        _block("negative_return_exit", family="PRICE_RETURNS", role=BlockRole.EXIT_TRIGGER, direction=BlockDirection.BEARISH, feature="roc_12", signal_kind="NEGATIVE", warmup=12, redundancy="return_momentum"),
-        _block("btc_relative_momentum", family="PRICE_RETURNS", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="btc_relative_momentum_20", signal_kind="POSITIVE", warmup=20, redundancy="relative_momentum"),
-        _block("price_above_ema20", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="close", signal_kind="ABOVE_FEATURE", compare="ema_20", warmup=20, redundancy="ma_position"),
-        _block("price_above_ema50", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="close", signal_kind="ABOVE_FEATURE", compare="ema_50", warmup=50, redundancy="ma_position"),
-        _block("price_above_ema200", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="close", signal_kind="ABOVE_FEATURE", compare="ema_200", warmup=200, redundancy="ma_position"),
-        _block("price_above_sma50", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="close", signal_kind="ABOVE_FEATURE", compare="sma_50", warmup=50, redundancy="ma_position"),
-        _block("ema20_above_ema50", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="ema_20", signal_kind="ABOVE_FEATURE", compare="ema_50", warmup=50, redundancy="ma_alignment"),
-        _block("ema50_above_ema200", family="TREND", role=BlockRole.REGIME_FILTER, direction=BlockDirection.BULLISH, feature="ema_50", signal_kind="ABOVE_FEATURE", compare="ema_200", warmup=200, redundancy="ma_alignment"),
-        _block("ema50_positive_slope", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="ema_50_slope", signal_kind="POSITIVE", warmup=55, redundancy="ma_slope"),
-        _block("generalized_ema_position", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="close", signal_kind="DYNAMIC_EMA_ABOVE", period=("5.0", "200.0", "20.5"), warmup=201, redundancy="ma_position"),
-        _block("adx_trend_strength", family="TREND", role=BlockRole.CONFIRMATION, direction=BlockDirection.NEUTRAL, feature="adx_14", signal_kind="GT", threshold=("10.0", "50.0", "22.5"), warmup=28, redundancy="trend_strength"),
-        _block("dmi_bullish", family="TREND", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="plus_di_14", signal_kind="ABOVE_FEATURE", compare="minus_di_14", warmup=28, redundancy="dmi"),
-        _block("aroon_bullish", family="TREND", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="aroon_up_25", signal_kind="ABOVE_FEATURE", compare="aroon_down_25", warmup=25, redundancy="aroon"),
-        _block("supertrend_bullish", family="TREND", role=BlockRole.TREND_FILTER, direction=BlockDirection.BULLISH, feature="supertrend_direction", signal_kind="POSITIVE", warmup=20, redundancy="supertrend"),
-        _block("donchian20_breakout", family="TREND", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="close", signal_kind="CROSS_ABOVE", compare="donchian_high_20", warmup=21, redundancy="donchian"),
-        _block("donchian55_breakout", family="TREND", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="close", signal_kind="CROSS_ABOVE", compare="donchian_high_55", warmup=56, redundancy="donchian"),
-        _block("choppiness_low", family="TREND", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="choppiness_14", signal_kind="LT", threshold=("30.0", "70.0", "50.0"), warmup=28, redundancy="choppiness"),
-        _block("rsi_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="rsi_14", signal_kind="LT", threshold=("10.0", "40.0", "30.0"), warmup=14, redundancy="rsi"),
-        _block("rsi_overbought_exit", family="MOMENTUM", role=BlockRole.EXIT_TRIGGER, direction=BlockDirection.BEARISH, feature="rsi_14", signal_kind="GT", threshold=("60.0", "95.0", "72.5"), warmup=14, redundancy="rsi"),
-        _block("generalized_rsi_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="close", signal_kind="DYNAMIC_RSI_LT", threshold=("10.0", "40.0", "14.5"), period=("7.0", "30.0", "13.5"), warmup=31, redundancy="rsi", cost="MEDIUM"),
-        _block("stoch_rsi_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="stoch_rsi_14", signal_kind="LT", threshold=("5.0", "40.0", "20.0"), warmup=28, redundancy="stoch_rsi"),
-        _block("macd_bullish", family="MOMENTUM", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="macd", signal_kind="ABOVE_FEATURE", compare="macd_signal", warmup=35, redundancy="macd"),
-        _block("macd_histogram_positive", family="MOMENTUM", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="macd_histogram", signal_kind="POSITIVE", warmup=35, redundancy="macd"),
-        _block("ppo_positive", family="MOMENTUM", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="ppo", signal_kind="POSITIVE", warmup=26, redundancy="price_oscillator"),
-        _block("roc_positive", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="roc_12", signal_kind="GT", threshold=("-10.0", "20.0", "0.5"), warmup=12, redundancy="return_momentum"),
-        _block("cci_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="cci_20", signal_kind="LT", threshold=("-200.0", "-50.0", "-100.0"), warmup=20, redundancy="cci"),
-        _block("williams_r_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="williams_r_14", signal_kind="LT", threshold=("-95.0", "-50.0", "-80.0"), warmup=14, redundancy="williams_r"),
-        _block("mfi_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="mfi_14", signal_kind="LT", threshold=("5.0", "40.0", "20.0"), warmup=14, redundancy="money_flow"),
-        _block("connors_rsi_oversold", family="MOMENTUM", role=BlockRole.ENTRY_TRIGGER, direction=BlockDirection.BULLISH, feature="connors_rsi", signal_kind="LT", threshold=("5.0", "40.0", "20.0"), warmup=100, redundancy="connors_rsi"),
-        _block("normalized_atr_regime", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="normalized_atr_14", signal_kind="LT", threshold=("0.5", "10.0", "5.0"), warmup=14, redundancy="atr_regime"),
-        _block("generalized_atr_regime", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="close", signal_kind="DYNAMIC_ATR_MULTIPLE", threshold=("0.5", "10.0", "2.5"), period=("7.0", "30.0", "14.5"), warmup=31, redundancy="atr_regime", cost="MEDIUM"),
+        _block(
+            "positive_return_20",
+            family="PRICE_RETURNS",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="PCT_CHANGE_POSITIVE_20",
+            warmup=20,
+            redundancy="return_momentum",
+        ),
+        _block(
+            "negative_return_exit",
+            family="PRICE_RETURNS",
+            role=BlockRole.EXIT_TRIGGER,
+            direction=BlockDirection.BEARISH,
+            feature="roc_12",
+            signal_kind="NEGATIVE",
+            warmup=12,
+            redundancy="return_momentum",
+        ),
+        _block(
+            "btc_relative_momentum",
+            family="PRICE_RETURNS",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="btc_relative_momentum_20",
+            signal_kind="POSITIVE",
+            warmup=20,
+            redundancy="relative_momentum",
+        ),
+        _block(
+            "price_above_ema20",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="ABOVE_FEATURE",
+            compare="ema_20",
+            warmup=20,
+            redundancy="ma_position",
+        ),
+        _block(
+            "price_above_ema50",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="ABOVE_FEATURE",
+            compare="ema_50",
+            warmup=50,
+            redundancy="ma_position",
+        ),
+        _block(
+            "price_above_ema200",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="ABOVE_FEATURE",
+            compare="ema_200",
+            warmup=200,
+            redundancy="ma_position",
+        ),
+        _block(
+            "price_above_sma50",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="ABOVE_FEATURE",
+            compare="sma_50",
+            warmup=50,
+            redundancy="ma_position",
+        ),
+        _block(
+            "ema20_above_ema50",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="ema_20",
+            signal_kind="ABOVE_FEATURE",
+            compare="ema_50",
+            warmup=50,
+            redundancy="ma_alignment",
+        ),
+        _block(
+            "ema50_above_ema200",
+            family="TREND",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="ema_50",
+            signal_kind="ABOVE_FEATURE",
+            compare="ema_200",
+            warmup=200,
+            redundancy="ma_alignment",
+        ),
+        _block(
+            "ema50_positive_slope",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="ema_50_slope",
+            signal_kind="POSITIVE",
+            warmup=55,
+            redundancy="ma_slope",
+        ),
+        _block(
+            "generalized_ema_position",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="DYNAMIC_EMA_ABOVE",
+            period=("5.0", "200.0", "20.5"),
+            warmup=201,
+            redundancy="ma_position",
+        ),
+        _block(
+            "adx_trend_strength",
+            family="TREND",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.NEUTRAL,
+            feature="adx_14",
+            signal_kind="GT",
+            threshold=("10.0", "50.0", "22.5"),
+            warmup=28,
+            redundancy="trend_strength",
+        ),
+        _block(
+            "dmi_bullish",
+            family="TREND",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="plus_di_14",
+            signal_kind="ABOVE_FEATURE",
+            compare="minus_di_14",
+            warmup=28,
+            redundancy="dmi",
+        ),
+        _block(
+            "aroon_bullish",
+            family="TREND",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="aroon_up_25",
+            signal_kind="ABOVE_FEATURE",
+            compare="aroon_down_25",
+            warmup=25,
+            redundancy="aroon",
+        ),
+        _block(
+            "supertrend_bullish",
+            family="TREND",
+            role=BlockRole.TREND_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="supertrend_direction",
+            signal_kind="POSITIVE",
+            warmup=20,
+            redundancy="supertrend",
+        ),
+        _block(
+            "donchian20_breakout",
+            family="TREND",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="CROSS_ABOVE",
+            compare="donchian_high_20",
+            warmup=21,
+            redundancy="donchian",
+        ),
+        _block(
+            "donchian55_breakout",
+            family="TREND",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="CROSS_ABOVE",
+            compare="donchian_high_55",
+            warmup=56,
+            redundancy="donchian",
+        ),
+        _block(
+            "choppiness_low",
+            family="TREND",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="choppiness_14",
+            signal_kind="LT",
+            threshold=("30.0", "70.0", "50.0"),
+            warmup=28,
+            redundancy="choppiness",
+        ),
+        _block(
+            "choppiness_high",
+            family="STATISTICAL_REGIME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="choppiness_14",
+            signal_kind="GT",
+            threshold=("50.0", "75.0", "61.5"),
+            warmup=28,
+            redundancy="range_choppiness",
+        ),
+        _block(
+            "adx_range_low",
+            family="STATISTICAL_REGIME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="adx_14",
+            signal_kind="LT",
+            threshold=("10.0", "25.0", "18.0"),
+            warmup=28,
+            redundancy="range_trend_strength",
+        ),
+        _block(
+            "htf_4h_regime_bullish",
+            family="MULTI_TIMEFRAME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="htf_4h_regime_bullish",
+            signal_kind="BOOL",
+            warmup=200,
+            redundancy="htf_4h_regime",
+            timeframes=("5m", "15m", "30m", "1h", "2h"),
+        ),
+        _block(
+            "htf_1d_regime_bullish",
+            family="MULTI_TIMEFRAME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="htf_1d_regime_bullish",
+            signal_kind="BOOL",
+            warmup=200,
+            redundancy="htf_1d_regime",
+            timeframes=("5m", "15m", "30m", "1h", "2h", "4h"),
+        ),
+        _block(
+            "rsi_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="rsi_14",
+            signal_kind="LT",
+            threshold=("10.0", "40.0", "30.0"),
+            warmup=14,
+            redundancy="rsi",
+        ),
+        _block(
+            "rsi_recovery",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="rsi_14",
+            signal_kind="CROSS_ABOVE",
+            threshold=("25.0", "50.0", "35.0"),
+            warmup=15,
+            redundancy="rsi_recovery",
+        ),
+        _block(
+            "ema20_reclaim",
+            family="TREND",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="CROSS_ABOVE",
+            compare="ema_20",
+            warmup=21,
+            redundancy="ema_reclaim",
+        ),
+        _block(
+            "rsi_overbought_exit",
+            family="MOMENTUM",
+            role=BlockRole.EXIT_TRIGGER,
+            direction=BlockDirection.BEARISH,
+            feature="rsi_14",
+            signal_kind="GT",
+            threshold=("60.0", "95.0", "72.5"),
+            warmup=14,
+            redundancy="rsi",
+        ),
+        _block(
+            "generalized_rsi_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="DYNAMIC_RSI_LT",
+            threshold=("10.0", "40.0", "14.5"),
+            period=("7.0", "30.0", "13.5"),
+            warmup=31,
+            redundancy="rsi",
+            cost="MEDIUM",
+        ),
+        _block(
+            "stoch_rsi_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="stoch_rsi_14",
+            signal_kind="LT",
+            threshold=("5.0", "40.0", "20.0"),
+            warmup=28,
+            redundancy="stoch_rsi",
+        ),
+        _block(
+            "macd_bullish",
+            family="MOMENTUM",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="macd",
+            signal_kind="ABOVE_FEATURE",
+            compare="macd_signal",
+            warmup=35,
+            redundancy="macd",
+        ),
+        _block(
+            "macd_histogram_positive",
+            family="MOMENTUM",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="macd_histogram",
+            signal_kind="POSITIVE",
+            warmup=35,
+            redundancy="macd",
+        ),
+        _block(
+            "ppo_positive",
+            family="MOMENTUM",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="ppo",
+            signal_kind="POSITIVE",
+            warmup=26,
+            redundancy="price_oscillator",
+        ),
+        _block(
+            "roc_positive",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="roc_12",
+            signal_kind="GT",
+            threshold=("-10.0", "20.0", "0.5"),
+            warmup=12,
+            redundancy="return_momentum",
+        ),
+        _block(
+            "cci_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="cci_20",
+            signal_kind="LT",
+            threshold=("-200.0", "-50.0", "-100.0"),
+            warmup=20,
+            redundancy="cci",
+        ),
+        _block(
+            "williams_r_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="williams_r_14",
+            signal_kind="LT",
+            threshold=("-95.0", "-50.0", "-80.0"),
+            warmup=14,
+            redundancy="williams_r",
+        ),
+        _block(
+            "mfi_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="mfi_14",
+            signal_kind="LT",
+            threshold=("5.0", "40.0", "20.0"),
+            warmup=14,
+            redundancy="money_flow",
+        ),
+        _block(
+            "connors_rsi_oversold",
+            family="MOMENTUM",
+            role=BlockRole.ENTRY_TRIGGER,
+            direction=BlockDirection.BULLISH,
+            feature="connors_rsi",
+            signal_kind="LT",
+            threshold=("5.0", "40.0", "20.0"),
+            warmup=100,
+            redundancy="connors_rsi",
+        ),
+        _block(
+            "normalized_atr_regime",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="normalized_atr_14",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "5.0"),
+            warmup=14,
+            redundancy="atr_regime",
+        ),
+        _block(
+            "generalized_atr_regime",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="close",
+            signal_kind="DYNAMIC_ATR_MULTIPLE",
+            threshold=("0.5", "10.0", "2.5"),
+            period=("7.0", "30.0", "14.5"),
+            warmup=31,
+            redundancy="atr_regime",
+            cost="MEDIUM",
+        ),
         _block(
             "bollinger_lower_reversion",
             family="VOLATILITY",
@@ -718,19 +1089,167 @@ def signal_block_registry() -> dict[str, SignalBlock]:
                 _half("multiplier", "1.5", "3.0", "2.0"),
             ),
         ),
-        _block("bollinger_squeeze", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="bollinger_width", signal_kind="LT", threshold=("0.5", "20.0", "5.0"), warmup=20, redundancy="volatility_compression"),
-        _block("bollinger_keltner_squeeze", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="bollinger_upper", signal_kind="BELOW_FEATURE", compare="keltner_upper", warmup=20, redundancy="volatility_compression"),
-        _block("rolling_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="rolling_volatility_20", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="realized_volatility"),
-        _block("ewma_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="ewma_volatility", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="realized_volatility"),
-        _block("parkinson_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="parkinson_volatility_20", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="range_volatility"),
-        _block("garman_klass_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="garman_klass_volatility_20", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="range_volatility"),
-        _block("rogers_satchell_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="rogers_satchell_volatility_20", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="range_volatility"),
-        _block("yang_zhang_volatility_low", family="VOLATILITY", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="yang_zhang_volatility_20", signal_kind="LT", threshold=("0.5", "10.0", "3.0"), warmup=20, redundancy="range_volatility"),
-        _block("relative_volume_expansion", family="VOLUME_FLOW", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="relative_volume_20", signal_kind="GT", threshold=("0.5", "3.0", "1.5"), warmup=20, redundancy="volume_expansion"),
-        _block("volume_zscore_positive", family="VOLUME_FLOW", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="volume_zscore_20", signal_kind="GT", threshold=("-1.0", "3.0", "1.0"), warmup=20, redundancy="volume_expansion"),
-        _block("obv_positive_trend", family="VOLUME_FLOW", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="obv", signal_kind="CHANGE_POSITIVE_20", warmup=20, redundancy="obv"),
-        _block("chaikin_money_flow_positive", family="VOLUME_FLOW", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="chaikin_money_flow_20", signal_kind="POSITIVE", warmup=20, redundancy="money_flow"),
-        _block("price_above_vwap", family="VOLUME_FLOW", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="close", signal_kind="ABOVE_FEATURE", compare="vwap_20", warmup=20, redundancy="vwap"),
+        _block(
+            "bollinger_squeeze",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="bollinger_width",
+            signal_kind="LT",
+            threshold=("0.5", "20.0", "5.0"),
+            warmup=20,
+            redundancy="volatility_compression",
+        ),
+        _block(
+            "bollinger_keltner_squeeze",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="bollinger_upper",
+            signal_kind="BELOW_FEATURE",
+            compare="keltner_upper",
+            warmup=20,
+            redundancy="volatility_compression",
+        ),
+        _block(
+            "prior_squeeze_within_12",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="prior_squeeze_within_12",
+            signal_kind="BOOL",
+            warmup=32,
+            redundancy="prior_volatility_compression",
+        ),
+        _block(
+            "rolling_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="rolling_volatility_20",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="realized_volatility",
+        ),
+        _block(
+            "ewma_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="ewma_volatility",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="realized_volatility",
+        ),
+        _block(
+            "parkinson_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="parkinson_volatility_20",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="range_volatility",
+        ),
+        _block(
+            "garman_klass_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="garman_klass_volatility_20",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="range_volatility",
+        ),
+        _block(
+            "rogers_satchell_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="rogers_satchell_volatility_20",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="range_volatility",
+        ),
+        _block(
+            "yang_zhang_volatility_low",
+            family="VOLATILITY",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.NEUTRAL,
+            feature="yang_zhang_volatility_20",
+            signal_kind="LT",
+            threshold=("0.5", "10.0", "3.0"),
+            warmup=20,
+            redundancy="range_volatility",
+        ),
+        _block(
+            "relative_volume_expansion",
+            family="VOLUME_FLOW",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="relative_volume_20",
+            signal_kind="GT",
+            threshold=("0.5", "3.0", "1.5"),
+            warmup=20,
+            redundancy="volume_expansion",
+        ),
+        _block(
+            "btc_relative_persistence",
+            family="PRICE_RETURNS",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="btc_relative_momentum_persistence_5",
+            signal_kind="POSITIVE",
+            warmup=25,
+            redundancy="relative_persistence",
+        ),
+        _block(
+            "volume_zscore_positive",
+            family="VOLUME_FLOW",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="volume_zscore_20",
+            signal_kind="GT",
+            threshold=("-1.0", "3.0", "1.0"),
+            warmup=20,
+            redundancy="volume_expansion",
+        ),
+        _block(
+            "obv_positive_trend",
+            family="VOLUME_FLOW",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="obv",
+            signal_kind="CHANGE_POSITIVE_20",
+            warmup=20,
+            redundancy="obv",
+        ),
+        _block(
+            "chaikin_money_flow_positive",
+            family="VOLUME_FLOW",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="chaikin_money_flow_20",
+            signal_kind="POSITIVE",
+            warmup=20,
+            redundancy="money_flow",
+        ),
+        _block(
+            "price_above_vwap",
+            family="VOLUME_FLOW",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="close",
+            signal_kind="ABOVE_FEATURE",
+            compare="vwap_20",
+            warmup=20,
+            redundancy="vwap",
+        ),
     ]
     blocks.extend(
         [
@@ -857,15 +1376,97 @@ def signal_block_registry() -> dict[str, SignalBlock]:
     )
     blocks.extend(
         [
-            _block("fractal_density_low", family="MARKET_STRUCTURE", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="fractal_density_50", signal_kind="LT", threshold=("0.0", "0.5", "0.2"), warmup=55, redundancy="fractal_regime"),
-            _block("fractal_amplitude_filter", family="MARKET_STRUCTURE", role=BlockRole.CONFIRMATION, direction=BlockDirection.NEUTRAL, feature="fractal_amplitude_atr", signal_kind="GT", threshold=("0.5", "5.0", "1.5"), warmup=55, redundancy="fractal_regime"),
-            _block("fractal_3_low_confirmed", family="MARKET_STRUCTURE", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="fractal_3_confirmed_fractal_low", warmup=3, redundancy="fractal_pivot_3"),
-            _block("fractal_5_low_confirmed", family="MARKET_STRUCTURE", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="fractal_5_confirmed_fractal_low", warmup=5, redundancy="fractal_pivot_5"),
-            _block("fractal_7_low_confirmed", family="MARKET_STRUCTURE", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="fractal_7_confirmed_fractal_low", warmup=7, redundancy="fractal_pivot_7"),
-            _block("fractal_breakout_volume_confirmed", family="MARKET_STRUCTURE", role=BlockRole.CONFIRMATION, direction=BlockDirection.BULLISH, feature="fractal_breakout_volume_confirmation", warmup=55, redundancy="fractal_breakout_confirmation"),
-            _block("fractal_mtf_bullish", family="MARKET_STRUCTURE", role=BlockRole.REGIME_FILTER, direction=BlockDirection.BULLISH, feature="multi_timeframe_fractal_alignment", signal_kind="GT", threshold=("0.0", "1.0", "0.0"), warmup=55, redundancy="fractal_mtf"),
-            _block("hurst_trending_regime", family="STATISTICAL_REGIME", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="hurst_exponent", signal_kind="GT", threshold=("0.0", "1.0", "0.5"), warmup=100, redundancy="fractal_dimension"),
-            _block("fractal_dimension_trend_regime", family="STATISTICAL_REGIME", role=BlockRole.REGIME_FILTER, direction=BlockDirection.NEUTRAL, feature="fractal_dimension_index", signal_kind="LT", threshold=("1.0", "2.0", "1.5"), warmup=100, redundancy="fractal_dimension"),
+            _block(
+                "fractal_density_low",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="fractal_density_50",
+                signal_kind="LT",
+                threshold=("0.0", "0.5", "0.2"),
+                warmup=55,
+                redundancy="fractal_regime",
+            ),
+            _block(
+                "fractal_amplitude_filter",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.NEUTRAL,
+                feature="fractal_amplitude_atr",
+                signal_kind="GT",
+                threshold=("0.5", "5.0", "1.5"),
+                warmup=55,
+                redundancy="fractal_regime",
+            ),
+            _block(
+                "fractal_3_low_confirmed",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="fractal_3_confirmed_fractal_low",
+                warmup=3,
+                redundancy="fractal_pivot_3",
+            ),
+            _block(
+                "fractal_5_low_confirmed",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="fractal_5_confirmed_fractal_low",
+                warmup=5,
+                redundancy="fractal_pivot_5",
+            ),
+            _block(
+                "fractal_7_low_confirmed",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="fractal_7_confirmed_fractal_low",
+                warmup=7,
+                redundancy="fractal_pivot_7",
+            ),
+            _block(
+                "fractal_breakout_volume_confirmed",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="fractal_breakout_volume_confirmation",
+                warmup=55,
+                redundancy="fractal_breakout_confirmation",
+            ),
+            _block(
+                "fractal_mtf_bullish",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.BULLISH,
+                feature="multi_timeframe_fractal_alignment",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.0"),
+                warmup=55,
+                redundancy="fractal_mtf",
+            ),
+            _block(
+                "hurst_trending_regime",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="hurst_exponent",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=100,
+                redundancy="fractal_dimension",
+            ),
+            _block(
+                "fractal_dimension_trend_regime",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="fractal_dimension_index",
+                signal_kind="LT",
+                threshold=("1.0", "2.0", "1.5"),
+                warmup=100,
+                redundancy="fractal_dimension",
+            ),
         ]
     )
 
@@ -907,27 +1508,174 @@ def signal_block_registry() -> dict[str, SignalBlock]:
     )
 
     contextual = [
-        ("global_risk_on", "crypto_risk_on", BlockRole.REGIME_FILTER, BlockDirection.BULLISH, "BOOL", None),
-        ("global_risk_off", "crypto_risk_off", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "BOOL", None),
-        ("fear_greed_positive", "sentiment_fear_greed", BlockRole.REGIME_FILTER, BlockDirection.CONTEXTUAL, "GT", ("20.0", "80.0", "50.0")),
-        ("btc_dominance_rising", "dominance_btc_dominance_change_7d", BlockRole.REGIME_FILTER, BlockDirection.CONTEXTUAL, "GT", ("-10.0", "10.0", "0.0")),
-        ("stablecoin_rotation_risk", "dominance_stablecoin_dominance_change_7d", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("-10.0", "10.0", "0.0")),
-        ("breadth_above_ema20", "breadth_fraction_above_mean_20d", BlockRole.REGIME_FILTER, BlockDirection.BULLISH, "GT", ("0.0", "1.0", "0.5")),
-        ("breadth_above_ema50", "breadth_fraction_above_mean_50d", BlockRole.REGIME_FILTER, BlockDirection.BULLISH, "GT", ("0.0", "1.0", "0.5")),
-        ("breadth_above_ema200", "breadth_fraction_above_mean_200d", BlockRole.REGIME_FILTER, BlockDirection.BULLISH, "GT", ("0.0", "1.0", "0.5")),
-        ("high_impact_event_avoidance", "events_high_impact_event_risk", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "1.0", "0.0")),
-        ("funding_not_overheated", "derivatives_funding_zscore", BlockRole.REGIME_FILTER, BlockDirection.CONTEXTUAL, "LT", ("0.0", "5.0", "2.0")),
-        ("open_interest_growth", "derivatives_open_interest_change_7d", BlockRole.CONFIRMATION, BlockDirection.CONTEXTUAL, "GT", ("-1.0", "1.0", "0.0")),
-        ("positive_basis", "derivatives_basis", BlockRole.CONFIRMATION, BlockDirection.CONTEXTUAL, "GT", ("-1.0", "1.0", "0.0")),
-        ("liquidation_risk", "derivatives_liquidation_imbalance", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("gex_regime", "gex_net_gex_proxy", BlockRole.REGIME_FILTER, BlockDirection.CONTEXTUAL, "GT", ("-10.0", "10.0", "0.0")),
-        ("gamma_concentration", "gex_gamma_concentration", BlockRole.RISK_OVERLAY, BlockDirection.CONTEXTUAL, "GT", ("0.0", "1.0", "0.5")),
-        ("negative_intelligence_risk", "negative_risk_event_score", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("regulation_risk", "regulation_event_score", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("exchange_risk", "exchange_risk_score", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("hack_exploit_risk", "hack_exploit_score", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("stablecoin_depeg_risk", "stablecoin_risk_score", BlockRole.AVOIDANCE_FILTER, BlockDirection.BEARISH, "GT", ("0.0", "10.0", "1.0")),
-        ("intelligence_source_diversity", "intelligence_source_diversity", BlockRole.CONFIRMATION, BlockDirection.NEUTRAL, "GT", ("0.0", "10.0", "1.0")),
+        (
+            "global_risk_on",
+            "crypto_risk_on",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.BULLISH,
+            "BOOL",
+            None,
+        ),
+        (
+            "global_risk_off",
+            "crypto_risk_off",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "BOOL",
+            None,
+        ),
+        (
+            "fear_greed_positive",
+            "sentiment_fear_greed",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("20.0", "80.0", "50.0"),
+        ),
+        (
+            "btc_dominance_rising",
+            "dominance_btc_dominance_change_7d",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("-10.0", "10.0", "0.0"),
+        ),
+        (
+            "stablecoin_rotation_risk",
+            "dominance_stablecoin_dominance_change_7d",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("-10.0", "10.0", "0.0"),
+        ),
+        (
+            "breadth_above_ema20",
+            "breadth_fraction_above_mean_20d",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.BULLISH,
+            "GT",
+            ("0.0", "1.0", "0.5"),
+        ),
+        (
+            "breadth_above_ema50",
+            "breadth_fraction_above_mean_50d",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.BULLISH,
+            "GT",
+            ("0.0", "1.0", "0.5"),
+        ),
+        (
+            "breadth_above_ema200",
+            "breadth_fraction_above_mean_200d",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.BULLISH,
+            "GT",
+            ("0.0", "1.0", "0.5"),
+        ),
+        (
+            "high_impact_event_avoidance",
+            "events_high_impact_event_risk",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "1.0", "0.0"),
+        ),
+        (
+            "funding_not_overheated",
+            "derivatives_funding_zscore",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.CONTEXTUAL,
+            "LT",
+            ("0.0", "5.0", "2.0"),
+        ),
+        (
+            "open_interest_growth",
+            "derivatives_open_interest_change_7d",
+            BlockRole.CONFIRMATION,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("-1.0", "1.0", "0.0"),
+        ),
+        (
+            "positive_basis",
+            "derivatives_basis",
+            BlockRole.CONFIRMATION,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("-1.0", "1.0", "0.0"),
+        ),
+        (
+            "liquidation_risk",
+            "derivatives_liquidation_imbalance",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "gex_regime",
+            "gex_net_gex_proxy",
+            BlockRole.REGIME_FILTER,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("-10.0", "10.0", "0.0"),
+        ),
+        (
+            "gamma_concentration",
+            "gex_gamma_concentration",
+            BlockRole.RISK_OVERLAY,
+            BlockDirection.CONTEXTUAL,
+            "GT",
+            ("0.0", "1.0", "0.5"),
+        ),
+        (
+            "negative_intelligence_risk",
+            "negative_risk_event_score",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "regulation_risk",
+            "regulation_event_score",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "exchange_risk",
+            "exchange_risk_score",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "hack_exploit_risk",
+            "hack_exploit_score",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "stablecoin_depeg_risk",
+            "stablecoin_risk_score",
+            BlockRole.AVOIDANCE_FILTER,
+            BlockDirection.BEARISH,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
+        (
+            "intelligence_source_diversity",
+            "intelligence_source_diversity",
+            BlockRole.CONFIRMATION,
+            BlockDirection.NEUTRAL,
+            "GT",
+            ("0.0", "10.0", "1.0"),
+        ),
     ]
     for block_id, feature, role, direction, signal_kind, threshold in contextual:
         blocks.append(
@@ -1016,12 +1764,9 @@ class CombinationGenerator:
         parameter_sums[0] = 1
         for block in self.registry.values():
             for size in range(len(parameter_sums) - 1, 0, -1):
-                parameter_sums[size] += (
-                    parameter_sums[size - 1] * block.parameter_space_size
-                )
+                parameter_sums[size] += parameter_sums[size - 1] * block.parameter_space_size
         trials_by_size = {
-            str(size): parameter_sums[size] * logic_count
-            for size in map(int, by_size)
+            str(size): parameter_sums[size] * logic_count for size in map(int, by_size)
         }
         return {
             "registered_signal_blocks": block_count,
@@ -1083,8 +1828,7 @@ class CombinationGenerator:
                     }
                     dna = {
                         "blocks": [
-                            {"id": block.block_id, "version": block.version}
-                            for block in blocks
+                            {"id": block.block_id, "version": block.version} for block in blocks
                         ],
                         "logic_mode": logic_mode,
                     }
@@ -1109,9 +1853,7 @@ class CombinationGenerator:
                                 block.parameter_space_size for block in blocks
                             ),
                             estimated_computational_cost=sum(
-                                {"LOW": 1, "MEDIUM": 3, "HIGH": 8}[
-                                    block.computational_cost_class
-                                ]
+                                {"LOW": 1, "MEDIUM": 3, "HIGH": 8}[block.computational_cost_class]
                                 for block in blocks
                             ),
                             eligibility_status=state,
@@ -1128,8 +1870,7 @@ class CombinationGenerator:
                     )
                     if maximum_rows and len(generated) >= maximum_rows:
                         total = sum(
-                            math.comb(len(selected_ids), requested_size)
-                            * len(set(logic_modes))
+                            math.comb(len(selected_ids), requested_size) * len(set(logic_modes))
                             for requested_size in sorted(set(sizes))
                         )
                         self.last_generation_status = {
@@ -1166,14 +1907,11 @@ class CombinationGenerator:
         if all(block.family == "CANDLE" for block in blocks):
             return CombinationState.INVALID_STATIC_RULES, "CANDLE_CONTEXT_REQUIRED"
         if any(
-            block.direction is BlockDirection.BEARISH
-            and block.role is BlockRole.ENTRY_TRIGGER
+            block.direction is BlockDirection.BEARISH and block.role is BlockRole.ENTRY_TRIGGER
             for block in blocks
         ):
             return CombinationState.INVALID_STATIC_RULES, "BEARISH_SHORT_PATH_FORBIDDEN"
-        common_timeframes = set.intersection(
-            *(set(block.supported_timeframes) for block in blocks)
-        )
+        common_timeframes = set.intersection(*(set(block.supported_timeframes) for block in blocks))
         if not common_timeframes.intersection(timeframes):
             return CombinationState.UNSUPPORTED_TIMEFRAME, "NO_SUPPORTED_TIMEFRAME"
         for block in blocks:
@@ -1183,8 +1921,7 @@ class CombinationGenerator:
         if mode is GenerationMode.FAMILY_AWARE and max(groups.values(), default=0) > 1:
             return CombinationState.INVALID_STATIC_RULES, "REDUNDANT_INFORMATION_FAMILY"
         if logic_mode is LogicMode.ANY and any(
-            block.role in {BlockRole.AVOIDANCE_FILTER, BlockRole.EXIT_TRIGGER}
-            for block in blocks
+            block.role in {BlockRole.AVOIDANCE_FILTER, BlockRole.EXIT_TRIGGER} for block in blocks
         ):
             return CombinationState.INVALID_STATIC_RULES, "ANY_WITH_EXIT_OR_AVOIDANCE_AMBIGUOUS"
         return CombinationState.GENERATED, None
@@ -1292,8 +2029,7 @@ def _settings_database(settings: Settings) -> Database:
     )
     selected = (
         configured
-        if configured
-        and configured.startswith(("sqlite://", "postgresql://", "postgresql+"))
+        if configured and configured.startswith(("sqlite://", "postgresql://", "postgresql+"))
         else None
     )
     return Database(selected, sqlite_path=settings.paths.database_path)
@@ -1409,26 +2145,17 @@ class UniverseManager:
                 seen_economic_assets.add(economic_key)
             quote_markets = {
                 provider: tuple(
-                    sorted(
-                        market
-                        for market in markets
-                        if market.split("-")[0] == symbol
-                    )
+                    sorted(market for market in markets if market.split("-")[0] == symbol)
                 )
                 for provider, markets in availability.items()
             }
             eur_market = f"{symbol}-EUR"
             eligibility = self.settings.shariah.eligibility(eur_market)
-            volume = (
-                float(row["volume_24h"])
-                if row.get("volume_24h") is not None
-                else None
-            )
+            volume = float(row["volume_24h"]) if row.get("volume_24h") is not None else None
             if volume is None or volume < self.settings.lab.minimum_volume_24h_eur:
                 reasons.append("INSUFFICIENT_LIQUIDITY")
             available_research = any(
-                quote_markets.get(provider)
-                for provider in ("bitvavo", "kraken", "mexc")
+                quote_markets.get(provider) for provider in ("bitvavo", "kraken", "mexc")
             )
             if not available_research:
                 reasons.append("NO_RESEARCH_MARKET")
@@ -1488,9 +2215,7 @@ class UniverseManager:
                     symbol=symbol,
                     name=name,
                     market_cap=(
-                        float(row["market_cap"])
-                        if row.get("market_cap") is not None
-                        else None
+                        float(row["market_cap"]) if row.get("market_cap") is not None else None
                     ),
                     circulating_supply=(
                         float(row["circulating_supply"])
@@ -1498,9 +2223,7 @@ class UniverseManager:
                         else None
                     ),
                     total_supply=(
-                        float(row["total_supply"])
-                        if row.get("total_supply") is not None
-                        else None
+                        float(row["total_supply"]) if row.get("total_supply") is not None else None
                     ),
                     maximum_supply=(
                         float(row["maximum_supply"])
@@ -1793,29 +2516,18 @@ class CombinatorialStrategy(Strategy):
         true = pd.Series(True, index=features.index)
 
         def all_of(items: Sequence[pd.Series]) -> pd.Series:
-            return (
-                pd.concat(items, axis=1).all(axis=1)
-                if items
-                else true.copy()
-            )
+            return pd.concat(items, axis=1).all(axis=1) if items else true.copy()
 
         def any_of(items: Sequence[pd.Series]) -> pd.Series:
-            return (
-                pd.concat(items, axis=1).any(axis=1)
-                if items
-                else false.copy()
-            )
+            return pd.concat(items, axis=1).any(axis=1) if items else false.copy()
 
         if self.combination.logic_mode is LogicMode.LAYERED:
             entry = (
-                any_of(entry_signals)
-                & all_of(mandatory_regime)
-                & all_of(trend_and_confirmation)
+                any_of(entry_signals) & all_of(mandatory_regime) & all_of(trend_and_confirmation)
             )
         elif self.combination.logic_mode is LogicMode.ALL:
-            entry = (
-                all_of([*entry_signals, *mandatory_regime, *trend_and_confirmation])
-                & any_of(entry_signals)
+            entry = all_of([*entry_signals, *mandatory_regime, *trend_and_confirmation]) & any_of(
+                entry_signals
             )
         elif self.combination.logic_mode is LogicMode.ANY:
             entry = any_of(entry_signals) & all_of(mandatory_regime)
@@ -1827,11 +2539,7 @@ class CombinatorialStrategy(Strategy):
                 else pd.Series(0, index=features.index)
             )
             threshold = max(1, math.ceil(len(voters) / 2))
-            entry = (
-                (votes >= threshold)
-                & any_of(entry_signals)
-                & all_of(mandatory_regime)
-            )
+            entry = (votes >= threshold) & any_of(entry_signals) & all_of(mandatory_regime)
         else:
             eligible_ids = [
                 block_id
@@ -1845,13 +2553,11 @@ class CombinatorialStrategy(Strategy):
                 and self.registry[block_id].direction is not BlockDirection.BEARISH
             ]
             raw_weights = {
-                block_id: float(selected[f"logic__weight__{block_id}"])
-                for block_id in eligible_ids
+                block_id: float(selected[f"logic__weight__{block_id}"]) for block_id in eligible_ids
             }
             weight_total = sum(raw_weights.values())
             weighted_score = sum(
-                signals[block_id].astype(float)
-                * (raw_weights[block_id] / max(weight_total, 1e-12))
+                signals[block_id].astype(float) * (raw_weights[block_id] / max(weight_total, 1e-12))
                 for block_id in eligible_ids
             )
             entry = (
@@ -2080,9 +2786,7 @@ def _matches_research_slice(
 ) -> bool:
     """Require persisted results to belong to the exact active data slice."""
 
-    tested_timeframes = tuple(
-        str(value) for value in payload.get("timeframes_tested") or ()
-    )
+    tested_timeframes = tuple(str(value) for value in payload.get("timeframes_tested") or ())
     if len(tested_timeframes) != 1:
         return False
     timeframe = tested_timeframes[0]
@@ -2093,8 +2797,7 @@ def _matches_research_slice(
         and expected_feature_hash
         and payload.get("data_hash") == expected_data_hash
         and payload.get("feature_hash") == expected_feature_hash
-        and payload.get("screening_engine_version")
-        == screening_engine_version
+        and payload.get("screening_engine_version") == screening_engine_version
         and payload.get("universe_snapshot_id") == snapshot_id
         and payload.get("source") in sources
         and set(payload.get("assets_tested") or ()) == set(markets)
@@ -2175,8 +2878,7 @@ class LabStore:
                 payload.get("data_hash"),
             )
             for payload in _payload_rows(self.database, "exact_backtest_results")
-            if _provenance_source_type(payload.get("data_provenance"))
-            == "REAL_PROVIDER_DATA"
+            if _provenance_source_type(payload.get("data_provenance")) == "REAL_PROVIDER_DATA"
         }
         for table_name, source_label in table_sources.items():
             for row in self.database.fetch_records(table_name):
@@ -2208,9 +2910,8 @@ class LabStore:
                         )
                     )
                 )
-                changed = (
-                    payload.get("source_type") != source_type
-                    or "SYNTHETIC" in str(payload.get("source") or "")
+                changed = payload.get("source_type") != source_type or "SYNTHETIC" in str(
+                    payload.get("source") or ""
                 )
                 if not changed:
                     continue
@@ -2229,9 +2930,7 @@ class LabStore:
                 repaired[table_name] += 1
         return dict(sorted(repaired.items()))
 
-    def persist_combinations(
-        self, combinations: Iterable[StrategyCombination]
-    ) -> int:
+    def persist_combinations(self, combinations: Iterable[StrategyCombination]) -> int:
         rows = []
         block_rows = []
         parameter_rows = []
@@ -2263,9 +2962,7 @@ class LabStore:
                     "timestamp": combination.generated_at,
                     "combination_id": combination.combination_id,
                     "parameters": combination.default_parameters,
-                    "parameter_hash": parameter_hash(
-                        combination.default_parameters
-                    ),
+                    "parameter_hash": parameter_hash(combination.default_parameters),
                     "space_size": combination.parameter_space_size,
                 }
             )
@@ -2299,8 +2996,7 @@ class LabStore:
                 "timeframes": sorted(timeframes),
                 "blocks": list(combination.block_ids),
                 "block_versions": [
-                    {"id": block_id, "version": "1.0.0"}
-                    for block_id in combination.block_ids
+                    {"id": block_id, "version": "1.0.0"} for block_id in combination.block_ids
                 ],
                 "logic_mode": combination.logic_mode,
                 "parameters": canonical_parameters(parameters),
@@ -2354,11 +3050,7 @@ class LabStore:
             risk_profile={"type": "settings"},
             cost_profile={"type": "normal"},
             data_hashes={timeframe: data_hash},
-            feature_hashes=(
-                {timeframe: feature_hash}
-                if feature_hash is not None
-                else {}
-            ),
+            feature_hashes=({timeframe: feature_hash} if feature_hash is not None else {}),
             software_version=self.settings.app.version,
         )
         base_job_id = f"job-{base_experiment[:24]}"
@@ -2400,11 +3092,7 @@ class LabStore:
             if run_version
             else base_experiment
         )
-        job_id = (
-            f"{base_job_id}-{run_version}"
-            if run_version
-            else base_job_id
-        )
+        job_id = f"{base_job_id}-{run_version}" if run_version else base_job_id
         payload = {
             "job_id": job_id,
             "run_id": run_id,
@@ -2629,11 +3317,7 @@ class LabStore:
         )
 
     def queue_status(self, *, run_id: str | None = None) -> dict[str, Any]:
-        jobs = [
-            job
-            for job in self.jobs()
-            if run_id is None or str(job.get("run_id")) == run_id
-        ]
+        jobs = [job for job in self.jobs() if run_id is None or str(job.get("run_id")) == run_id]
         counts = Counter(str(job.get("status")) for job in jobs)
         return {
             "updated_at": utc_iso(),
@@ -2658,6 +3342,95 @@ class LabStore:
             ),
             "run_id": run_id,
         }
+
+    def reconcile_state(
+        self,
+        *,
+        run_id: str | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Classify stale failure artifacts against durable job truth."""
+
+        jobs = {
+            str(job.get("job_id")): job
+            for job in self.jobs()
+            if run_id is None or str(job.get("run_id")) == run_id
+        }
+        successful_or_superseded = {
+            CombinationState.SCREENING_COMPLETED.value,
+            CombinationState.BASELINE_COMPLETED.value,
+            CombinationState.EXACT_BACKTEST_COMPLETED.value,
+            CombinationState.RESEARCH_PASS.value,
+            CombinationState.PAPER_CANDIDATE.value,
+            CombinationState.VALIDATION_REJECTED.value,
+            CombinationState.EXACT_BACKTEST_REJECTED.value,
+            CombinationState.SUPERSEDED.value,
+        }
+        archive = self.paths.failures / "archive" / "resolved"
+        rows: list[dict[str, Any]] = []
+        for path in sorted(self.paths.failures.glob("*.json")):
+            try:
+                failure = read_json(path)
+            except (OSError, ValueError, TypeError) as exc:
+                rows.append(
+                    {
+                        "path": str(path),
+                        "classification": "INVALID_ARTIFACT",
+                        "reason_code": type(exc).__name__,
+                    }
+                )
+                continue
+            job_id = str(failure.get("job_id") or path.stem.split(".")[0])
+            job = jobs.get(job_id)
+            if job is None:
+                classification = (
+                    "OUT_OF_SCOPE" if run_id is not None else "ORPHANED_ARTIFACT"
+                )
+            elif str(job.get("status")) in successful_or_superseded:
+                classification = "RESOLVED"
+            elif str(job.get("status")) == CombinationState.ERROR_RETRYABLE.value:
+                classification = "RETRYABLE"
+            elif str(job.get("status")) == CombinationState.ERROR_FINAL.value:
+                classification = "FINAL_FAILURE"
+            else:
+                classification = "ACTIVE_OR_UNRESOLVED"
+            row = {
+                "path": str(path),
+                "job_id": job_id,
+                "job_status": job.get("status") if job else None,
+                "classification": classification,
+                "archived_to": None,
+            }
+            if apply and classification == "RESOLVED":
+                archive.mkdir(parents=True, exist_ok=True)
+                target = archive / path.name
+                if target.exists():
+                    target = archive / (
+                        f"{path.stem}.{sha256_file(path)[:10]}{path.suffix}"
+                    )
+                os.replace(path, target)
+                row["archived_to"] = str(target)
+            rows.append(row)
+        counts = Counter(row["classification"] for row in rows)
+        report = {
+            "status": (
+                "RECONCILED"
+                if apply
+                else "DRY_RUN"
+            ),
+            "run_id": run_id,
+            "apply": apply,
+            "failure_artifacts": len(rows),
+            "counts": dict(sorted(counts.items())),
+            "rows": rows,
+            "generated_at": utc_iso(),
+            "live_orders": 0,
+        }
+        report_path = self.paths.reports / (
+            f"state_reconciliation_{utc_now().strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        atomic_write_json(report_path, report)
+        return report | {"report_path": str(report_path)}
 
     def save_leaderboard_entry(self, payload: Mapping[str, Any]) -> None:
         safe_payload = _finite_json(dict(payload))
@@ -2686,9 +3459,9 @@ class LabStore:
         rows = [
             row
             for row in deduplicated.values()
-            if include_synthetic
-            or row.get("source_type") == "REAL_PROVIDER_DATA"
+            if include_synthetic or row.get("source_type") == "REAL_PROVIDER_DATA"
         ]
+
         def leaderboard_score(row: Mapping[str, Any]) -> float:
             value = row.get("robust_score")
             if value is None:
@@ -2707,9 +3480,7 @@ class LabStore:
             | {
                 "rank": rank,
                 "previous_rank": row.get("rank"),
-                "rank_change": (
-                    int(row.get("rank")) - rank if row.get("rank") else None
-                ),
+                "rank_change": (int(row.get("rank")) - rank if row.get("rank") else None),
             }
             for rank, row in enumerate(rows, 1)
         ]
@@ -2719,14 +3490,10 @@ class LabStore:
         frame = pd.DataFrame(rows)
         tabular = frame.copy()
         for column in tabular.columns:
-            if tabular[column].map(
-                lambda value: isinstance(value, (dict, list, tuple))
-            ).any():
+            if tabular[column].map(lambda value: isinstance(value, (dict, list, tuple))).any():
                 tabular[column] = tabular[column].map(
                     lambda value: (
-                        stable_json(value)
-                        if isinstance(value, (dict, list, tuple))
-                        else value
+                        stable_json(value) if isinstance(value, (dict, list, tuple)) else value
                     )
                 )
         paths = {
@@ -2763,9 +3530,7 @@ class LabStore:
                 and len(set(row.get("block_families") or [])) > 1
             ],
             "orderflow_enhanced": [
-                row
-                for row in rows
-                if "VOLUME_FLOW" in (row.get("block_families") or [])
+                row for row in rows if "VOLUME_FLOW" in (row.get("block_families") or [])
             ],
             "derivatives_context_enhanced": [
                 row
@@ -2784,28 +3549,16 @@ class LabStore:
                     for block_id in (row.get("block_names") or [])
                 )
             ],
-            "paper_candidates": [
-                row for row in rows if bool(row.get("paper_candidate"))
-            ],
+            "paper_candidates": [row for row in rows if bool(row.get("paper_candidate"))],
         }
         for timeframe in sorted(
-            {
-                str(timeframe)
-                for row in rows
-                for timeframe in (row.get("timeframes_tested") or [])
-            }
+            {str(timeframe) for row in rows for timeframe in (row.get("timeframes_tested") or [])}
         ):
             view_definitions[f"timeframe_{timeframe}"] = [
-                row
-                for row in rows
-                if timeframe in (row.get("timeframes_tested") or [])
+                row for row in rows if timeframe in (row.get("timeframes_tested") or [])
             ]
         for market in sorted(
-            {
-                str(market)
-                for row in rows
-                for market in (row.get("assets_tested") or [])
-            }
+            {str(market) for row in rows for market in (row.get("assets_tested") or [])}
         ):
             view_definitions[f"market_{market}"] = [
                 row for row in rows if market in (row.get("assets_tested") or [])
@@ -2821,11 +3574,7 @@ class LabStore:
                 row for row in rows if row.get("universe_snapshot_id") == snapshot
             ]
         for family in sorted(
-            {
-                str(family)
-                for row in rows
-                for family in (row.get("block_families") or [])
-            }
+            {str(family) for row in rows for family in (row.get("block_families") or [])}
         ):
             view_definitions[f"family_{family}"] = [
                 row for row in rows if family in (row.get("block_families") or [])
@@ -2835,24 +3584,20 @@ class LabStore:
         views_directory.mkdir(parents=True, exist_ok=True)
         for name, view_rows in sorted(view_definitions.items()):
             slug = "".join(
-                character if character.isalnum() else "_"
-                for character in name.casefold()
+                character if character.isalnum() else "_" for character in name.casefold()
             ).strip("_")
             view_frame = pd.DataFrame(
-                [
-                    row | {"view_rank": rank}
-                    for rank, row in enumerate(view_rows, 1)
-                ]
+                [row | {"view_rank": rank} for rank, row in enumerate(view_rows, 1)]
             )
             for column in view_frame.columns:
-                if view_frame[column].map(
-                    lambda value: isinstance(value, (dict, list, tuple))
-                ).any():
+                if (
+                    view_frame[column]
+                    .map(lambda value: isinstance(value, (dict, list, tuple)))
+                    .any()
+                ):
                     view_frame[column] = view_frame[column].map(
                         lambda value: (
-                            stable_json(value)
-                            if isinstance(value, (dict, list, tuple))
-                            else value
+                            stable_json(value) if isinstance(value, (dict, list, tuple)) else value
                         )
                     )
             view_path = views_directory / f"{slug}.csv"
@@ -2876,13 +3621,37 @@ class LabStore:
         )
         return {key: str(path) for key, path in paths.items()}
 
-    def generate_report(self) -> dict[str, Any]:
+    def generate_report(self, *, run_id: str | None = None) -> dict[str, Any]:
         """Generate auditable lab tables, charts and a compact HTML report."""
         from reporting.visualizations import VisualizationReporter
         from research.indicator_registry import indicator_coverage_report
 
-        leaderboard = self.leaderboard()
+        scoped_jobs = [
+            row
+            for row in _payload_rows(self.database, "experiment_jobs")
+            if run_id is None or str(row.get("run_id")) == run_id
+        ]
+        experiment_hashes = {
+            str(row.get("experiment_hash"))
+            for row in scoped_jobs
+            if row.get("experiment_hash")
+        }
+        combination_ids = {
+            str(row.get("combination_id"))
+            for row in scoped_jobs
+            if row.get("combination_id")
+        }
+        leaderboard = [
+            row
+            for row in self.leaderboard()
+            if run_id is None
+            or str(row.get("combination_id")) in combination_ids
+        ]
         events = _payload_rows(self.database, "lab_events")
+        if run_id is not None:
+            events = [
+                row for row in events if str(row.get("run_id")) == run_id
+            ]
         combinations = {
             str(row.get("combination_id")): row
             for row in _payload_rows(self.database, "strategy_combinations")
@@ -2890,6 +3659,22 @@ class LabStore:
         trials = _payload_rows(self.database, "experiment_trials")
         folds = _payload_rows(self.database, "walk_forward_results")
         gates = _payload_rows(self.database, "gate_results")
+        if run_id is not None:
+            trials = [
+                row
+                for row in trials
+                if str(row.get("experiment_hash")) in experiment_hashes
+            ]
+            folds = [
+                row
+                for row in folds
+                if str(row.get("experiment_hash")) in experiment_hashes
+            ]
+            gates = [
+                row
+                for row in gates
+                if str(row.get("experiment_hash")) in experiment_hashes
+            ]
         rank_rows = [
             {
                 "entry": row.get("strategy_dna_hash"),
@@ -2910,16 +3695,12 @@ class LabStore:
             for family in (row.get("block_families") or [])
         ]
         block_rows = [
-            {"block": block}
-            for row in leaderboard[:25]
-            for block in (row.get("block_names") or [])
+            {"block": block} for row in leaderboard[:25] for block in (row.get("block_names") or [])
         ]
         redundancy_rows = [
             {
                 "redundancy_score": (
-                    combinations.get(str(row.get("combination_id")), {}).get(
-                        "redundancy_score"
-                    )
+                    combinations.get(str(row.get("combination_id")), {}).get("redundancy_score")
                     or 0.0
                 ),
                 "robust_score": row.get("robust_score"),
@@ -2987,13 +3768,8 @@ class LabStore:
                 )
         event_rows = [
             {
-                "throughput": (
-                    1.0 / max(float(event.get("duration") or 0.0), 1e-9)
-                ),
-                "completed": int(
-                    str(event.get("status") or "").upper()
-                    in {"PASSED", "COMPLETED"}
-                ),
+                "throughput": (1.0 / max(float(event.get("duration") or 0.0), 1e-9)),
+                "completed": int(str(event.get("status") or "").upper() in {"PASSED", "COMPLETED"}),
                 "duration": float(event.get("duration") or 0.0),
             }
             for event in events
@@ -3051,16 +3827,10 @@ class LabStore:
                 ]
             ),
             "lab_decay": pd.DataFrame(
-                [
-                    {"robust_score": row.get("robust_score")}
-                    for row in leaderboard
-                ]
+                [{"robust_score": row.get("robust_score")} for row in leaderboard]
             ),
             "lab_lifecycle": pd.DataFrame(
-                [
-                    {"lifecycle_status": row.get("lifecycle_status")}
-                    for row in leaderboard
-                ]
+                [{"lifecycle_status": row.get("lifecycle_status")} for row in leaderboard]
             ),
             "optimization": pd.DataFrame(optimization_rows),
         }
@@ -3068,20 +3838,17 @@ class LabStore:
         coverage = indicator_coverage_report()
         summary = {
             "generated_at": utc_iso(),
+            "run_id": run_id,
             "leaderboard_rows": len(leaderboard),
-            "queue": self.queue_status(),
+            "queue": self.queue_status(run_id=run_id),
             "gate_results": len(gates),
             "research_passes": sum(bool(row.get("passed")) for row in gates),
-            "paper_candidates": sum(
-                bool(row.get("paper_candidate")) for row in leaderboard
-            ),
+            "paper_candidates": sum(bool(row.get("paper_candidate")) for row in leaderboard),
             "live_ready": 0,
             "indicator_coverage": {
                 "registry_hash": coverage["registry_hash"],
                 "source_item_occurrences": coverage["source_item_occurrences"],
-                "unique_canonical_indicators": coverage[
-                    "unique_canonical_indicators"
-                ],
+                "unique_canonical_indicators": coverage["unique_canonical_indicators"],
                 "counts_by_family": coverage["counts_by_family"],
                 "counts_by_status": coverage["counts_by_status"],
             },
@@ -3092,8 +3859,9 @@ class LabStore:
                 "Research passes do not authorize live trading.",
             ],
         }
+        suffix = f"_{run_id}" if run_id else ""
         summary_path = atomic_write_json(
-            self.paths.reports / "lab_report.json",
+            self.paths.reports / f"lab_report{suffix}.json",
             summary,
         )
         top_rows = "".join(
@@ -3105,9 +3873,9 @@ class LabStore:
             "</tr>"
             for row in leaderboard[:25]
         )
-        html_path = self.paths.reports / "lab_report.html"
+        html_path = self.paths.reports / f"lab_report{suffix}.html"
         html_path.write_text(
-            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
+            '<!doctype html><html lang="en"><meta charset="utf-8">'
             "<title>Combinatorial lab report</title>"
             "<style>body{font:15px system-ui;max-width:1100px;margin:40px auto}"
             "table{border-collapse:collapse;width:100%}th,td{padding:7px;"
@@ -3212,9 +3980,7 @@ def fast_screen(
     for frame in frames.values():
         output = strategy.generate(frame)
         entry = output.entry.to_numpy(dtype=bool)
-        exit_signal = (
-            output.exit | output.avoid | output.reduce
-        ).to_numpy(dtype=bool)
+        exit_signal = (output.exit | output.avoid | output.reduce).to_numpy(dtype=bool)
         opens = frame["open"].to_numpy(dtype=float)
         highs = frame["high"].to_numpy(dtype=float)
         lows = frame["low"].to_numpy(dtype=float)
@@ -3237,9 +4003,7 @@ def fast_screen(
         def close_trade(exit_price: float) -> None:
             nonlocal holding, trades
             gross_return = exit_price / entry_price - 1.0
-            trade_returns.append(
-                size_multiplier * (gross_return - round_trip_cost)
-            )
+            trade_returns.append(size_multiplier * (gross_return - round_trip_cost))
             trades += 1
             holding = False
 
@@ -3265,9 +4029,7 @@ def fast_screen(
                 trailing_stop = None
                 maximum_seen = entry_price
                 bars_held = 0
-                size_multiplier = float(
-                    np.clip(size_multipliers[index - 1], 0.0, 1.0)
-                )
+                size_multiplier = float(np.clip(size_multipliers[index - 1], 0.0, 1.0))
             if not holding:
                 continue
             if exit_signal[index - 1]:
@@ -3382,6 +4144,38 @@ HYPOTHESIS_BLOCKS = (
     "btc_relative_momentum",
     "positive_return_20",
 )
+
+
+ECONOMIC_HYPOTHESIS_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "TREND_BREAKOUT": (
+        "htf_1d_regime_bullish",
+        "htf_4h_regime_bullish",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+    ),
+    "PULLBACK_IN_UPTREND": (
+        "htf_1d_regime_bullish",
+        "ema20_above_ema50",
+        "rsi_recovery",
+        "ema20_reclaim",
+    ),
+    "RANGE_MEAN_REVERSION": (
+        "choppiness_high",
+        "adx_range_low",
+        "bollinger_lower_reversion",
+    ),
+    "VOLATILITY_EXPANSION": (
+        "prior_squeeze_within_12",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+    ),
+    "BTC_RELATIVE_STRENGTH": (
+        "htf_1d_regime_bullish",
+        "btc_relative_momentum",
+        "btc_relative_persistence",
+        "positive_return_20",
+    ),
+}
 
 
 class LabRunner:
@@ -3537,16 +4331,10 @@ class LabRunner:
             "lock_present": self.lock_path.is_file(),
             "control": self._control_action().value,
             "queue": self.store.queue_status(
-                run_id=(
-                    str(current["run_id"])
-                    if current.get("run_id")
-                    else None
-                )
+                run_id=(str(current["run_id"]) if current.get("run_id") else None)
             ),
             "heartbeat": (
-                read_json(self.heartbeat_path)
-                if self.heartbeat_path.is_file()
-                else None
+                read_json(self.heartbeat_path) if self.heartbeat_path.is_file() else None
             ),
         }
 
@@ -3588,8 +4376,7 @@ class LabRunner:
                 bitvavo_markets = list(availability.get("bitvavo") or [])
                 selected_market = (
                     eur_market
-                    if eur_market in bitvavo_markets
-                    or (allowed and eur_market in available)
+                    if eur_market in bitvavo_markets or (allowed and eur_market in available)
                     else (available[0] if available else eur_market)
                 )
                 missing: list[str] = []
@@ -3608,9 +4395,7 @@ class LabRunner:
                         missing.append(f"{timeframe}:INVALID")
                         continue
                     if available_rows < minimum_rows:
-                        missing.append(
-                            f"{timeframe}:ROWS_{available_rows}_LT_{minimum_rows}"
-                        )
+                        missing.append(f"{timeframe}:ROWS_{available_rows}_LT_{minimum_rows}")
                 if missing:
                     data_exclusions.append(
                         {
@@ -3661,12 +4446,8 @@ class LabRunner:
         if not provenance:
             return None
         conflicts = list(provenance.get("reconciliation_conflicts") or [])
-        conflict_count = int(
-            provenance.get("reconciliation_conflict_count", len(conflicts))
-        )
-        conflict_sample = list(
-            provenance.get("reconciliation_conflict_sample") or conflicts[:3]
-        )
+        conflict_count = int(provenance.get("reconciliation_conflict_count", len(conflicts)))
+        conflict_sample = list(provenance.get("reconciliation_conflict_sample") or conflicts[:3])
         return {
             key: provenance.get(key)
             for key in (
@@ -3716,13 +4497,9 @@ class LabRunner:
                             timeframe=timeframe,
                             closed_candles_only=True,
                         )
-                        provenance_path = path.with_suffix(
-                            f"{path.suffix}.provenance.json"
-                        )
+                        provenance_path = path.with_suffix(f"{path.suffix}.provenance.json")
                         provenance = (
-                            read_json(provenance_path)
-                            if provenance_path.is_file()
-                            else None
+                            read_json(provenance_path) if provenance_path.is_file() else None
                         )
                         report = quality_report(
                             frame,
@@ -3800,8 +4577,7 @@ class LabRunner:
                             end=now,
                         )
                         row_start = now - timedelta(
-                            seconds=TIMEFRAME_SECONDS[timeframe]
-                            * (minimum_rows + 50)
+                            seconds=TIMEFRAME_SECONDS[timeframe] * (minimum_rows + 50)
                         )
                         records, _ = await loader.download_canonical_ohlcv(
                             provider=provider,
@@ -3859,6 +4635,60 @@ class LabRunner:
                         }
                     )
                     continue
+                derivation: dict[str, Any] | None = None
+                for source_timeframe in sorted(
+                    (
+                        candidate
+                        for candidate, seconds in TIMEFRAME_SECONDS.items()
+                        if seconds < TIMEFRAME_SECONDS[timeframe]
+                        and TIMEFRAME_SECONDS[timeframe] % seconds == 0
+                    ),
+                    key=TIMEFRAME_SECONDS.__getitem__,
+                    reverse=True,
+                ):
+                    source_path = self._data_path(market, source_timeframe)
+                    source_provenance_path = source_path.with_suffix(
+                        f"{source_path.suffix}.provenance.json"
+                    )
+                    if not source_path.is_file() or not source_provenance_path.is_file():
+                        continue
+                    source_provenance = read_json(source_provenance_path)
+                    if source_provenance.get("source_type") != "REAL_PROVIDER_DATA":
+                        continue
+                    try:
+                        source_frame = load_ohlcv(
+                            source_path,
+                            market=market,
+                            timeframe=source_timeframe,
+                            closed_candles_only=True,
+                        )
+                        derived = resample_ohlcv(
+                            source_frame,
+                            source_timeframe=source_timeframe,
+                            target_timeframe=timeframe,
+                            drop_incomplete=True,
+                        )
+                        derived = validate_ohlcv(
+                            derived,
+                            timeframe=timeframe,
+                            closed_candles_only=True,
+                        )
+                    except (DataValidationError, OSError, ValueError):
+                        continue
+                    if len(derived) <= len(frame):
+                        continue
+                    frame = derived
+                    derivation = {
+                        "source_classification": "RESAMPLED_FROM_DEEPER_LOCAL_REAL_DATA",
+                        "source_timeframe": source_timeframe,
+                        "source_path": str(source_path),
+                        "source_sha256": sha256_file(source_path),
+                        "source_rows": len(source_frame),
+                        "derived_rows": len(derived),
+                        "providers_used": source_provenance.get("providers_used", []),
+                        "complete_bins_only": True,
+                    }
+                    break
                 path = self.settings.paths.processed_data_dir / f"{market}_{timeframe}.parquet"
                 saved, manifest = save_ohlcv(
                     frame,
@@ -3868,9 +4698,7 @@ class LabRunner:
                     maximum_staleness=self.settings.market_data.maximum_staleness,
                 )
                 provider_hashes = {
-                    provider: stable_hash(
-                        [record.raw_hash for record in provider_records]
-                    )
+                    provider: stable_hash([record.raw_hash for record in provider_records])
                     for provider, provider_records in by_provider.items()
                 }
                 provenance = {
@@ -3889,7 +4717,10 @@ class LabRunner:
                     "rows": len(frame),
                     "start": frame.index[0].isoformat(),
                     "end": frame.index[-1].isoformat(),
+                    "derivation": derivation,
                 }
+                if derivation:
+                    provenance["providers_used"] = derivation["providers_used"]
                 atomic_write_json(
                     saved.with_suffix(f"{saved.suffix}.provenance.json"),
                     provenance,
@@ -3913,10 +4744,7 @@ class LabRunner:
             "status": (
                 "PREPARED"
                 if prepared
-                and all(
-                    row["status"] in {"PREPARED", "SKIPPED_COMPLETE"}
-                    for row in prepared
-                )
+                and all(row["status"] in {"PREPARED", "SKIPPED_COMPLETE"} for row in prepared)
                 else "PARTIAL_PROVIDER_COVERAGE"
             ),
             "datasets": prepared,
@@ -3962,23 +4790,15 @@ class LabRunner:
             try:
                 block_id, parameter_name = key.split(".", 1)
             except ValueError as exc:
-                raise ValueError(
-                    f"parameter override requires BLOCK.PARAMETER: {key}"
-                ) from exc
+                raise ValueError(f"parameter override requires BLOCK.PARAMETER: {key}") from exc
             if block_id in combination.block_ids:
                 relevant.append((block_id, parameter_name, tuple(values)))
         if not relevant:
-            generated_sensitivity: list[tuple[str | None, dict[str, Any]]] = [
-                (None, base)
-            ]
+            generated_sensitivity: list[tuple[str | None, dict[str, Any]]] = [(None, base)]
             for block_id in combination.block_ids:
                 for spec in self.registry[block_id].parameter_specs:
                     non_default = next(
-                        (
-                            value
-                            for value in spec.values()
-                            if value != spec.validate(spec.default)
-                        ),
+                        (value for value in spec.values() if value != spec.validate(spec.default)),
                         None,
                     )
                     if non_default is None:
@@ -3992,9 +4812,7 @@ class LabRunner:
                         (
                             f"{block_id}__{spec.name}",
                             {
-                                selected_block: self.registry[
-                                    selected_block
-                                ].parameters(parameters)
+                                selected_block: self.registry[selected_block].parameters(parameters)
                                 for selected_block, parameters in selected.items()
                             },
                         )
@@ -4002,10 +4820,7 @@ class LabRunner:
             return generated_sensitivity
         generated: list[dict[str, Any]] = []
         for values in itertools.product(*(item[2] for item in relevant)):
-            selected = {
-                block_id: dict(parameters)
-                for block_id, parameters in base.items()
-            }
+            selected = {block_id: dict(parameters) for block_id, parameters in base.items()}
             for (block_id, parameter_name, _), value in zip(
                 relevant,
                 values,
@@ -4018,9 +4833,7 @@ class LabRunner:
                     for block_id, parameters in selected.items()
                 }
             )
-        unique = {
-            parameter_hash(parameters): parameters for parameters in generated
-        }
+        unique = {parameter_hash(parameters): parameters for parameters in generated}
         return [("CLI_OVERRIDE", unique[key]) for key in sorted(unique)]
 
     def _frames(
@@ -4049,6 +4862,29 @@ class LabRunner:
                 point_in_time_aligned=True,
                 provenance_engine="MacroContextEngine",
             )
+        benchmark: pd.DataFrame | None = None
+        if data_mode == "real":
+            benchmark_path = self._data_path("BTC-EUR", timeframe)
+            if benchmark_path.is_file():
+                benchmark = load_ohlcv(
+                    benchmark_path,
+                    market="BTC-EUR",
+                    timeframe=timeframe,
+                    closed_candles_only=True,
+                )
+                if start_at is not None:
+                    benchmark = benchmark.loc[
+                        benchmark.index >= pd.Timestamp(start_at).tz_convert("UTC")
+                    ]
+                if end_at is not None:
+                    benchmark = benchmark.loc[
+                        benchmark.index <= pd.Timestamp(end_at).tz_convert("UTC")
+                    ]
+                benchmark = benchmark.copy()
+                benchmark.attrs.update(
+                    market="BTC-EUR",
+                    timeframe=timeframe,
+                )
         for offset, market in enumerate(markets):
             if data_mode == "synthetic":
                 if rows is None:
@@ -4075,47 +4911,33 @@ class LabRunner:
             else:
                 path = self._data_path(market, timeframe)
                 if not path.is_file():
-                    raise DataValidationError(
-                        f"BLOCKED_DATA_UNAVAILABLE:{market}:{timeframe}"
-                    )
+                    raise DataValidationError(f"BLOCKED_DATA_UNAVAILABLE:{market}:{timeframe}")
                 raw = load_ohlcv(
                     path,
                     market=market,
                     timeframe=timeframe,
                     closed_candles_only=True,
                 )
-                provenance_path = path.with_suffix(
-                    f"{path.suffix}.provenance.json"
-                )
+                provenance_path = path.with_suffix(f"{path.suffix}.provenance.json")
                 if not provenance_path.is_file():
-                    raise DataValidationError(
-                        f"MISSING_REAL_DATA_PROVENANCE:{market}:{timeframe}"
-                    )
+                    raise DataValidationError(f"MISSING_REAL_DATA_PROVENANCE:{market}:{timeframe}")
                 item_provenance = read_json(provenance_path)
                 if item_provenance.get("source_type") != "REAL_PROVIDER_DATA":
-                    raise DataValidationError(
-                        f"INVALID_REAL_DATA_PROVENANCE:{market}:{timeframe}"
-                    )
+                    raise DataValidationError(f"INVALID_REAL_DATA_PROVENANCE:{market}:{timeframe}")
                 if rows is not None and len(raw) < rows:
                     raise DataValidationError(
                         f"INSUFFICIENT_REAL_DATA:{market}:{timeframe}:{len(raw)}<{rows}"
                     )
                 if start_at is not None:
-                    raw = raw.loc[
-                        raw.index >= pd.Timestamp(start_at).tz_convert("UTC")
-                    ]
+                    raw = raw.loc[raw.index >= pd.Timestamp(start_at).tz_convert("UTC")]
                 if end_at is not None:
-                    raw = raw.loc[
-                        raw.index <= pd.Timestamp(end_at).tz_convert("UTC")
-                    ]
+                    raw = raw.loc[raw.index <= pd.Timestamp(end_at).tz_convert("UTC")]
                 if rows is not None:
                     raw = raw.iloc[-rows:].copy()
                 else:
                     raw = raw.copy()
                 if raw.empty:
-                    raise DataValidationError(
-                        f"EMPTY_RESEARCH_SLICE:{market}:{timeframe}"
-                    )
+                    raise DataValidationError(f"EMPTY_RESEARCH_SLICE:{market}:{timeframe}")
                 raw.attrs.update(
                     {
                         "market": market,
@@ -4139,25 +4961,60 @@ class LabRunner:
                     "start": raw.index[0].isoformat(),
                     "end": raw.index[-1].isoformat(),
                     "rows": len(raw),
-                    "common_period_requested": (
-                        start_at is not None or end_at is not None
-                    ),
+                    "common_period_requested": (start_at is not None or end_at is not None),
                 }
             provider_provenance = dict(item_provenance)
+            higher_timeframes: dict[str, pd.DataFrame] = {}
+            if data_mode == "real":
+                for higher_timeframe in ("4h", "1d"):
+                    if TIMEFRAME_SECONDS[higher_timeframe] <= TIMEFRAME_SECONDS[timeframe]:
+                        continue
+                    higher_path = self._data_path(market, higher_timeframe)
+                    if not higher_path.is_file():
+                        continue
+                    higher = load_ohlcv(
+                        higher_path,
+                        market=market,
+                        timeframe=higher_timeframe,
+                        closed_candles_only=True,
+                    )
+                    if end_at is not None:
+                        higher = higher.loc[higher.index <= pd.Timestamp(end_at).tz_convert("UTC")]
+                    higher = higher.copy()
+                    higher.attrs.update(
+                        market=market,
+                        timeframe=higher_timeframe,
+                    )
+                    higher_timeframes[higher_timeframe] = higher
             features = FeaturePipeline().build(
                 raw,
                 market=market,
+                benchmark=benchmark,
                 macro_context=macro_context,
+                higher_timeframes=higher_timeframes,
             )
+            item_provenance["benchmark_context"] = {
+                "status": "ATTACHED" if benchmark is not None else "MISSING",
+                "market": "BTC-EUR",
+                "timeframe": timeframe,
+                "rows": len(benchmark) if benchmark is not None else 0,
+            }
+            item_provenance["higher_timeframe_context"] = {
+                selected: {
+                    "rows": len(frame),
+                    "start": frame.index[0].isoformat(),
+                    "end": frame.index[-1].isoformat(),
+                    "availability_lag_seconds": TIMEFRAME_SECONDS[selected],
+                }
+                for selected, frame in higher_timeframes.items()
+            }
             if macro_context is not None:
                 item_provenance["macro_context"] = {
                     "status": "ATTACHED",
                     "path": str(macro_path),
                     "sha256": sha256_file(macro_path),
                     "rows": len(macro_context),
-                    "overlap_rows": int(
-                        macro_context.index.intersection(raw.index).size
-                    ),
+                    "overlap_rows": int(macro_context.index.intersection(raw.index).size),
                     "usable_rows": int(
                         macro_context.reindex(raw.index)
                         .get("macro_context_usable", pd.Series(False, index=raw.index))
@@ -4165,9 +5022,7 @@ class LabRunner:
                         .sum()
                     ),
                 }
-                features.attrs["context_provenance"] = dict(
-                    item_provenance["macro_context"]
-                )
+                features.attrs["context_provenance"] = dict(item_provenance["macro_context"])
             else:
                 features.attrs["macro_context"] = {
                     "status": ResearchStatus.MISSING_REQUIRED_CONTEXT.value,
@@ -4246,13 +5101,10 @@ class LabRunner:
             "parameter_hash": job["parameter_hash"],
             "data_hash": job.get("data_hash"),
             "feature_hash": job.get("feature_hash"),
-            "screening_engine_version": job.get(
-                "screening_engine_version"
-            ),
+            "screening_engine_version": job.get("screening_engine_version"),
             "data_provenance": job.get("data_provenance"),
             "source_type": (
-                job.get("source_type")
-                or _provenance_source_type(job.get("data_provenance"))
+                job.get("source_type") or _provenance_source_type(job.get("data_provenance"))
             ),
             "software_version": job.get("software_version"),
             "universe_snapshot_id": job["universe_snapshot_id"],
@@ -4321,15 +5173,11 @@ class LabRunner:
             current = best_by_combination_timeframe.get(key)
             if current is None or item[0] > current[0]:
                 best_by_combination_timeframe[key] = item
-        survivors: list[
-            tuple[float, Mapping[str, Any], Mapping[str, Any]]
-        ] = []
+        survivors: list[tuple[float, Mapping[str, Any], Mapping[str, Any]]] = []
         for timeframe in sorted(frames_by_timeframe):
             candidates = [
                 item
-                for (_, selected_timeframe), item in (
-                    best_by_combination_timeframe.items()
-                )
+                for (_, selected_timeframe), item in (best_by_combination_timeframe.items())
                 if selected_timeframe == timeframe
             ]
             survivors.extend(
@@ -4372,9 +5220,7 @@ class LabRunner:
                     bootstrap_samples=100,
                     monte_carlo_runs=100,
                     random_seed=self.settings.lab.deterministic_seed,
-                    allow_review_required_research_only=(
-                        allow_review_required_research_only
-                    ),
+                    allow_review_required_research_only=(allow_review_required_research_only),
                 )
                 loop = asyncio.get_running_loop()
                 exact = await asyncio.wait_for(
@@ -4446,11 +5292,7 @@ class LabRunner:
             return dict(job), None
         async with semaphore:
             sensitivity = bool(job.get("sensitivity_parameter"))
-            stage = (
-                "SENSITIVITY_SCREENING"
-                if sensitivity
-                else "SCREENING"
-            )
+            stage = "SENSITIVITY_SCREENING" if sensitivity else "SCREENING"
             running = self.store.update_job(
                 job,
                 status=CombinationState.SCREENING_RUNNING,
@@ -4480,8 +5322,7 @@ class LabRunner:
                     timeout=self.settings.lab.combination_timeout_seconds,
                 )
                 is_real = (
-                    _provenance_source_type(running.get("data_provenance"))
-                    == "REAL_PROVIDER_DATA"
+                    _provenance_source_type(running.get("data_provenance")) == "REAL_PROVIDER_DATA"
                 )
                 trial_id = stable_hash(
                     [
@@ -4496,11 +5337,7 @@ class LabRunner:
                     "trial_id": f"trial-{trial_id[:24]}",
                     "job_id": running["job_id"],
                     "experiment_hash": running["experiment_hash"],
-                    "source": (
-                        "FAST_SCREEN_REAL"
-                        if is_real
-                        else "SYNTHETIC_FAST_SCREEN"
-                    ),
+                    "source": ("FAST_SCREEN_REAL" if is_real else "SYNTHETIC_FAST_SCREEN"),
                     "stage": stage,
                     "combination_id": combination.combination_id,
                     "strategy_dna_hash": combination.strategy_dna_hash,
@@ -4513,9 +5350,7 @@ class LabRunner:
                     "parameter_hash": running["parameter_hash"],
                     "data_hash": running.get("data_hash"),
                     "feature_hash": running.get("feature_hash"),
-                    "screening_engine_version": running.get(
-                        "screening_engine_version"
-                    ),
+                    "screening_engine_version": running.get("screening_engine_version"),
                     "data_provenance": running.get("data_provenance"),
                     "source_type": running.get("source_type"),
                     "software_version": running.get("software_version"),
@@ -4532,14 +5367,10 @@ class LabRunner:
                         "sharpe": float(screening["screening_score"]),
                     },
                     "integrity": {
-                        "no_lookahead": bool(
-                            not screening["future_data_used_for_signals"]
-                        ),
+                        "no_lookahead": bool(not screening["future_data_used_for_signals"]),
                         "no_repainting": True,
                         "long_only": bool(screening["long_only"]),
-                        "basic_costs_applied": bool(
-                            screening["basic_costs_applied"]
-                        ),
+                        "basic_costs_applied": bool(screening["basic_costs_applied"]),
                         "exact_event_driven": False,
                     },
                     "screening": dict(screening),
@@ -4607,8 +5438,20 @@ class LabRunner:
             str(row.get("experiment_hash"))
             for row in _payload_rows(self.store.database, "gate_results")
         }
+        exact_survivors = [
+            payload
+            for payload in exact_payloads
+            if (
+                int((payload.get("metrics") or {}).get("trade_count") or 0)
+                >= self.settings.research.minimum_trades
+                and float((payload.get("metrics") or {}).get("net_expectancy_r") or -math.inf)
+                > self.settings.research.minimum_net_expectancy_r
+                and float((payload.get("metrics") or {}).get("profit_factor") or 0.0)
+                >= self.settings.research.minimum_stressed_profit_factor
+            )
+        ]
         ranked = sorted(
-            exact_payloads,
+            exact_survivors,
             key=lambda payload: robust_score(
                 dict(payload.get("metrics") or {}),
                 minimum_trades=self.settings.research.minimum_trades,
@@ -4619,9 +5462,7 @@ class LabRunner:
             payload
             for timeframe in sorted(frames_by_timeframe)
             for payload in [
-                item
-                for item in ranked
-                if timeframe in (item.get("timeframes_tested") or ())
+                item for item in ranked if timeframe in (item.get("timeframes_tested") or ())
             ][:maximum_candidates]
         ]
         optimized = 0
@@ -4630,9 +5471,7 @@ class LabRunner:
         paper_candidates = 0
         batch_candidates: list[dict[str, Any]] = []
         search_method: Literal["grid", "random", "coordinate", "optuna"] = "random"
-        search_trials = maximum_trials or (
-            8 if profile.casefold() == "standard" else 12
-        )
+        search_trials = maximum_trials or (8 if profile.casefold() == "standard" else 12)
         for payload in ranked_by_timeframe:
             experiment_hash = str(payload["experiment_hash"])
             if experiment_hash in already_validated:
@@ -4657,9 +5496,7 @@ class LabRunner:
                 reason_code="CANONICAL_OPTIMIZER_STARTED",
                 checkpoint=queued.get("last_checkpoint"),
             )
-            checkpoint_path = (
-                self.paths.checkpoints / f"{experiment_hash}.optimization.jsonl"
-            )
+            checkpoint_path = self.paths.checkpoints / f"{experiment_hash}.optimization.jsonl"
             try:
                 loop = asyncio.get_running_loop()
                 research_result = await asyncio.wait_for(
@@ -4678,8 +5515,7 @@ class LabRunner:
                         search_trials,
                         allow_review_required_research_only,
                     ),
-                    timeout=self.settings.lab.trial_timeout_seconds
-                    * max(1, search_trials),
+                    timeout=self.settings.lab.trial_timeout_seconds * max(1, search_trials),
                 )
                 outcome = research_result.outcome
                 for trial in outcome.optimization.trials:
@@ -4772,9 +5608,7 @@ class LabRunner:
                 monte_carlo = {
                     "simulation_id": "canonical-summary",
                     "source": "CANONICAL_BACKTEST_MONTE_CARLO",
-                    "probability_of_loss": outcome.normal_result.metrics.get(
-                        "probability_of_loss"
-                    ),
+                    "probability_of_loss": outcome.normal_result.metrics.get("probability_of_loss"),
                     "probability_of_20pct_drawdown": outcome.normal_result.metrics.get(
                         "probability_of_20pct_drawdown"
                     ),
@@ -4808,10 +5642,9 @@ class LabRunner:
                     result=gate_payload,
                     status=gate.status.value,
                 )
-                (
-                    self.paths.failures
-                    / f"{validation_running['job_id']}.validation.json"
-                ).unlink(missing_ok=True)
+                (self.paths.failures / f"{validation_running['job_id']}.validation.json").unlink(
+                    missing_ok=True
+                )
                 validated += 1
                 final_state = (
                     CombinationState.RESEARCH_PASS
@@ -4875,18 +5708,13 @@ class LabRunner:
                 )
         if batch_candidates:
             return_matrix = pd.concat(
-                {
-                    str(item["experiment_hash"]): item["daily_returns"]
-                    for item in batch_candidates
-                },
+                {str(item["experiment_hash"]): item["daily_returns"] for item in batch_candidates},
                 axis=1,
                 join="inner",
             ).dropna(how="any")
             batch_result = multiple_testing_bootstrap(
                 return_matrix,
-                bootstrap_samples=(
-                    self.settings.research.multiple_testing_bootstrap_samples
-                ),
+                bootstrap_samples=(self.settings.research.multiple_testing_bootstrap_samples),
                 block_size=min(
                     self.settings.research.multiple_testing_block_size,
                     max(1, len(return_matrix)),
@@ -4899,10 +5727,7 @@ class LabRunner:
                 > self.settings.research.maximum_white_reality_check_pvalue
             ):
                 global_reasons.append("WHITE_REALITY_CHECK_FAILURE")
-            if (
-                batch_result.hansen_spa_pvalue
-                > self.settings.research.maximum_hansen_spa_pvalue
-            ):
+            if batch_result.hansen_spa_pvalue > self.settings.research.maximum_hansen_spa_pvalue:
                 global_reasons.append("HANSEN_SPA_FAILURE")
             if batch_result.probability_of_backtest_overfitting is None:
                 global_reasons.append("PBO_INSUFFICIENT_STRATEGIES")
@@ -4925,16 +5750,9 @@ class LabRunner:
                     outcome.deflated_sharpe_probability,
                     batch_dsr,
                 )
-                reasons = (
-                    []
-                    if outcome.gate.passed
-                    else list(outcome.gate.reasons)
-                )
+                reasons = [] if outcome.gate.passed else list(outcome.gate.reasons)
                 reasons.extend(global_reasons)
-                if (
-                    candidate_dsr
-                    < self.settings.research.minimum_deflated_sharpe_probability
-                ):
+                if candidate_dsr < self.settings.research.minimum_deflated_sharpe_probability:
                     reasons.append("BATCH_DEFLATED_SHARPE_FAILURE")
                 reasons = list(dict.fromkeys(reasons))
                 passed = not reasons
@@ -4951,20 +5769,14 @@ class LabRunner:
                 )
                 batch_metrics = {
                     **dict(outcome.gate.metrics),
-                    "white_reality_check_pvalue": (
-                        batch_result.white_reality_check_pvalue
-                    ),
+                    "white_reality_check_pvalue": (batch_result.white_reality_check_pvalue),
                     "hansen_spa_pvalue": batch_result.hansen_spa_pvalue,
                     "probability_of_backtest_overfitting": (
                         batch_result.probability_of_backtest_overfitting
                     ),
                     "deflated_sharpe_probability": candidate_dsr,
-                    "multiple_testing_strategy_count": (
-                        batch_result.strategy_count
-                    ),
-                    "multiple_testing_observation_count": (
-                        batch_result.observation_count
-                    ),
+                    "multiple_testing_strategy_count": (batch_result.strategy_count),
+                    "multiple_testing_observation_count": (batch_result.observation_count),
                 }
                 self.store.save_result(
                     "gate_results",
@@ -4997,9 +5809,7 @@ class LabRunner:
                     status=final_state,
                     stage="MULTIPLE_TESTING",
                     reason_code=(
-                        "ALL_RESEARCH_AND_MULTIPLE_TESTING_GATES_PASSED"
-                        if passed
-                        else reasons[0]
+                        "ALL_RESEARCH_AND_MULTIPLE_TESTING_GATES_PASSED" if passed else reasons[0]
                     ),
                     checkpoint=f"multiple-testing:{experiment_hash}",
                 )
@@ -5014,13 +5824,9 @@ class LabRunner:
                 )
                 previous.update(
                     {
-                        "white_reality_check_pvalue": (
-                            batch_result.white_reality_check_pvalue
-                        ),
+                        "white_reality_check_pvalue": (batch_result.white_reality_check_pvalue),
                         "hansen_spa_pvalue": batch_result.hansen_spa_pvalue,
-                        "pbo": (
-                            batch_result.probability_of_backtest_overfitting
-                        ),
+                        "pbo": (batch_result.probability_of_backtest_overfitting),
                         "deflated_sharpe": candidate_dsr,
                         "gate_status": status,
                         "lifecycle_status": (
@@ -5061,14 +5867,10 @@ class LabRunner:
         total_folds = len(outcome.walk_forward.folds)
         stability = outcome.stability.acceptable_score_fraction
         mc_loss = float(
-            1.0
-            if normal.get("probability_of_loss") is None
-            else normal["probability_of_loss"]
+            1.0 if normal.get("probability_of_loss") is None else normal["probability_of_loss"]
         )
         drawdown = float(
-            1.0
-            if normal.get("maximum_drawdown") is None
-            else normal["maximum_drawdown"]
+            1.0 if normal.get("maximum_drawdown") is None else normal["maximum_drawdown"]
         )
         concentration = max(
             float(
@@ -5107,8 +5909,7 @@ class LabRunner:
             "final_holdout_expectancy": holdout.get("net_expectancy_r"),
             "parameter_stability_score": stability,
             "neighborhood_profitability": (
-                outcome.stability.positive_neighbors
-                / max(1, outcome.stability.tested_neighbors)
+                outcome.stability.positive_neighbors / max(1, outcome.stability.tested_neighbors)
             ),
             "fold_concentration": outcome.walk_forward.fold_profit_concentration,
             "cpcv_path_count": outcome.cpcv.path_count,
@@ -5127,9 +5928,7 @@ class LabRunner:
             "gate_status": outcome.gate.status.value,
             "robust_score": score,
             "lifecycle_status": (
-                LifecycleStatus.RESEARCH_PASS.value
-                if passed
-                else LifecycleStatus.DEGRADED.value
+                LifecycleStatus.RESEARCH_PASS.value if passed else LifecycleStatus.DEGRADED.value
             ),
             "paper_candidate": False,
             "live_ready": False,
@@ -5158,9 +5957,7 @@ class LabRunner:
         if previous and (
             float(metrics.get("net_expectancy_r") or 0.0) < 0
             or float(
-                1.0
-                if metrics.get("maximum_drawdown") is None
-                else metrics["maximum_drawdown"]
+                1.0 if metrics.get("maximum_drawdown") is None else metrics["maximum_drawdown"]
             )
             > self.settings.research.maximum_drawdown
         ):
@@ -5229,26 +6026,18 @@ class LabRunner:
                 else "FAILED"
             ),
             "lookahead_status": (
-                "PASSED"
-                if payload["integrity"].get("no_lookahead")
-                else "FAILED"
+                "PASSED" if payload["integrity"].get("no_lookahead") else "FAILED"
             ),
             "repainting_status": (
-                "PASSED"
-                if payload["integrity"].get("no_repainting")
-                else "FAILED"
+                "PASSED" if payload["integrity"].get("no_repainting") else "FAILED"
             ),
             "eligibility_status": payload["bias_label"],
             "gate_status": "NOT_EVALUATED_BASELINE_ONLY",
             "robust_score": score,
-            "first_discovered_at": (
-                previous.get("first_discovered_at") if previous else utc_iso()
-            ),
+            "first_discovered_at": (previous.get("first_discovered_at") if previous else utc_iso()),
             "last_tested_at": utc_iso(),
             "number_of_retests": (
-                int(previous.get("number_of_retests") or 0) + 1
-                if previous
-                else 0
+                int(previous.get("number_of_retests") or 0) + 1 if previous else 0
             ),
             "lifecycle_status": lifecycle.value,
             "paper_candidate": False,
@@ -5281,6 +6070,7 @@ class LabRunner:
         only_missing: bool = False,
         block_ids: Sequence[str] | None = None,
         parameter_overrides: Mapping[str, Sequence[Any]] | None = None,
+        combination_templates: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, Any]:
         if rows < 250:
             raise ValueError("lab runs require at least 250 rows")
@@ -5293,11 +6083,7 @@ class LabRunner:
         )
         run_id = f"labrun-{stable_hash([utc_iso(), profile, os.getpid()])[:20]}"
         recovered = self.store.recover_stale_jobs() if resume else 0
-        superseded = (
-            self.store.supersede_incomplete_jobs(active_run_id=run_id)
-            if resume
-            else 0
-        )
+        superseded = self.store.supersede_incomplete_jobs(active_run_id=run_id) if resume else 0
         self.store.persist_blocks(self.registry.values())
         generation_checkpoint = self.paths.checkpoints / "generation_cursor.json"
         continuation_cursor = None
@@ -5305,19 +6091,50 @@ class LabRunner:
             generation_state = read_json(generation_checkpoint)
             if generation_state.get("status") == "PARTIAL_GENERATION":
                 continuation_cursor = generation_state.get("continuation_cursor")
-        combinations = self.generator.generate(
-            sizes=combination_sizes,
-            logic_modes=logic_modes,
-            mode=(
-                GenerationMode.FAMILY_AWARE
-                if profile.casefold() != "exhaustive"
-                else GenerationMode.EXHAUSTIVE
-            ),
-            block_ids=block_ids or self._profile_blocks(profile),
-            timeframes=timeframes,
-            maximum_rows=self.settings.lab.maximum_generation_rows,
-            continuation_cursor=continuation_cursor,
-        )
+        if combination_templates:
+            combinations = []
+            template_status: dict[str, Any] = {}
+            for hypothesis, membership in sorted(combination_templates.items()):
+                selected = tuple(dict.fromkeys(membership))
+                generated = self.generator.generate(
+                    sizes=(len(selected),),
+                    logic_modes=logic_modes,
+                    mode=GenerationMode.FAMILY_AWARE,
+                    block_ids=selected,
+                    timeframes=timeframes,
+                    maximum_rows=None,
+                )
+                exact = [item for item in generated if item.block_ids == tuple(sorted(selected))]
+                if len(exact) != 1:
+                    raise ValueError(f"economic hypothesis template is invalid: {hypothesis}")
+                combinations.extend(exact)
+                template_status[hypothesis] = {
+                    "block_ids": list(selected),
+                    "combination_id": exact[0].combination_id,
+                    "eligibility_status": exact[0].eligibility_status.value,
+                    "exclusion_reason": exact[0].exclusion_reason,
+                }
+            self.generator.last_generation_status = {
+                "status": "COMPLETE_TEMPLATE_GENERATION",
+                "generated_count": len(combinations),
+                "remaining_count": 0,
+                "continuation_cursor": None,
+                "economic_hypotheses": template_status,
+            }
+        else:
+            combinations = self.generator.generate(
+                sizes=combination_sizes,
+                logic_modes=logic_modes,
+                mode=(
+                    GenerationMode.FAMILY_AWARE
+                    if profile.casefold() != "exhaustive"
+                    else GenerationMode.EXHAUSTIVE
+                ),
+                block_ids=block_ids or self._profile_blocks(profile),
+                timeframes=timeframes,
+                maximum_rows=self.settings.lab.maximum_generation_rows,
+                continuation_cursor=continuation_cursor,
+            )
         atomic_write_json(
             self.paths.checkpoints / "generation_cursor.json",
             self.generator.last_generation_status,
@@ -5336,9 +6153,7 @@ class LabRunner:
         markets = self._markets(
             universe_size,
             universe_scope=universe_scope,
-            include_review_required_research_only=(
-                include_review_required_research_only
-            ),
+            include_review_required_research_only=(include_review_required_research_only),
             required_timeframes=timeframes if data_mode == "real" else None,
             minimum_rows=(
                 rows
@@ -5352,16 +6167,8 @@ class LabRunner:
             self.settings,
             database=self.store.database,
         ).latest()
-        snapshot_id = (
-            str(snapshot["snapshot_id"])
-            if snapshot
-            else "universe-current-settings"
-        )
-        bias_label = (
-            str(snapshot["bias_label"])
-            if snapshot
-            else "CURRENT_UNIVERSE_RETROSPECTIVE"
-        )
+        snapshot_id = str(snapshot["snapshot_id"]) if snapshot else "universe-current-settings"
+        bias_label = str(snapshot["bias_label"]) if snapshot else "CURRENT_UNIVERSE_RETROSPECTIVE"
         semaphore = asyncio.Semaphore(worker_limit)
         executor = ProcessPoolExecutor(max_workers=worker_limit)
         screening_executor = ThreadPoolExecutor(
@@ -5375,6 +6182,7 @@ class LabRunner:
         baseline_payloads: list[dict[str, Any]] = []
         frames_by_timeframe: dict[str, dict[str, pd.DataFrame]] = {}
         provenance_by_timeframe: dict[str, dict[str, Any]] = {}
+        raw_provenance_by_timeframe: dict[str, dict[str, Any]] = {}
         data_hashes_by_timeframe: dict[str, str] = {}
         feature_hashes_by_timeframe: dict[str, str] = {}
         rows_used_by_timeframe: dict[str, Any] = {}
@@ -5406,23 +6214,15 @@ class LabRunner:
                 slice_start = max(index.min() for index in indices.values())
                 slice_end = min(index.max() for index in indices.values())
                 if slice_start >= slice_end:
-                    raise DataValidationError(
-                        f"NO_COMMON_FULL_HISTORY_PERIOD:{timeframe}"
-                    )
+                    raise DataValidationError(f"NO_COMMON_FULL_HISTORY_PERIOD:{timeframe}")
                 available_rows = {
-                    market: int(
-                        ((index >= slice_start) & (index <= slice_end)).sum()
-                    )
+                    market: int(((index >= slice_start) & (index <= slice_end)).sum())
                     for market, index in indices.items()
                 }
                 minimum_common_rows = min(available_rows.values())
-                if (
-                    minimum_common_rows
-                    < self.settings.lab.deep_minimum_history_rows
-                ):
+                if minimum_common_rows < self.settings.lab.deep_minimum_history_rows:
                     raise DataValidationError(
-                        "INSUFFICIENT_COMMON_FULL_HISTORY:"
-                        f"{timeframe}:{minimum_common_rows}"
+                        f"INSUFFICIENT_COMMON_FULL_HISTORY:{timeframe}:{minimum_common_rows}"
                     )
                 selected_rows = None
                 rows_used_by_timeframe[timeframe] = {
@@ -5443,8 +6243,7 @@ class LabRunner:
                 }
                 if min(available_rows.values()) < self.settings.lab.deep_minimum_history_rows:
                     raise DataValidationError(
-                        "INSUFFICIENT_ASSET_MAX_HISTORY:"
-                        f"{timeframe}:{available_rows}"
+                        f"INSUFFICIENT_ASSET_MAX_HISTORY:{timeframe}:{available_rows}"
                     )
                 selected_rows = None
                 rows_used_by_timeframe[timeframe] = available_rows
@@ -5461,16 +6260,14 @@ class LabRunner:
             frames_by_timeframe[timeframe] = frames
             data_hashes_by_timeframe[timeframe] = data_hash
             feature_hashes_by_timeframe[timeframe] = stable_hash(
-                {
-                    market: details["feature_hash"]
-                    for market, details in data_provenance.items()
-                },
+                {market: details["feature_hash"] for market, details in data_provenance.items()},
                 length=64,
             )
             provenance_by_timeframe[timeframe] = {
                 market: self._provenance_summary(provenance)
                 for market, provenance in data_provenance.items()
             }
+            raw_provenance_by_timeframe[timeframe] = data_provenance
             estimated_worker_memory_mb = (
                 sum(
                     float(frame.memory_usage(index=True, deep=True).sum())
@@ -5485,6 +6282,39 @@ class LabRunner:
                 raise MemoryError(
                     "estimated process-worker frame memory exceeds LAB_MEMORY_LIMIT_MB"
                 )
+        plan_manifest = {
+            "run_id": run_id,
+            "manifest_kind": "IMMUTABLE_CAMPAIGN_PLAN",
+            "status": "FROZEN_BEFORE_SCREENING",
+            "created_at": utc_iso(),
+            "profile": profile.upper(),
+            "history_mode": history_mode.upper(),
+            "data_mode": data_mode,
+            "markets": list(markets),
+            "timeframes": list(timeframes),
+            "rows_used_by_timeframe": rows_used_by_timeframe,
+            "data_hashes_by_timeframe": data_hashes_by_timeframe,
+            "feature_hashes_by_timeframe": feature_hashes_by_timeframe,
+            "software_version": self.settings.app.version,
+            "screening_engine_version": FAST_SCREEN_VERSION,
+            "deterministic_seed": self.settings.lab.deterministic_seed,
+            "combination_ids": [combination.combination_id for combination in valid],
+            "economic_hypotheses": (
+                {name: list(blocks) for name, blocks in sorted(combination_templates.items())}
+                if combination_templates
+                else None
+            ),
+            "costs": self.settings.costs.model_dump(mode="json"),
+            "research_gates": self.settings.research.model_dump(mode="json"),
+            "live_orders": 0,
+        }
+        plan_path = self.paths.manifests / f"{run_id}.plan.json"
+        atomic_write_json(plan_path, plan_manifest)
+        plan_hash = sha256_file(plan_path)
+        for timeframe in timeframes:
+            frames = frames_by_timeframe[timeframe]
+            data_hash = data_hashes_by_timeframe[timeframe]
+            data_provenance = raw_provenance_by_timeframe[timeframe]
             tasks = []
             for combination in valid:
                 for sensitivity_parameter, parameters in self._parameter_sets(
@@ -5544,9 +6374,7 @@ class LabRunner:
                     failed_jobs=failed,
                 )
         screening_executor.shutdown(wait=True, cancel_futures=True)
-        combination_index = {
-            combination.combination_id: combination for combination in valid
-        }
+        combination_index = {combination.combination_id: combination for combination in valid}
         persisted_baselines = [
             payload
             for payload in _payload_rows(
@@ -5569,16 +6397,12 @@ class LabRunner:
             for payload in [*persisted_baselines, *baseline_payloads]
             if payload.get("experiment_hash")
         }
-        screening_trials, exact_backtests, new_exact_payloads = (
-            await self._screen_and_validate(
+        screening_trials, exact_backtests, new_exact_payloads = await self._screen_and_validate(
             baseline_payloads=list(unique_baselines.values()),
             combinations=combination_index,
             frames_by_timeframe=frames_by_timeframe,
             executor=executor,
-            allow_review_required_research_only=(
-                include_review_required_research_only
-            ),
-        )
+            allow_review_required_research_only=(include_review_required_research_only),
         )
         optimized_candidates = 0
         walk_forward_candidates = 0
@@ -5619,16 +6443,12 @@ class LabRunner:
                 profile=profile,
                 maximum_candidates=3 if profile.casefold() == "standard" else 5,
                 maximum_trials=max_trials,
-                allow_review_required_research_only=(
-                    include_review_required_research_only
-                ),
+                allow_review_required_research_only=(include_review_required_research_only),
             )
         executor.shutdown(wait=True, cancel_futures=True)
         # A crash can happen after the atomic baseline write but before the
         # leaderboard write. Rebuild missing entries idempotently on every run.
-        known_entries = {
-            row["entry_id"]: row for row in self.store.leaderboard()
-        }
+        known_entries = {row["entry_id"]: row for row in self.store.leaderboard()}
         for payload in _payload_rows(self.store.database, "baseline_results"):
             if not isinstance(payload.get("metrics"), dict):
                 continue
@@ -5653,14 +6473,14 @@ class LabRunner:
         )
         result = {
             "run_id": run_id,
+            "plan_manifest": str(plan_path),
+            "plan_manifest_sha256": plan_hash,
             "lab_instance_id": self.instance_id,
             "profile": profile.upper(),
             "data_mode": data_mode,
             "history_mode": history_mode.upper(),
             "rows_used_by_timeframe": rows_used_by_timeframe,
-            "source_type": (
-                "BASELINE_REAL" if data_mode == "real" else "SYNTHETIC_SMOKE"
-            ),
+            "source_type": ("BASELINE_REAL" if data_mode == "real" else "SYNTHETIC_SMOKE"),
             "data_provenance": provenance_by_timeframe,
             "synthetic_fallback": False,
             "status": formal_status,
@@ -5670,6 +6490,11 @@ class LabRunner:
             ),
             "generated_combinations": len(combinations),
             "generation_status": self.generator.last_generation_status,
+            "economic_hypotheses": (
+                {name: list(blocks) for name, blocks in sorted(combination_templates.items())}
+                if combination_templates
+                else None
+            ),
             "valid_combinations": len(valid),
             "excluded_combinations": len(invalid),
             "exclusion_reasons": dict(
@@ -5768,9 +6593,7 @@ class LabRunner:
             return await self.run_once(**run_arguments)
         except BaseException as exc:
             current = (
-                read_json(self.current_status_path)
-                if self.current_status_path.is_file()
-                else {}
+                read_json(self.current_status_path) if self.current_status_path.is_file() else {}
             )
             run_id = str(current.get("run_id") or "run-start-failed")
             failure = {
@@ -5847,9 +6670,7 @@ class LabRunner:
                     )
                     await asyncio.sleep(self.settings.lab.heartbeat_seconds)
                     continue
-                if soak_minutes is not None and (
-                    time.monotonic() - started >= soak_minutes * 60
-                ):
+                if soak_minutes is not None and (time.monotonic() - started >= soak_minutes * 60):
                     break
                 if time.monotonic() >= next_research_cycle:
                     last = await self.run_once(**run_arguments)
@@ -5857,8 +6678,7 @@ class LabRunner:
                     completed_jobs += int(last.get("new_baseline_backtests") or 0)
                     failed_jobs += int(last.get("failures") or 0)
                     next_research_cycle = (
-                        time.monotonic()
-                        + self.settings.lab.leaderboard_refresh_minutes * 60.0
+                        time.monotonic() + self.settings.lab.leaderboard_refresh_minutes * 60.0
                     )
                 self.heartbeat(
                     run_id=str(last.get("run_id") or "continuous"),
@@ -5909,13 +6729,10 @@ def validate_blocks(
     bearish_entry = [
         block.block_id
         for block in selected.values()
-        if block.direction is BlockDirection.BEARISH
-        and block.role is BlockRole.ENTRY_TRIGGER
+        if block.direction is BlockDirection.BEARISH and block.role is BlockRole.ENTRY_TRIGGER
     ]
     raw_fractals = [
-        block.block_id
-        for block in selected.values()
-        if block.block_id.startswith("raw_fractal")
+        block.block_id for block in selected.values() if block.block_id.startswith("raw_fractal")
     ]
     parameter_results: list[dict[str, Any]] = []
     for block in selected.values():
@@ -5928,12 +6745,8 @@ def validate_blocks(
                     "kind": specification.kind.value,
                     "default": _canonical_value(default),
                     "value_count": len(values),
-                    "has_non_default_trial": any(
-                        value != default for value in values
-                    ),
-                    "hashes_deterministic": parameter_hash(
-                        {"value": default}
-                    )
+                    "has_non_default_trial": any(value != default for value in values),
+                    "hashes_deterministic": parameter_hash({"value": default})
                     == parameter_hash({"value": default}),
                     "optimizer_distribution": specification.optimizer_distribution,
                     "cache_behavior": specification.cache_behavior,
@@ -5968,17 +6781,49 @@ def write_legacy_migration_report(settings: Settings) -> Path:
     legacy_root = settings.paths.project_root / "legacy"
     rules = {
         "candles_engine.py": ("MIGRATED", "research/features.py", "test_features_strategies.py"),
-        "market_structure_patterns.py": ("MIGRATED", "research/features.py", "test_indicator_registry_fractals_investing.py"),
+        "market_structure_patterns.py": (
+            "MIGRATED",
+            "research/features.py",
+            "test_indicator_registry_fractals_investing.py",
+        ),
         "trading_math_engine.py": ("MIGRATED", "research/trading_math.py", "test_backtest_math.py"),
         "simple_backtest_engine.py": ("MIGRATED", "research/backtest.py", "test_backtest_math.py"),
-        "stocks_strategy_combo_lab_v1_1_1_crypto.py": ("MIGRATED", "research/combinatorial_lab.py", "test_combinatorial_lab.py"),
-        "macro_context_engine.py": ("MIGRATED", "research/macro_context.py", "test_database_macro_derivatives.py"),
+        "stocks_strategy_combo_lab_v1_1_1_crypto.py": (
+            "MIGRATED",
+            "research/combinatorial_lab.py",
+            "test_combinatorial_lab.py",
+        ),
+        "macro_context_engine.py": (
+            "MIGRATED",
+            "research/macro_context.py",
+            "test_database_macro_derivatives.py",
+        ),
         "models/models_options.py": ("OUT_OF_SCOPE", None, None),
-        "models/models_regime.py": ("ALREADY_SUPERSEDED", "research/macro_context.py", "test_database_macro_derivatives.py"),
-        "models/models_volatility.py": ("ALREADY_SUPERSEDED", "research/features.py", "test_features_strategies.py"),
-        "data_downloaders/crypto_data_downloader.py": ("ALREADY_SUPERSEDED", "data/data_loader.py", "test_data_realtime.py"),
-        "data_downloaders/multi_venue_crypto_data_downloader.py": ("DUPLICATE", "data/data_loader.py", "test_data_realtime.py"),
-        "data_downloaders/kraken_public_data_collector.py": ("ALREADY_SUPERSEDED", "data/data_loader.py", "test_data_realtime.py"),
+        "models/models_regime.py": (
+            "ALREADY_SUPERSEDED",
+            "research/macro_context.py",
+            "test_database_macro_derivatives.py",
+        ),
+        "models/models_volatility.py": (
+            "ALREADY_SUPERSEDED",
+            "research/features.py",
+            "test_features_strategies.py",
+        ),
+        "data_downloaders/crypto_data_downloader.py": (
+            "ALREADY_SUPERSEDED",
+            "data/data_loader.py",
+            "test_data_realtime.py",
+        ),
+        "data_downloaders/multi_venue_crypto_data_downloader.py": (
+            "DUPLICATE",
+            "data/data_loader.py",
+            "test_data_realtime.py",
+        ),
+        "data_downloaders/kraken_public_data_collector.py": (
+            "ALREADY_SUPERSEDED",
+            "data/data_loader.py",
+            "test_data_realtime.py",
+        ),
     }
     files: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
@@ -6021,9 +6866,7 @@ def write_legacy_migration_report(settings: Settings) -> Path:
                     ),
                     "line": node.lineno,
                 }
-                for node in ast.walk(
-                    ast.parse(path.read_text(encoding="utf-8-sig"))
-                )
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig")))
                 if isinstance(
                     node,
                     (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
@@ -6059,9 +6902,7 @@ def write_legacy_migration_report(settings: Settings) -> Path:
         "files_inspected": len(files),
         "definitions_inspected": len(records),
         "active_imports_legacy": 0,
-        "dispositions": dict(
-            sorted(Counter(row["disposition"] for row in files).items())
-        ),
+        "dispositions": dict(sorted(Counter(row["disposition"] for row in files).items())),
         "files": files,
         "records": records,
     }
