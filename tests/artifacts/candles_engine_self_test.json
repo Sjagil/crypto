@@ -1,0 +1,26 @@
+{
+  "syntax_check": "passed",
+  "runtime_check": "passed",
+  "known_bullish_engulfing_test": "passed",
+  "rows_tested": 1800,
+  "columns_created": 101,
+  "single_pattern_count": 29,
+  "multi_pattern_count": 22,
+  "top_dominant_types": {
+    "ordinary_bearish_candle": 200,
+    "ordinary_bullish_candle": 147,
+    "spinning_top": 134,
+    "outside_bar": 99,
+    "bearish_engulfing": 98,
+    "inside_bar": 96,
+    "bullish_engulfing": 84,
+    "long_legged_doji": 83,
+    "evening_star": 79,
+    "bullish_harami": 76,
+    "high_wave": 73,
+    "bearish_harami": 72,
+    "morning_star": 71,
+    "narrow_range_candle": 66,
+    "three_outside_down": 65
+  }
+}

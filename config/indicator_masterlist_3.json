@@ -1,0 +1,1016 @@
+{
+  "version": 1,
+  "part": 3,
+  "items": [
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Double top",
+      "source_line": 497
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Double bottom",
+      "source_line": 498
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Triple top",
+      "source_line": 499
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Triple bottom",
+      "source_line": 500
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Head and shoulders",
+      "source_line": 501
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Inverse head and shoulders",
+      "source_line": 502
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Ascending triangle",
+      "source_line": 503
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Descending triangle",
+      "source_line": 504
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Symmetrical triangle",
+      "source_line": 505
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Rising wedge",
+      "source_line": 506
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Falling wedge",
+      "source_line": 507
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Bull flag",
+      "source_line": 508
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Bear flag",
+      "source_line": 509
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Pennant",
+      "source_line": 510
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Rectangle",
+      "source_line": 511
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Cup and handle",
+      "source_line": 512
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Inverse cup and handle",
+      "source_line": 513
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Rounded bottom",
+      "source_line": 514
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Rounded top",
+      "source_line": 515
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Broadening formation",
+      "source_line": 516
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Diamond pattern",
+      "source_line": 517
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Adam and Eve",
+      "source_line": 518
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Quasimodo",
+      "source_line": 519
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Harmonic patterns",
+      "source_line": 520
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Gartley",
+      "source_line": 521
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Bat",
+      "source_line": 522
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Butterfly",
+      "source_line": 523
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Crab",
+      "source_line": 524
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Shark",
+      "source_line": 525
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "Cypher",
+      "source_line": 526
+    },
+    {
+      "family": "CHART_PATTERN",
+      "display_name": "ABCD",
+      "source_line": 527
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest",
+      "source_line": 536
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest change",
+      "source_line": 537
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest z-score",
+      "source_line": 538
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest relative to market cap",
+      "source_line": 539
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest relative to spot volume",
+      "source_line": 540
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open Interest relative to futures volume",
+      "source_line": 541
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Funding rate",
+      "source_line": 542
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Open-interest-weighted funding",
+      "source_line": 543
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Volume-weighted funding",
+      "source_line": 544
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Cumulative funding",
+      "source_line": 545
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Predicted funding",
+      "source_line": 546
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Perpetual premium",
+      "source_line": 547
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Futures basis",
+      "source_line": 548
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Annualized basis",
+      "source_line": 549
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Contango",
+      "source_line": 550
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Backwardation",
+      "source_line": 551
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Futures curve",
+      "source_line": 552
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Calendar spread",
+      "source_line": 553
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Spot-to-futures volume ratio",
+      "source_line": 554
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Futures-to-spot volume ratio",
+      "source_line": 555
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Taker buy/sell ratio",
+      "source_line": 556
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Top-trader long/short ratio",
+      "source_line": 557
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Account long/short ratio",
+      "source_line": 558
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Position long/short ratio",
+      "source_line": 559
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Estimated leverage ratio",
+      "source_line": 560
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Margin borrowing ratio",
+      "source_line": 561
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidaties",
+      "source_line": 562
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Long liquidations",
+      "source_line": 563
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Short liquidations",
+      "source_line": 564
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Net liquidations",
+      "source_line": 565
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidation imbalance",
+      "source_line": 566
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidations relative to volume",
+      "source_line": 567
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidations relative to open interest",
+      "source_line": 568
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidation clusters",
+      "source_line": 569
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Liquidation heatmap",
+      "source_line": 570
+    },
+    {
+      "family": "DERIVATIVES",
+      "display_name": "Estimated liquidation levels",
+      "source_line": 571
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Implied Volatility",
+      "source_line": 598
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Realized Volatility",
+      "source_line": 599
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Implied-minus-realized spread",
+      "source_line": 600
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "ATM implied volatility",
+      "source_line": 601
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "25-delta skew",
+      "source_line": 602
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Put skew",
+      "source_line": 603
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Call skew",
+      "source_line": 604
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Volatility smile",
+      "source_line": 605
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Volatility surface",
+      "source_line": 606
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Term structure",
+      "source_line": 607
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Put/call volume ratio",
+      "source_line": 608
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Put/call open-interest ratio",
+      "source_line": 609
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Options open interest",
+      "source_line": 610
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Options volume",
+      "source_line": 611
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Max pain",
+      "source_line": 612
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Gamma exposure",
+      "source_line": 613
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Delta exposure",
+      "source_line": 614
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Vanna exposure",
+      "source_line": 615
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Charm exposure",
+      "source_line": 616
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Dealer positioning",
+      "source_line": 617
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Expected move",
+      "source_line": 618
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Breakeven distribution",
+      "source_line": 619
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "Probability distribution uit options pricing",
+      "source_line": 620
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "DVOL",
+      "source_line": 621
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "IV percentile",
+      "source_line": 622
+    },
+    {
+      "family": "OPTIONS",
+      "display_name": "IV rank",
+      "source_line": 623
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange inflow",
+      "source_line": 632
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange outflow",
+      "source_line": 633
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange netflow",
+      "source_line": 634
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange reserve",
+      "source_line": 635
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange Supply Ratio",
+      "source_line": 636
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange addresses count",
+      "source_line": 637
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange transaction count",
+      "source_line": 638
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange whale ratio",
+      "source_line": 639
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange inflow mean",
+      "source_line": 640
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange inflow median",
+      "source_line": 641
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Exchange inflow top 10",
+      "source_line": 642
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Spot exchange reserve",
+      "source_line": 643
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Derivatives exchange reserve",
+      "source_line": 644
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Stablecoin exchange reserve",
+      "source_line": 645
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized Cap",
+      "source_line": 650
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized Price",
+      "source_line": 651
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "MVRV",
+      "source_line": 652
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "MVRV Z-score",
+      "source_line": 653
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "STH-MVRV",
+      "source_line": 654
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "LTH-MVRV",
+      "source_line": 655
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Entity-adjusted MVRV",
+      "source_line": 656
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "NUPL",
+      "source_line": 657
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "STH-NUPL",
+      "source_line": 658
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "LTH-NUPL",
+      "source_line": 659
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized Profit",
+      "source_line": 660
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized Loss",
+      "source_line": 661
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Net Realized Profit/Loss",
+      "source_line": 662
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Supply in Profit",
+      "source_line": 663
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Supply in Loss",
+      "source_line": 664
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Percent Supply in Profit",
+      "source_line": 665
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Percent Supply in Loss",
+      "source_line": 666
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "AVIV Ratio",
+      "source_line": 667
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Active Realized Price",
+      "source_line": 668
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "True Market Mean Price",
+      "source_line": 669
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Delta Cap",
+      "source_line": 670
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Thermo Cap",
+      "source_line": 671
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Balanced Price",
+      "source_line": 672
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "SOPR",
+      "source_line": 680
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Adjusted SOPR",
+      "source_line": 681
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "STH-SOPR",
+      "source_line": 682
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "LTH-SOPR",
+      "source_line": 683
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "SOPR z-score",
+      "source_line": 684
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized profit-to-value ratio",
+      "source_line": 685
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized loss-to-value ratio",
+      "source_line": 686
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Spent Volume in Profit",
+      "source_line": 687
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Spent Volume in Loss",
+      "source_line": 688
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Coin Days Destroyed",
+      "source_line": 693
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Binary Coin Days Destroyed",
+      "source_line": 694
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Value Days Destroyed",
+      "source_line": 695
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Dormancy",
+      "source_line": 696
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Average Spent Output Lifespan",
+      "source_line": 697
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Liveliness",
+      "source_line": 698
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Vaultedness",
+      "source_line": 699
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "HODL Waves",
+      "source_line": 700
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Realized Cap HODL Waves",
+      "source_line": 701
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "RHODL Ratio",
+      "source_line": 702
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Reserve Risk",
+      "source_line": 703
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Long-Term Holder Supply",
+      "source_line": 704
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Short-Term Holder Supply",
+      "source_line": 705
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Illiquid Supply",
+      "source_line": 706
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Liquid Supply",
+      "source_line": 707
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Highly Liquid Supply",
+      "source_line": 708
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Supply last active 1d, 1w, 1m, 3m, 6m, 1y, 2y, 5y",
+      "source_line": 709
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Accumulation Trend Score",
+      "source_line": 710
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Hodler Net Position Change",
+      "source_line": 711
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Netwerkactiviteit",
+      "source_line": 712
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Active addresses",
+      "source_line": 713
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "New addresses",
+      "source_line": 714
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Sending addresses",
+      "source_line": 715
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Receiving addresses",
+      "source_line": 716
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Transaction count",
+      "source_line": 717
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Transfer volume",
+      "source_line": 718
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Adjusted transfer volume",
+      "source_line": 719
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Mean transaction size",
+      "source_line": 720
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Median transaction size",
+      "source_line": 721
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Fees",
+      "source_line": 722
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Fee revenue",
+      "source_line": 723
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Fee per transaction",
+      "source_line": 724
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Mempool size",
+      "source_line": 725
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Mempool transaction count",
+      "source_line": 726
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Block size",
+      "source_line": 727
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Block interval",
+      "source_line": 728
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "UTXO count",
+      "source_line": 729
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Address growth",
+      "source_line": 730
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Entity growth",
+      "source_line": 731
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Velocity",
+      "source_line": 732
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Network Value to Transactions",
+      "source_line": 733
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "NVT Signal",
+      "source_line": 734
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Network Value to Metcalfe",
+      "source_line": 735
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "NVM Ratio",
+      "source_line": 736
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miners en netwerkveiligheid",
+      "source_line": 737
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Hash rate",
+      "source_line": 738
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Mining difficulty",
+      "source_line": 739
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Difficulty ribbon",
+      "source_line": 740
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Hash ribbons",
+      "source_line": 741
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner reserve",
+      "source_line": 742
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner outflow",
+      "source_line": 743
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner inflow",
+      "source_line": 744
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner netflow",
+      "source_line": 745
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner Supply Ratio",
+      "source_line": 746
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner Position Index",
+      "source_line": 747
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Puell Multiple",
+      "source_line": 748
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Hash price",
+      "source_line": 749
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner revenue",
+      "source_line": 750
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Fees-to-reward ratio",
+      "source_line": 751
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Thermocap",
+      "source_line": 752
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Issuance",
+      "source_line": 753
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Annualized issuance",
+      "source_line": 754
+    },
+    {
+      "family": "ON_CHAIN",
+      "display_name": "Miner capitulation",
+      "source_line": 755
+    }
+  ]
+}

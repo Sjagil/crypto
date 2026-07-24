@@ -1,0 +1,57 @@
+{
+  "fear_greed": ["value"],
+  "dominance": [
+    "btc_dominance",
+    "stablecoin_dominance",
+    "total_market_cap",
+    "total2_market_cap",
+    "total3_market_cap",
+    "stablecoin_market_cap"
+  ],
+  "relative_prices": ["btc", "eth", "sol", "other_assets_optional"],
+  "breadth_prices": ["one_close_price_column_per_point_in_time_asset"],
+  "derivatives": [
+    "funding_rate",
+    "open_interest",
+    "futures_basis",
+    "long_liquidations",
+    "short_liquidations",
+    "price"
+  ],
+  "etf_flows": ["btc_etf_flow", "eth_etf_flow"],
+  "onchain": [
+    "exchange_netflow",
+    "exchange_reserves",
+    "stablecoin_exchange_inflow",
+    "mvrv",
+    "sopr",
+    "nupl",
+    "realized_price",
+    "active_addresses",
+    "transaction_volume",
+    "fees",
+    "miner_reserves",
+    "long_term_holder_supply",
+    "short_term_holder_supply"
+  ],
+  "global_macro": [
+    "dxy",
+    "nasdaq",
+    "sp500",
+    "vix",
+    "us2y",
+    "us10y",
+    "real_yield",
+    "high_yield_spread",
+    "m2",
+    "fed_balance_sheet",
+    "reverse_repo"
+  ],
+  "events": [
+    "available_at",
+    "event_time",
+    "impact",
+    "event_type",
+    "unlock_pct_float"
+  ]
+}

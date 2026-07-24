@@ -1,0 +1,14 @@
+version: 1
+markets:
+  BTC-EUR:
+    status: ALLOWED
+    reason: USER_MAINTAINED_DEFAULT_ALLOWLIST
+  ETH-EUR:
+    status: ALLOWED
+    reason: USER_MAINTAINED_DEFAULT_ALLOWLIST
+  SOL-EUR:
+    status: ALLOWED
+    reason: USER_MAINTAINED_DEFAULT_ALLOWLIST
+  LINK-EUR:
+    status: ALLOWED
+    reason: USER_MAINTAINED_DEFAULT_ALLOWLIST

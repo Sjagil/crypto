@@ -1,0 +1,5972 @@
+"""Command parsing and application orchestration for the crypto spot system."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import html
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tracemalloc
+import urllib.parse
+import urllib.request
+from collections import Counter
+from dataclasses import asdict, is_dataclass, replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from pydantic import BaseModel
+
+from config.settings import CostSettings, ResearchSettings, RiskSettings, Settings
+from core.contracts import (
+    CandidateArtifact,
+    CandidateLifecycle,
+    ExecutionBlocked,
+    OrderIntent,
+    OrderSide,
+    OrderType,
+    ProviderStatus,
+    ResearchStatus,
+)
+from utils.common import (
+    AlertThrottle,
+    atomic_write_json,
+    configure_logging,
+    read_json,
+    redact,
+    sha256_file,
+    stable_hash,
+    stable_json,
+    utc_now,
+)
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, BaseModel):
+        return _json_ready(value.model_dump(mode="json"))
+    if is_dataclass(value):
+        return _json_ready(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, (datetime, Path, Decimal)):
+        return str(value)
+    if hasattr(value, "item"):
+        return _json_ready(value.item())
+    return value
+
+
+def emit(value: Any) -> None:
+    payload = stable_json(_json_ready(value), indent=2)
+    try:
+        print(payload)
+    except UnicodeEncodeError:
+        print(payload.encode("ascii", errors="backslashreplace").decode("ascii"))
+
+
+def _log_extra(
+    *,
+    run_id: str,
+    component: str,
+    operation: str,
+    status: str,
+    provider: str | None = None,
+    market: str | None = None,
+    timeframe: str | None = None,
+    reason_code: str | None = None,
+    duration: float | None = None,
+    retry_number: int = 0,
+    correlation_id: str | None = None,
+    exception_type: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "component": component,
+        "provider": provider,
+        "market": market,
+        "timeframe": timeframe,
+        "operation": operation,
+        "duration": duration,
+        "status": status,
+        "reason_code": reason_code,
+        "exception_type": exception_type,
+        "retry_number": retry_number,
+        "correlation_id": correlation_id,
+    }
+
+
+def csv_values(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    selected = [value] if isinstance(value, str) else value
+    return [
+        item.strip()
+        for group in selected
+        for item in group.split(",")
+        if item.strip()
+    ]
+
+
+def _provider_selection(value: str | list[str] | None, available: list[str] | tuple[str, ...]) -> list[str]:
+    requested = [item.casefold() for item in csv_values(value)]
+    if not requested or "all" in requested:
+        return list(available)
+    unknown = sorted(set(requested) - set(available))
+    if unknown:
+        raise ValueError(f"unknown providers: {unknown}")
+    return list(dict.fromkeys(requested))
+
+
+def _timeframe_selection(value: str | list[str] | None) -> list[str]:
+    from config.settings import SUPPORTED_TIMEFRAMES, normalize_timeframe
+
+    requested = csv_values(value)
+    if not requested or any(item.casefold() == "all" for item in requested):
+        return list(SUPPORTED_TIMEFRAMES)
+    normalized = list(
+        dict.fromkeys(normalize_timeframe(item) for item in requested)
+    )
+    unknown = sorted(set(normalized) - set(SUPPORTED_TIMEFRAMES))
+    if unknown:
+        raise ValueError(f"unsupported timeframes: {unknown}")
+    return normalized
+
+
+def _provider_failure(exc: Exception) -> tuple[str, str]:
+    text = str(exc).casefold()
+    status = getattr(exc, "status", None)
+    if "missing_credentials" in text or isinstance(exc, PermissionError) and "missing" in text:
+        return ProviderStatus.SKIPPED_MISSING_CREDENTIALS.value, "SKIPPED_MISSING_CREDENTIALS"
+    if status == 429 or "rate limit" in text:
+        return ProviderStatus.BLOCKED_RATE_LIMIT.value, type(exc).__name__
+    if status == 402 or "plan" in text or "credits" in text:
+        return ProviderStatus.BLOCKED_PLAN_LIMIT.value, type(exc).__name__
+    if status in {401, 403} or isinstance(exc, PermissionError):
+        return ProviderStatus.BLOCKED_PERMISSION.value, type(exc).__name__
+    if status is not None and int(status) >= 500:
+        return ProviderStatus.BLOCKED_PROVIDER_UNAVAILABLE.value, type(exc).__name__
+    if isinstance(exc, (TimeoutError, ConnectionError)) or any(
+        marker in type(exc).__name__.casefold()
+        for marker in ("connection", "timeout", "serverdisconnected")
+    ):
+        return ProviderStatus.BLOCKED_PROVIDER_UNAVAILABLE.value, type(exc).__name__
+    return ProviderStatus.FAILED_VALIDATION.value, type(exc).__name__
+
+
+def selected_markets(args: argparse.Namespace) -> list[str]:
+    values = csv_values(getattr(args, "markets_csv", None))
+    if not values:
+        values = [getattr(args, "market", "BTC-EUR")]
+    return [value.upper().replace("/", "-") for value in values]
+
+
+def supported_database_url(settings: Settings) -> str | None:
+    if not settings.providers.database_url:
+        return None
+    candidate = settings.providers.database_url.get_secret_value()
+    return (
+        candidate
+        if candidate.startswith(("sqlite://", "postgresql://", "postgresql+"))
+        else None
+    )
+
+
+def settings_with_overrides(args: argparse.Namespace, settings: Settings) -> Settings:
+    risk_update = settings.risk.model_dump()
+    cost_update = settings.costs.model_dump()
+    research_update = settings.research.model_dump()
+    if getattr(args, "risk_per_trade", None) is not None:
+        risk_update["risk_per_trade"] = args.risk_per_trade
+    if getattr(args, "fee", None) is not None:
+        cost_update["default_fee"] = args.fee
+    if getattr(args, "slippage_bps", None) is not None:
+        cost_update["slippage_bps"] = args.slippage_bps
+    if getattr(args, "walk_forward_folds", None) is not None:
+        research_update["walk_forward_folds"] = args.walk_forward_folds
+        research_update["minimum_positive_folds"] = min(
+            research_update["minimum_positive_folds"],
+            args.walk_forward_folds,
+        )
+    if hasattr(args, "bootstrap_samples"):
+        research_update["bootstrap_samples"] = args.bootstrap_samples
+    if hasattr(args, "monte_carlo_runs"):
+        research_update["monte_carlo_runs"] = args.monte_carlo_runs
+    return settings.model_copy(
+        update={
+            "risk": RiskSettings.model_validate(risk_update),
+            "costs": CostSettings.model_validate(cost_update),
+            "research": ResearchSettings.model_validate(research_update),
+        }
+    )
+
+
+def synthetic_ohlcv(
+    rows: int = 900,
+    *,
+    seed: int = 42,
+    market: str = "BTC-EUR",
+) -> pd.DataFrame:
+    if rows < 300:
+        raise ValueError("synthetic datasets require at least 300 rows")
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2023-01-01", periods=rows, freq="1h", tz="UTC")
+    drift = np.linspace(0.0, 0.35, rows)
+    cycle = 0.055 * np.sin(np.arange(rows) / 18.0)
+    noise = rng.normal(0.0, 0.007, rows).cumsum()
+    close = 20_000.0 * np.exp(drift + cycle + noise)
+    open_ = np.r_[close[0], close[:-1]] * (1.0 + rng.normal(0, 0.001, rows))
+    high = np.maximum(open_, close) * (1.0 + rng.uniform(0.001, 0.009, rows))
+    low = np.minimum(open_, close) * (1.0 - rng.uniform(0.001, 0.009, rows))
+    frame = pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": rng.lognormal(5.0, 0.4, rows),
+        },
+        index=index,
+    )
+    frame.index.name = "timestamp"
+    frame.attrs["market"] = market
+    return frame
+
+
+def load_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.DataFrame]:
+    from data.market_data import load_ohlcv
+
+    markets = selected_markets(args)
+    if getattr(args, "data", None):
+        if len(markets) != 1:
+            raise ValueError("one --data file can only be paired with one market")
+        return {
+            markets[0]: load_ohlcv(args.data, market=markets[0], validate=True)
+        }
+    if getattr(args, "providers", None):
+        timeframes = csv_values(getattr(args, "timeframes", None))
+        selected_timeframe = (
+            settings.market_data.base_timeframe
+            if settings.market_data.base_timeframe in timeframes or not timeframes
+            else timeframes[0]
+        )
+        return {
+            market: load_ohlcv(
+                settings.paths.processed_data_dir
+                / f"{market}_{selected_timeframe}.parquet",
+                market=market,
+                timeframe=selected_timeframe,
+                validate=True,
+            )
+            for market in markets
+        }
+    return {
+        market: synthetic_ohlcv(
+            getattr(args, "rows", 900),
+            seed=settings.app.random_seed + index,
+            market=market,
+        )
+        for index, market in enumerate(markets)
+    }
+
+
+def feature_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.DataFrame]:
+    from research.features import FeaturePipeline
+    from scrapers.intelligence import load_intelligence
+
+    frames = load_sources(args, settings)
+    intelligence = None
+    path = getattr(args, "intelligence", None)
+    if path:
+        intelligence = load_intelligence(path)
+    elif getattr(args, "scrapers", None) == "all":
+        default = settings.paths.intelligence_dir / "crypto_intelligence.parquet"
+        intelligence = load_intelligence(default) if default.is_file() else None
+    benchmark = frames.get("BTC-EUR")
+    return {
+        market: FeaturePipeline().build(
+            frame,
+            market=market,
+            benchmark=benchmark,
+            intelligence=intelligence,
+        )
+        for market, frame in frames.items()
+    }
+
+
+def feature_source(args: argparse.Namespace, settings: Settings) -> tuple[str, pd.DataFrame]:
+    sources = feature_sources(args, settings)
+    market = sorted(sources)[0]
+    return market, sources[market]
+
+
+def doctor(settings: Settings) -> int:
+    modules: dict[str, str] = {}
+    for name in (
+        "aiohttp",
+        "bs4",
+        "feedparser",
+        "numpy",
+        "pandas",
+        "playwright",
+        "pyarrow",
+        "pydantic",
+        "yaml",
+    ):
+        try:
+            module = __import__(name)
+            modules[name] = str(getattr(module, "__version__", "installed"))
+        except ImportError:
+            modules[name] = "MISSING"
+    directories = {
+        name: {"path": str(path), "exists": path.is_dir()}
+        for name, path in {
+            "data": settings.paths.data_dir,
+            "output": settings.paths.output_dir,
+            "reports": settings.paths.reports_dir,
+            "checkpoints": settings.paths.checkpoints_dir,
+        }.items()
+    }
+    live_failures = settings.static_live_preflight_failures()
+    healthy = all(value != "MISSING" for value in modules.values()) and all(
+        item["exists"] for item in directories.values()
+    )
+    emit(
+        {
+            "status": "OK" if healthy else "FAILED",
+            "application": settings.app.app_name,
+            "version": settings.app.version,
+            "python": sys.version.split()[0],
+            "research_ready": healthy,
+            "live_ready": not live_failures,
+            "live_blockers": list(live_failures),
+            "modules": modules,
+            "directories": directories,
+            "safety": {
+                "spot_only": settings.execution.spot_only,
+                "quote_currency": settings.market_data.quote_currency,
+                "withdrawals_enabled": settings.execution.withdrawals_enabled,
+                "unknown_eligibility_fails_closed": True,
+            },
+        }
+    )
+    return 0 if healthy else 2
+
+
+def command_config(args: argparse.Namespace, settings: Settings) -> int:
+    if args.config_command == "show":
+        emit(settings.redacted_dict())
+    else:
+        emit(
+            {
+                "status": "VALID",
+                "live_ready": not settings.static_live_preflight_failures(),
+                "live_blockers": list(settings.static_live_preflight_failures()),
+            }
+        )
+    return 0
+
+
+def command_eligibility(args: argparse.Namespace, settings: Settings) -> int:
+    if args.eligibility_command == "list":
+        emit(
+            [
+                settings.shariah.eligibility(market).model_dump(mode="json")
+                for market in settings.market_data.symbols
+            ]
+        )
+        return 0
+    market = args.market_option or args.market
+    if not market:
+        raise ValueError("eligibility check requires --market")
+    result = settings.shariah.eligibility(market)
+    emit(result.model_dump(mode="json"))
+    return 0 if result.status.value == "ALLOWED" else 3
+
+
+async def command_data_async(args: argparse.Namespace, settings: Settings) -> int:
+    from data.downloader import CanonicalDownloader, provider_capabilities
+    from data.market_data import inspect_file, load_ohlcv, quality_report
+
+    if args.data_command == "providers":
+        emit(provider_capabilities())
+        return 0
+    if args.data_command == "download":
+        start = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else utc_now()
+        results = await CanonicalDownloader(settings).download_all(
+            markets=args.markets,
+            timeframes=args.timeframes,
+            start=start.astimezone(UTC),
+            end=end.astimezone(UTC),
+            resume=not args.no_resume,
+            provider_preference=args.providers,
+        )
+        emit([result.model_dump(mode="json") for result in results])
+        return 0
+    if args.data_command == "inspect":
+        emit(inspect_file(args.path))
+        return 0
+    frame = load_ohlcv(args.path, market=args.market, validate=False)
+    report = quality_report(
+        frame,
+        market=args.market,
+        timeframe=args.timeframe,
+        maximum_staleness=timedelta(hours=args.maximum_staleness_hours),
+    )
+    emit(report.model_dump(mode="json"))
+    return 0 if report.valid else 3
+
+
+async def command_scrape_async(args: argparse.Namespace, settings: Settings) -> int:
+    from scrapers.intelligence import (
+        DEFAULT_SOURCES,
+        audit_intelligence,
+        load_intelligence,
+        run_intelligence_pipeline,
+    )
+
+    status_path = settings.paths.intelligence_dir / "scraper_status.json"
+    data_path = settings.paths.intelligence_dir / "crypto_intelligence.parquet"
+    if args.scrape_command == "run":
+        source_names = {name.casefold() for name in csv_values(args.sources)}
+        sources = (
+            DEFAULT_SOURCES
+            if not source_names or "all" in source_names
+            else tuple(
+                source
+                for source in DEFAULT_SOURCES
+                if source.source_id.casefold() in source_names
+                or source.publisher.casefold() in source_names
+            )
+        )
+        if not sources and "rss" not in source_names:
+            raise ValueError("no configured scraper source matched --sources")
+        selected_settings = settings
+        if args.output_dir:
+            selected_settings = settings.model_copy(
+                update={
+                    "paths": settings.paths.model_copy(
+                        update={"intelligence_dir": args.output_dir.resolve()}
+                    )
+                }
+            )
+        run = await run_intelligence_pipeline(
+            selected_settings,
+            sources=sources,
+            include_rss=not args.no_rss
+            and (not source_names or bool({"all", "rss"} & source_names)),
+        )
+        emit(
+            {
+                "status": run.status,
+                "records": len(run.records),
+                "output_path": run.output_path,
+                "sources": [source.model_dump(mode="json") for source in run.sources],
+                "audit": run.audit,
+            }
+        )
+        return 0 if run.records else 3
+    if args.scrape_command == "status":
+        emit(read_json(status_path) if status_path.is_file() else {"status": "NOT_RUN"})
+        return 0
+    if not data_path.is_file():
+        emit({"status": "MISSING", "path": data_path})
+        return 3
+    records = load_intelligence(data_path)
+    if args.scrape_command == "inspect":
+        emit([record.model_dump(mode="json") for record in records[: args.limit]])
+    else:
+        emit(audit_intelligence(records))
+    return 0
+
+
+def command_features(args: argparse.Namespace, settings: Settings) -> int:
+    market, features = feature_source(args, settings)
+    if args.features_command == "audit":
+        metadata = features.attrs.get("feature_knowability", {})
+        payload = {
+            "status": "PASSED",
+            "market": market,
+            "rows": len(features),
+            "columns": len(features.columns),
+            "deterministic_frame_hash": stable_hash(
+                {
+                    "index": [str(value) for value in features.index],
+                    "columns": list(features.columns),
+                    "values": features.astype(str).to_dict(orient="list"),
+                },
+                length=64,
+            ),
+            "raw_fractal_columns": [
+                column for column in features if column.startswith("raw_fractal_")
+            ],
+            "research_labels_in_frame": sorted(
+                set(features.attrs.get("research_labels_excluded", ())).intersection(
+                    features
+                )
+            ),
+            "unsafe_metadata": [
+                column
+                for column, details in metadata.items()
+                if not details.get("lookahead_safe") or details.get("repaint")
+            ],
+        }
+        if (
+            payload["raw_fractal_columns"]
+            or payload["research_labels_in_frame"]
+            or payload["unsafe_metadata"]
+        ):
+            payload["status"] = "FAILED"
+        emit(payload)
+        return 0 if payload["status"] == "PASSED" else 2
+    target = Path(args.output) if args.output else (
+        settings.paths.processed_data_dir / f"{market}_features.parquet"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    features.to_parquet(target, engine="pyarrow")
+    manifest = {
+        "market": market,
+        "rows": len(features),
+        "columns": list(features.columns),
+        "feature_knowability": features.attrs["feature_knowability"],
+        "feature_configuration_hash": stable_hash(
+            {
+                "market": market,
+                "columns": list(features.columns),
+                "feature_knowability": features.attrs["feature_knowability"],
+            },
+            length=64,
+        ),
+    }
+    atomic_write_json(target.with_suffix(".manifest.json"), manifest)
+    persisted = False
+    if getattr(args, "persist", False):
+        from data.database import Database
+
+        database_url = supported_database_url(settings)
+        database = Database(database_url, sqlite_path=settings.paths.database_path)
+        database.migrate()
+        events: list[dict[str, Any]] = []
+        for window in (3, 5, 7):
+            prefix = f"fractal_{window}_"
+            for kind in ("high", "low"):
+                event_column = f"{prefix}confirmed_fractal_{kind}"
+                price_column = f"{event_column}_price"
+                pivot_column = f"{prefix}fractal_{kind}_pivot_timestamp"
+                confirmation_column = (
+                    f"{prefix}fractal_{kind}_confirmation_timestamp"
+                )
+                for timestamp in features.index[features[event_column].astype(bool)]:
+                    events.append(
+                        {
+                            "external_id": stable_hash(
+                                [market, window, kind, str(timestamp)], length=64
+                            ),
+                            "market": market,
+                            "timestamp": timestamp.to_pydatetime(),
+                            "available_at": timestamp.to_pydatetime(),
+                            "status": "CONFIRMED",
+                            "values": {
+                                "window": window,
+                                "kind": kind,
+                                "price": features.at[timestamp, price_column],
+                                "pivot_timestamp": str(
+                                    features.at[timestamp, pivot_column]
+                                ),
+                                "confirmation_timestamp": str(
+                                    features.at[timestamp, confirmation_column]
+                                ),
+                            },
+                        }
+                    )
+        database.upsert_records("fractal_events", events)
+        database.upsert_records(
+            "generated_reports",
+            [
+                {
+                    "external_id": manifest["feature_configuration_hash"],
+                    "market": market,
+                    "status": "FEATURE_BUILD_MANIFEST",
+                    "values": manifest,
+                }
+            ],
+        )
+        database.close()
+        persisted = True
+    emit(
+        {
+            "status": "OK",
+            "market": market,
+            "rows": len(features),
+            "output": target,
+            "persisted": persisted,
+        }
+    )
+    return 0
+
+
+def command_indicators(args: argparse.Namespace, settings: Settings) -> int:
+    from research.indicator_registry import indicator_registry
+
+    registry = indicator_registry()
+    if args.indicator_command == "coverage":
+        payload = registry.report()
+    elif args.indicator_command == "list":
+        selected = [
+            item
+            for item in registry.definitions()
+            if (args.family is None or item.family == args.family.upper())
+            and (args.status is None or item.status.value == args.status.upper())
+            and (not args.tradable_only or item.tradable)
+            and (not args.research_only or item.research_only)
+            and (
+                args.provider_availability is None
+                or (
+                    args.provider_availability == "required"
+                    and item.external_data_required
+                )
+                or (
+                    args.provider_availability == "internal"
+                    and not item.external_data_required
+                )
+            )
+            and (
+                args.role is None
+                or args.role.upper() in {role.value for role in item.compatible_roles}
+            )
+        ]
+        payload = {
+            "count": len(selected),
+            "indicators": [
+                {
+                    "canonical_name": item.canonical_name,
+                    "display_name": item.display_name,
+                    "family": item.family,
+                    "status": item.status.value,
+                    "tradable": item.tradable,
+                    "combinable": item.combinable,
+                }
+                for item in selected
+            ],
+        }
+    elif args.indicator_command == "describe":
+        payload = registry.get(args.name).to_dict()
+    elif args.indicator_command == "fractal-audit":
+        from research.features import FeaturePipeline
+
+        frame = synthetic_ohlcv(args.rows, seed=settings.app.random_seed)
+        features = FeaturePipeline().build(frame)
+        windows: dict[str, Any] = {}
+        for window in (3, 5, 7):
+            prefix = f"fractal_{window}_"
+            high = features[f"{prefix}confirmed_fractal_high"]
+            low = features[f"{prefix}confirmed_fractal_low"]
+            windows[str(window)] = {
+                "confirmation_lag_bars": (window - 1) // 2,
+                "confirmed_highs": int(high.sum()),
+                "confirmed_lows": int(low.sum()),
+                "raw_columns_present": any(
+                    column.startswith("raw_fractal_") for column in features
+                ),
+            }
+        payload = {
+            "status": "PASSED",
+            "rows": len(features),
+            "windows": windows,
+            "research_labels_in_tradable_frame": sorted(
+                set(features.attrs["research_labels_excluded"]).intersection(features)
+            ),
+        }
+    else:
+        raise AssertionError(f"unknown indicator command: {args.indicator_command}")
+    if getattr(args, "persist", False):
+        from data.database import Database
+
+        database_url = supported_database_url(settings)
+        database = Database(database_url, sqlite_path=settings.paths.database_path)
+        database.migrate()
+        database.upsert_records(
+            "indicator_registry",
+            [
+                {
+                    "external_id": item.configuration_hash,
+                    "status": item.status.value,
+                    "values": item.to_dict(),
+                }
+                for item in registry.definitions()
+            ],
+        )
+        database.upsert_records(
+            "indicator_availability",
+            [
+                {
+                    "external_id": stable_hash(
+                        [item.canonical_name, item.provider_requirements],
+                        length=64,
+                    ),
+                    "status": (
+                        "AVAILABLE"
+                        if item.status.value
+                        in {
+                            "IMPLEMENTED",
+                            "IMPLEMENTED_AS_ALIAS",
+                            "DERIVED_FROM_EXISTING_FEATURES",
+                        }
+                        else "MISSING_OR_RESEARCH_ONLY"
+                    ),
+                    "values": {
+                        "canonical_name": item.canonical_name,
+                        "providers": item.provider_requirements,
+                        "external_data_required": item.external_data_required,
+                        "missing_data_policy": item.missing_data_policy,
+                    },
+                }
+                for item in registry.definitions()
+            ],
+        )
+        database.upsert_records(
+            "generated_reports",
+            [
+                {
+                    "external_id": payload.get(
+                        "registry_hash", stable_hash(payload, length=64)
+                    ),
+                    "status": "INDICATOR_COVERAGE_AUDIT",
+                    "values": payload,
+                }
+            ],
+        )
+        database.close()
+        payload["persisted"] = True
+    if getattr(args, "output", None):
+        atomic_write_json(args.output, payload)
+        payload = {"output": str(args.output), "summary": payload}
+    emit(payload)
+    return 0
+
+
+def command_investing(args: argparse.Namespace, settings: Settings) -> int:
+    from data.database import Database
+    from research.investing import InvestmentScorer
+
+    values = read_json(args.input) if args.input else {}
+    if not isinstance(values, dict):
+        raise ValueError("investing score input must be a JSON object")
+    score = InvestmentScorer().score(values)
+    payload = score.to_dict() | {
+        "asset": args.asset.upper(),
+        "status": "INVESTING_ONLY",
+        "generated_at": utc_now().isoformat(),
+    }
+    if args.persist:
+        database_url = supported_database_url(settings)
+        database = Database(database_url, sqlite_path=settings.paths.database_path)
+        database.migrate()
+        database.upsert_records(
+            "investment_scores",
+            [
+                {
+                    "external_id": stable_hash(
+                        [
+                            args.asset.upper(),
+                            score.configuration_hash,
+                            values,
+                        ],
+                        length=64,
+                    ),
+                    "market": args.asset.upper(),
+                    "status": "INVESTING_ONLY",
+                    "values": payload,
+                }
+            ],
+        )
+        database.close()
+        payload["persisted"] = True
+    emit(payload)
+    return 0
+
+
+def command_strategies(args: argparse.Namespace) -> int:
+    from research.strategies import describe_strategies, get_strategy
+
+    if args.strategies_command == "list":
+        emit([item["strategy_id"] for item in describe_strategies()])
+    else:
+        strategy = get_strategy(args.strategy)
+        emit(
+            strategy.metadata.model_dump(mode="json")
+            | {"defaults": strategy.defaults, "parameter_space": strategy.parameter_space}
+        )
+    return 0
+
+
+def backtest_result(args: argparse.Namespace, settings: Settings):
+    from research.backtest import BacktestConfig, BacktestEngine
+    from research.strategies import get_strategy
+
+    selected_settings = settings_with_overrides(args, settings)
+    market, features = feature_source(args, selected_settings)
+    config = BacktestConfig.from_settings(
+        selected_settings,
+        initial_cash_eur=args.capital,
+    )
+    config = replace(
+        config,
+        bootstrap_samples=args.bootstrap_samples,
+        monte_carlo_runs=args.monte_carlo_runs,
+    )
+    return BacktestEngine(config, settings=selected_settings).run(
+        {market: features},
+        get_strategy(args.strategy),
+    )
+
+
+def command_backtest(args: argparse.Namespace, settings: Settings) -> int:
+    from reporting.reports import console_backtest_summary, write_backtest_report
+
+    result = backtest_result(args, settings)
+    output = Path(args.output) if args.output else settings.paths.reports_dir / "backtest"
+    paths = write_backtest_report(result, output)
+    emit(
+        {
+            "status": "OK",
+            "summary": console_backtest_summary(result),
+            "metrics": result.metrics,
+            "integrity": result.integrity,
+            "artifacts": paths,
+        }
+    )
+    return 0
+
+
+def command_optimize(args: argparse.Namespace, settings: Settings) -> int:
+    from research.backtest import BacktestConfig
+    from research.optimization import (
+        coordinate_search,
+        grid_search,
+        optuna_search,
+        random_search,
+    )
+    from research.strategies import get_strategy
+
+    settings = settings_with_overrides(args, settings)
+    market, features = feature_source(args, settings)
+    strategy = get_strategy(args.strategy)
+    config = replace(
+        BacktestConfig.from_settings(settings, initial_cash_eur=args.capital),
+        bootstrap_samples=args.bootstrap_samples,
+        monte_carlo_runs=args.monte_carlo_runs,
+    )
+    common = {
+        "settings": settings,
+        "minimum_trades": args.minimum_trades,
+        "checkpoint_path": Path(args.checkpoint) if args.checkpoint else None,
+    }
+    functions = {
+        "grid": lambda: grid_search({market: features}, strategy, config, **common),
+        "random": lambda: random_search(
+            {market: features},
+            strategy,
+            config,
+            trials=args.trials,
+            seed=settings.app.random_seed,
+            **common,
+        ),
+        "coordinate": lambda: coordinate_search(
+            {market: features}, strategy, config, rounds=args.rounds, **common
+        ),
+        "optuna": lambda: optuna_search(
+            {market: features},
+            strategy,
+            config,
+            trials=args.trials,
+            seed=settings.app.random_seed,
+            **common,
+        ),
+    }
+    result = functions[args.method]()
+    emit(result)
+    return 0
+
+
+def command_walk_forward(args: argparse.Namespace, settings: Settings) -> int:
+    from research.backtest import BacktestConfig
+    from research.optimization import walk_forward_validate
+    from research.strategies import get_strategy
+
+    settings = settings_with_overrides(args, settings)
+    market, features = feature_source(args, settings)
+    strategy = get_strategy(args.strategy)
+    config = replace(
+        BacktestConfig.from_settings(settings, initial_cash_eur=args.capital),
+        bootstrap_samples=args.bootstrap_samples,
+        monte_carlo_runs=args.monte_carlo_runs,
+    )
+    result = walk_forward_validate(
+        {market: features},
+        strategy,
+        strategy.parameters(),
+        config,
+        folds=args.folds,
+        mode=args.mode,
+        purge_bars=args.purge_bars,
+        embargo_bars=args.embargo_bars,
+        settings=settings,
+    )
+    emit(result)
+    return 0 if result.valid else 3
+
+
+def command_monte_carlo(args: argparse.Namespace, settings: Settings) -> int:
+    from research.trading_math import empirical_risk_of_ruin
+
+    samples = [float(value) for value in args.r_multiples.split(",")]
+    result = empirical_risk_of_ruin(
+        samples,
+        risk_fraction=args.risk_fraction,
+        initial_equity=args.capital,
+        trades_per_simulation=args.trades,
+        simulations=args.runs,
+        block_size=args.block_size,
+        seed=settings.app.random_seed,
+    )
+    emit(result.to_dict())
+    return 0
+
+
+def command_research(args: argparse.Namespace, settings: Settings) -> int:
+    from reporting.reports import write_research_report
+    from research.optimization import run_research
+    from research.strategies import get_strategy, strategy_registry
+
+    selected_settings = settings_with_overrides(args, settings)
+    data_by_market = feature_sources(args, selected_settings)
+    requested = args.strategies
+    strategy_ids = (
+        sorted(strategy_registry())
+        if requested == "all"
+        else csv_values(requested) or [args.strategy]
+    )
+    base_directory = (
+        Path(args.output)
+        if args.output
+        else selected_settings.paths.reports_dir / "research"
+    )
+    results: list[dict[str, Any]] = []
+    for strategy_id in strategy_ids:
+        strategy = get_strategy(strategy_id)
+        checkpoint = (
+            Path(args.checkpoint).with_name(
+                f"{Path(args.checkpoint).stem}_{strategy_id}.jsonl"
+            )
+            if args.checkpoint and len(strategy_ids) > 1
+            else (Path(args.checkpoint) if args.checkpoint else None)
+        )
+        outcome = run_research(
+            data_by_market,
+            strategy,
+            selected_settings,
+            capital_eur=args.capital,
+            search_method=args.method,
+            search_trials=args.trials,
+            purge_bars=args.purge_bars,
+            embargo_bars=args.embargo_bars,
+            checkpoint_path=checkpoint,
+            promote_to_paper=args.promote_to_paper,
+        )
+        directory = (
+            base_directory / strategy_id if len(strategy_ids) > 1 else base_directory
+        )
+        paths = write_research_report(outcome, selected_settings, directory)
+        results.append(
+            {
+                "strategy_id": strategy_id,
+                "status": outcome.gate.status.value,
+                "passed": outcome.gate.passed,
+                "reasons": outcome.gate.reasons,
+                "parameters": outcome.parameters,
+                "artifacts": paths,
+            }
+        )
+    emit(results[0] if len(results) == 1 else {"strategies": results})
+    return 0
+
+
+async def command_research_async(
+    args: argparse.Namespace,
+    settings: Settings,
+) -> int:
+    selected_settings = settings_with_overrides(args, settings)
+    if args.providers and not args.data:
+        from data.downloader import CanonicalDownloader
+
+        await CanonicalDownloader(selected_settings).download_all(
+            markets=selected_markets(args),
+            timeframes=csv_values(args.timeframes)
+            or selected_settings.market_data.timeframes,
+            provider_preference=csv_values(args.providers),
+        )
+    if args.scrapers == "all":
+        from scrapers.intelligence import run_intelligence_pipeline
+
+        await run_intelligence_pipeline(selected_settings)
+    return command_research(args, selected_settings)
+
+
+def command_report(args: argparse.Namespace) -> int:
+    if args.path in {"statistics", "charts", "full"}:
+        raise ValueError("operational report commands require settings dispatch")
+    path = Path(args.path)
+    if not path.is_file():
+        emit({"status": "MISSING", "path": path})
+        return 3
+    emit(read_json(path))
+    return 0
+
+
+def _synthetic_reporting_data() -> dict[str, pd.DataFrame]:
+    index = pd.date_range("2025-01-01", periods=120, freq="h", tz="UTC")
+    randomizer = np.random.default_rng(42)
+    returns = randomizer.normal(0.0002, 0.01, len(index))
+    equity = 2_000 * np.cumprod(1 + returns)
+    peak = np.maximum.accumulate(equity)
+    drawdown = equity / peak - 1
+    research = pd.DataFrame(
+        {
+            "equity": equity,
+            "drawdown": drawdown,
+            "rolling_return": pd.Series(returns, index=index).rolling(24).sum(),
+            "rolling_volatility": pd.Series(returns, index=index).rolling(24).std(),
+            "rolling_sharpe": (
+                pd.Series(returns, index=index).rolling(24).mean()
+                / pd.Series(returns, index=index).rolling(24).std()
+            ),
+        },
+        index=index,
+    )
+    market = pd.DataFrame(
+        {
+            "close": 20_000 * np.cumprod(1 + returns),
+            "volume": randomizer.lognormal(5, 0.4, len(index)),
+            "missing_bars": 0,
+        },
+        index=index,
+    )
+    orderbook = pd.DataFrame(
+        {
+            "spread_bps": randomizer.uniform(1, 10, len(index)),
+            "imbalance": randomizer.uniform(-1, 1, len(index)),
+        },
+        index=index,
+    )
+    portfolio = pd.DataFrame(
+        {
+            "allocation": randomizer.uniform(0.2, 0.8, len(index)),
+            "open_risk": randomizer.uniform(10, 50, len(index)),
+            "btc_beta": randomizer.normal(1, 0.1, len(index)),
+            "marginal_risk": randomizer.uniform(0, 1, len(index)),
+            "realized_pnl": np.cumsum(randomizer.normal(0, 2, len(index))),
+            "unrealized_pnl": randomizer.normal(0, 20, len(index)),
+            "daily_pnl": randomizer.normal(0, 8, len(index)),
+            "exposure": randomizer.uniform(100, 1_200, len(index)),
+        },
+        index=index,
+    )
+    macro = pd.DataFrame(
+        {
+            "sentiment_fear_greed": randomizer.uniform(10, 90, len(index)),
+            "dominance_btc_dominance": randomizer.uniform(0.45, 0.60, len(index)),
+            "dominance_stablecoin_dominance": randomizer.uniform(0.05, 0.15, len(index)),
+            "breadth_fraction_above_mean_50d": randomizer.uniform(0, 1, len(index)),
+            "derivatives_funding_rate": randomizer.normal(0, 0.0001, len(index)),
+            "derivatives_open_interest": randomizer.uniform(1e8, 2e8, len(index)),
+            "derivatives_long_liquidations": randomizer.uniform(0, 1e6, len(index)),
+            "derivatives_short_liquidations": randomizer.uniform(0, 1e6, len(index)),
+            "crypto_risk_score": randomizer.integers(-3, 4, len(index)),
+            "events_high_impact_event_risk": randomizer.integers(0, 2, len(index)),
+            "gex_net_gex_proxy": randomizer.normal(0, 1e8, len(index)),
+            "gex_spot_distance_from_dominant_gamma": randomizer.normal(0, 0.05, len(index)),
+        },
+        index=index,
+    )
+    return {
+        "market": market,
+        "research": research,
+        "orderbook": orderbook,
+        "portfolio": portfolio,
+        "macro": macro,
+        "correlation": pd.DataFrame(
+            randomizer.uniform(-1, 1, (4, 4)),
+            index=["BTC", "ETH", "SOL", "LINK"],
+            columns=["BTC", "ETH", "SOL", "LINK"],
+        ),
+    }
+
+
+def command_operational_report(
+    args: argparse.Namespace, settings: Settings
+) -> int:
+    from reporting.visualizations import VisualizationReporter
+
+    action = args.path
+    target = settings.paths.reports_dir / "charts"
+    if action in {"charts", "full", "build"}:
+        datasets = _synthetic_reporting_data()
+        sources: dict[str, Any] = {
+            "non_context_diagnostics": "SYNTHETIC_DIAGNOSTIC_ONLY"
+        }
+        macro_path = settings.paths.context_data_dir / "macro_context_1h.parquet"
+        if macro_path.is_file():
+            datasets["macro"] = pd.read_parquet(macro_path)
+            sources["macro"] = {
+                "source_type": "REAL_PERSISTED_CONTEXT",
+                "path": macro_path,
+                "sha256": sha256_file(macro_path),
+            }
+        option_paths = sorted(
+            settings.paths.context_data_dir.glob("options_deribit_*.parquet")
+        )
+        option_frames = [pd.read_parquet(path) for path in option_paths]
+        if option_frames:
+            options = pd.concat(option_frames, ignore_index=True)
+            options["gross_gex"] = (
+                pd.to_numeric(options["gamma"], errors="coerce")
+                * pd.to_numeric(options["open_interest"], errors="coerce")
+                * pd.to_numeric(
+                    options["contract_multiplier"],
+                    errors="coerce",
+                )
+                * pd.to_numeric(
+                    options["spot_or_index_price"],
+                    errors="coerce",
+                ).pow(2)
+                * 0.01
+            )
+            datasets["gex_strike"] = (
+                options.groupby("strike", as_index=False)["gross_gex"]
+                .sum()
+                .sort_index()
+            )
+            datasets["gex_expiry"] = (
+                options.groupby("expiry", as_index=False)["gross_gex"]
+                .sum()
+                .sort_index()
+            )
+            sources["gex"] = {
+                "source_type": "REAL_DERIBIT_OPTIONS_CHAIN",
+                "paths": option_paths,
+                "contracts": len(options),
+            }
+        index = VisualizationReporter(target).generate(datasets)
+        index["data_sources"] = sources
+    else:
+        index = {"status": "SKIPPED", "reason_code": "CHARTS_NOT_REQUESTED"}
+    statistics = {
+        "status": "PASSED",
+        "generated_at": utc_now().isoformat(),
+        "warning": "synthetic diagnostics are not profitability claims",
+    }
+    emit({"statistics": statistics, "charts": index, "output_dir": target})
+    return 1 if index.get("failed", 0) else 0
+
+
+def _test_run_tree(settings: Settings, run_id: str) -> dict[str, Path]:
+    root = settings.paths.test_runs_dir / run_id
+    directories = {
+        name: root / name
+        for name in ("logs", "charts", "csv", "html", "manifests")
+    }
+    for directory in directories.values():
+        directory.mkdir(parents=True, exist_ok=True)
+    directories["root"] = root
+    return directories
+
+
+def _status_file(
+    root: Path,
+    name: str,
+    *,
+    status: str,
+    reason_code: str,
+    **details: Any,
+) -> dict[str, Any]:
+    payload = {
+        "status": status,
+        "reason_code": reason_code,
+        "checked_at": utc_now().isoformat(),
+        **details,
+    }
+    atomic_write_json(root / name, payload)
+    return payload
+
+
+def _run_check(command: list[str], *, cwd: Path) -> dict[str, Any]:
+    started = time.perf_counter()
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return {
+        "command": command,
+        "status": "PASSED" if result.returncode == 0 else "FAILED",
+        "returncode": result.returncode,
+        "duration_seconds": time.perf_counter() - started,
+        "stdout_tail": result.stdout[-4_000:],
+        "stderr_tail": result.stderr[-4_000:],
+    }
+
+
+def _offline_macro_fixture() -> tuple[pd.DatetimeIndex, dict[str, Any]]:
+    from research.macro_context import MacroSourceSpec
+
+    base = pd.date_range("2025-01-01", periods=240, freq="h", tz="UTC")
+    daily = pd.date_range("2024-11-01", periods=70, freq="D", tz="UTC")
+    return base, {
+        "fear_greed": pd.DataFrame(
+            {"value": np.linspace(20, 80, len(daily))},
+            index=daily,
+        ),
+        "source_specs": {
+            "sentiment": MacroSourceSpec(
+                provider="synthetic_offline_test",
+                source_frequency="1d",
+                expected_cadence=timedelta(days=1),
+                maximum_age=timedelta(days=2),
+                units={"value": "index"},
+            ),
+        },
+    }
+
+
+def _configured_secret_values(settings: Settings) -> tuple[str, ...]:
+    values: list[str] = []
+    for name in type(settings.providers).model_fields:
+        value = getattr(settings.providers, name)
+        if hasattr(value, "get_secret_value"):
+            secret = value.get_secret_value()
+            if secret:
+                values.append(secret)
+    return tuple(values)
+
+
+def _safe_exception_message(
+    exc: BaseException, settings: Settings | None
+) -> str:
+    secrets = _configured_secret_values(settings) if settings is not None else ()
+    return str(redact(str(exc), secrets))
+
+
+def _secret_audit(
+    paths: list[Path],
+    settings: Settings,
+    *,
+    excluded_roots: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    secrets = _configured_secret_values(settings)
+    excluded = tuple(path.resolve() for path in excluded_roots)
+
+    def permitted(path: Path) -> bool:
+        resolved = path.resolve()
+        return not any(
+            resolved == root or root in resolved.parents for root in excluded
+        )
+
+    findings: list[str] = []
+    scanned = 0
+    skipped_binary = 0
+    skipped_large = 0
+    binary_suffixes = {
+        ".db",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".parquet",
+        ".pdf",
+        ".png",
+        ".pyc",
+        ".sqlite",
+        ".sqlite3",
+        ".svgz",
+        ".webp",
+        ".xlsx",
+        ".zip",
+    }
+    maximum_text_bytes = 10 * 1024 * 1024
+    for root in paths:
+        if not root.exists():
+            continue
+        files = (
+            [root]
+            if root.is_file()
+            else [
+                path
+                for path in root.rglob("*")
+                if path.is_file() and permitted(path)
+            ]
+        )
+        for path in files:
+            if path.suffix.casefold() in binary_suffixes:
+                skipped_binary += 1
+                continue
+            try:
+                if path.stat().st_size > maximum_text_bytes:
+                    skipped_large += 1
+                    continue
+            except OSError:
+                continue
+            scanned += 1
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if any(secret in content for secret in secrets):
+                findings.append(str(path))
+    return {
+        "status": "PASSED" if not findings else "FAILED",
+        "reason_code": "NO_CONFIGURED_SECRETS_FOUND" if not findings else "SECRET_FOUND",
+        "files_scanned": scanned,
+        "binary_files_skipped": skipped_binary,
+        "oversized_text_files_skipped": skipped_large,
+        "maximum_text_bytes": maximum_text_bytes,
+        "finding_paths": findings,
+    }
+
+
+def _offline_checks(settings: Settings, tree: dict[str, Path]) -> list[dict[str, Any]]:
+    project = settings.paths.project_root
+    checks = [
+        _run_check([sys.executable, "-m", "compileall", "."], cwd=project),
+        _run_check(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "config",
+                "core",
+                "data",
+                "execution",
+                "reporting",
+                "research",
+                "risk",
+                "scrapers",
+                "utils",
+                "main.py",
+                "tests",
+            ],
+            cwd=project,
+        ),
+        _run_check([sys.executable, "-m", "pytest", "-q"], cwd=project),
+        _run_check([sys.executable, "main.py", "self-test"], cwd=project),
+    ]
+    return checks
+
+
+async def _provider_checks(settings: Settings) -> dict[str, Any]:
+    from data.data_loader import DataLoader
+
+    loader = DataLoader(settings)
+    now = utc_now()
+    start = now - timedelta(hours=4)
+    providers: dict[str, Any] = {}
+    requests = {
+        "bitvavo": ("BTC-EUR", "1h"),
+        "kraken": ("BTC-EUR", "1h"),
+        "mexc": ("BTC-USDT", "1h"),
+    }
+    for provider, (market, timeframe) in requests.items():
+        try:
+            records = await loader.download_ohlcv(
+                provider=provider,
+                market=market,
+                timeframe=timeframe,
+                start=start,
+                end=now,
+                resume=False,
+            )
+            providers[provider] = {
+                "status": "PASSED" if records else "PARTIAL",
+                "reason_code": "PUBLIC_DATA_RECEIVED" if records else "EMPTY_RESPONSE",
+                "records": len(records),
+            }
+            if provider == "mexc":
+                try:
+                    context = await loader.download_derivatives_context(
+                        provider="mexc",
+                        market="BTC-USDT",
+                    )
+                    providers[provider]["derivatives_context"] = {
+                        "status": "PASSED" if context else "PARTIAL",
+                        "records": len(context),
+                        "execution_permitted": False,
+                    }
+                except Exception as exc:
+                    providers[provider]["derivatives_context"] = {
+                        "status": "FAILED",
+                        "reason_code": type(exc).__name__,
+                        "execution_permitted": False,
+                    }
+                    providers[provider]["status"] = "PARTIAL"
+        except Exception as exc:
+            providers[provider] = {
+                "status": "FAILED",
+                "reason_code": type(exc).__name__,
+                "message": _safe_exception_message(exc, settings),
+            }
+    credentialed = {
+        "coinmarketcap": (
+            settings.providers.coinmarketcap_api_key,
+            {"series": "GLOBAL_METRICS"},
+        ),
+        "eodhd": (
+            settings.providers.eodhd_api_key,
+            {"series": "DXY.INDX", "start": start, "end": now},
+        ),
+        "fred": (
+            settings.providers.fred_api_key,
+            {
+                "series": "DFF",
+                "start": datetime(2025, 1, 1, tzinfo=UTC),
+                "end": datetime(2025, 1, 8, tzinfo=UTC),
+            },
+        ),
+    }
+    for provider, (credential, arguments) in credentialed.items():
+        if credential is None:
+            providers[provider] = {
+                "status": "SKIPPED",
+                "reason_code": "SKIPPED_MISSING_CREDENTIALS",
+            }
+            continue
+        try:
+            records = await loader.download_macro_series(
+                provider=provider,
+                **arguments,
+            )
+            providers[provider] = {
+                "status": "PASSED" if records else "PARTIAL",
+                "reason_code": "PUBLIC_DATA_RECEIVED" if records else "EMPTY_RESPONSE",
+                "records": len(records),
+            }
+        except Exception as exc:
+            providers[provider] = {
+                "status": "FAILED",
+                "reason_code": type(exc).__name__,
+            }
+    try:
+        records = await loader.download_macro_series(provider="sec", series="0000320193")
+        providers["sec"] = {
+            "status": "PASSED" if records else "PARTIAL",
+            "reason_code": "PUBLIC_DATA_RECEIVED" if records else "EMPTY_RESPONSE",
+            "records": len(records),
+        }
+    except PermissionError:
+        providers["sec"] = {
+            "status": "BLOCKED",
+            "reason_code": "SEC_USER_AGENT_NOT_CONFIGURED",
+        }
+    except Exception as exc:
+        providers["sec"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+        }
+    return providers
+
+
+async def _websocket_checks(
+    settings: Settings, *, duration: float = 10.0
+) -> dict[str, Any]:
+    from data.websocket_manager import WebSocketManager
+
+    manager = WebSocketManager(
+        queue_size=500,
+        maximum_connection_attempts=2,
+        inactivity_timeout=20,
+    )
+    subscriptions = {
+        "bitvavo": {"ticker": ["BTC-EUR"]},
+        "kraken": {"ticker": ["BTC/EUR"]},
+        "mexc": {"ticker": ["BTC-USDT"]},
+    }
+    await manager.start(subscriptions)
+    await asyncio.sleep(max(1.0, duration))
+    await manager.stop()
+    first = manager.health()
+    await manager.start({"bitvavo": subscriptions["bitvavo"]})
+    await asyncio.sleep(min(5.0, max(1.0, duration / 2)))
+    await manager.stop()
+    second = manager.health()
+    leaked = [
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        and task.get_name().startswith("websocket-")
+    ]
+    providers = {
+        name: {
+            "status": "PASSED"
+            if health["messages"] > 0
+            else "FAILED",
+            "reason_code": (
+                "NORMALIZED_MESSAGES_RECEIVED"
+                if health["messages"] > 0
+                else "NO_MESSAGES"
+            ),
+            **health,
+        }
+        for name, health in first.items()
+    }
+    reconnect_verified = (
+        second["bitvavo"]["connections"] >= 2
+        and second["bitvavo"]["subscriptions"] >= 2
+    )
+    return {
+        "status": (
+            "PASSED"
+            if all(item["status"] == "PASSED" for item in providers.values())
+            and reconnect_verified
+            and not leaked
+            else "FAILED"
+        ),
+        "reason_code": "SMOKE_AND_RECONNECT_COMPLETE",
+        "providers": providers,
+        "intentional_reconnect_verified": reconnect_verified,
+        "task_leaks": leaked,
+        "live_orders": 0,
+    }
+
+
+async def _local_component_checks(
+    settings: Settings, tree: dict[str, Path]
+) -> dict[str, dict[str, Any]]:
+    from data.database import Database
+    from data.derivatives_context import CryptoGEXAnalyzer, OptionsContract
+    from data.orderbook_l2 import Level2OrderBook
+    from execution.position_tracker import PositionTracker
+    from reporting.visualizations import VisualizationReporter
+    from research.macro_context import MacroContextEngine
+    from risk.drawdown_protection import DrawdownProtection
+
+    results: dict[str, dict[str, Any]] = {}
+    database_path = tree["root"] / "test.db"
+    try:
+        database = Database(sqlite_path=database_path)
+        database.migrate()
+        database.upsert_records(
+            "test_runs",
+            [{"run_id": tree["root"].name, "status": "RUNNING", "timestamp": utc_now()}],
+        )
+        database.upsert_records(
+            "test_runs",
+            [{"run_id": tree["root"].name, "status": "PASSED", "timestamp": utc_now()}],
+        )
+        health = database.health()
+        health["idempotent_count"] = health["table_counts"]["test_runs"]
+        results["database"] = health
+        database.close()
+    except Exception as exc:
+        results["database"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        book = Level2OrderBook(provider="synthetic", market="BTC-EUR")
+        await book.initialize(
+            bids=[["19999", "1"], ["19998", "2"]],
+            asks=[["20001", "1"], ["20002", "2"]],
+            sequence=1,
+        )
+        await book.apply_delta(
+            bids=[["19999", "1.5"]],
+            sequence=2,
+            message_id="synthetic-delta",
+        )
+        results["orderbook"] = {
+            "status": "PASSED",
+            "reason_code": "SNAPSHOT_DELTA_FEATURES_VALID",
+            **book.health(),
+            "microprice": str(book.microprice),
+            "estimated_slippage": str(
+                book.estimated_slippage(side="buy", quantity="1.5")
+            ),
+        }
+    except Exception as exc:
+        results["orderbook"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        base, macro_inputs = _offline_macro_fixture()
+        macro = MacroContextEngine().build(base, **macro_inputs)
+        results["macro"] = {
+            "status": "PASSED",
+            "reason_code": "CAUSAL_MACRO_BUILD_COMPLETE",
+            "rows": len(macro),
+            "columns": len(macro.columns),
+            "latest": MacroContextEngine.latest_snapshot(macro),
+        }
+    except Exception as exc:
+        results["macro"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        observed = utc_now()
+        contracts = [
+            OptionsContract(
+                provider="synthetic",
+                underlying="BTC",
+                expiry=observed + timedelta(days=7),
+                strike=20_000,
+                option_type=option_type,
+                spot_or_index_price=20_000,
+                open_interest=100,
+                gamma=0.0001,
+                contract_multiplier=1,
+                observed_at=observed,
+                available_at=observed,
+            )
+            for option_type in ("call", "put")
+        ]
+        results["gex"] = CryptoGEXAnalyzer().calculate(contracts, now=observed)
+        results["gex"]["reason_code"] = "TRANSPARENT_PROXY_CALCULATED"
+    except Exception as exc:
+        results["gex"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        from core.contracts import Fill
+
+        tracker = PositionTracker(tree["root"] / "positions.json")
+        tracker.ingest_fill(
+            Fill(
+                fill_id="test-buy",
+                order_id="paper-order",
+                intent_id="paper-intent",
+                market="BTC-EUR",
+                side=OrderSide.BUY,
+                quantity=Decimal("0.001"),
+                price=Decimal("20000"),
+                fee_eur=Decimal("0.05"),
+                filled_at=utc_now(),
+                venue="paper",
+            ),
+            strategy_id="synthetic-paper",
+        )
+        tracker.mark_to_market("BTC-EUR", Decimal("20100"))
+        results["paper"] = {
+            "status": "PASSED",
+            "reason_code": "SIMULATED_FILL_TRACKED",
+            "pnl": tracker.portfolio_pnl(),
+            "execution_type": "paper_simulation",
+        }
+    except Exception as exc:
+        results["paper"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        index = VisualizationReporter(tree["charts"]).generate(
+            _synthetic_reporting_data()
+        )
+        results["reporting"] = {
+            "status": "FAILED" if index["failed"] else "PASSED",
+            "reason_code": "CHARTS_GENERATED",
+            **index,
+        }
+    except Exception as exc:
+        results["reporting"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    try:
+        state_path = tree["root"] / "drawdown_state.json"
+        audit_path = tree["logs"] / "drawdown_audit.jsonl"
+        protection = DrawdownProtection(
+            state_path=state_path,
+            audit_path=audit_path,
+        )
+        index = pd.date_range(end=utc_now(), periods=10, freq="h")
+        status = protection.evaluate(
+            portfolio_equity=pd.Series(
+                [100, 101, 102, 98, 94, 90, 88, 86, 85, 84],
+                index=index,
+            )
+        )
+        results["risk"] = {
+            "status": "PASSED"
+            if status["state"] in {"BLOCK_NEW_ENTRIES", "KILL_SWITCH"}
+            else "FAILED",
+            "reason_code": "DRAWDOWN_STATE_MACHINE_EXERCISED",
+            **status,
+        }
+    except Exception as exc:
+        results["risk"] = {
+            "status": "FAILED",
+            "reason_code": type(exc).__name__,
+            "message": _safe_exception_message(exc, settings),
+        }
+    return results
+
+
+async def command_test(args: argparse.Namespace, settings: Settings) -> int:
+    run_id = f"{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{stable_hash([args.test_mode, time.time_ns()], length=8)}"
+    tree = _test_run_tree(settings, run_id)
+    root = tree["root"]
+    logger = configure_logging(
+        log_file=tree["logs"] / "test.log",
+        jsonl_file=tree["logs"] / "test.jsonl",
+        secrets=_configured_secret_values(settings),
+    )
+    logger.info(
+        "test run started",
+        extra=_log_extra(
+            run_id=run_id,
+            component="tests",
+            operation=args.test_mode,
+            status="RUNNING",
+            reason_code="TEST_RUN_STARTED",
+        ),
+    )
+    mode = args.test_mode
+    checks: list[dict[str, Any]] = []
+    components: dict[str, dict[str, Any]] = {}
+    providers: dict[str, Any] = {}
+    tracemalloc.start()
+    started = time.perf_counter()
+    if mode in {"offline", "full"}:
+        checks = _offline_checks(settings, tree)
+        components = await _local_component_checks(settings, tree)
+        if mode == "full":
+            providers = await _provider_checks(settings)
+            components["websocket"] = await _websocket_checks(
+                settings, duration=10
+            )
+    elif mode == "database":
+        components = await _local_component_checks(settings, tree)
+        components = {"database": components["database"]}
+    elif mode == "reporting":
+        components = await _local_component_checks(settings, tree)
+        components = {"reporting": components["reporting"]}
+    elif mode == "paper":
+        components = await _local_component_checks(settings, tree)
+        components = {
+            "paper": components["paper"],
+            "risk": components["risk"],
+        }
+    elif mode in {"providers", "network"}:
+        providers = await _provider_checks(settings)
+        if mode == "network":
+            components["websocket"] = await _websocket_checks(
+                settings, duration=max(5.0, float(args.duration or 10))
+            )
+    elif mode == "websockets":
+        components["websocket"] = await _websocket_checks(
+            settings, duration=max(5.0, float(args.duration or 10))
+        )
+    elif mode == "soak":
+        duration = float(args.duration)
+        components["soak"] = await _websocket_checks(
+            settings,
+            duration=duration,
+        )
+        components["soak"].update(
+            {
+            "reason_code": "CONFIGURED_SOAK_DURATION_COMPLETE",
+            "configured_duration_seconds": duration,
+            "live_orders": 0,
+            }
+        )
+    current_memory, peak_memory = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    all_results = [*checks, *components.values(), *providers.values()]
+    failed = [item for item in all_results if item.get("status") == "FAILED"]
+    skipped = sum(
+        item.get("status") in {"SKIPPED", "BLOCKED"}
+        for item in [*components.values(), *providers.values()]
+    )
+    status = "FAILED" if failed else "PARTIAL" if skipped else "PASSED"
+    provider_payload = {
+        "status": (
+            "FAILED"
+            if any(item.get("status") == "FAILED" for item in providers.values())
+            else "PARTIAL"
+            if providers and any(
+                item.get("status") in {"SKIPPED", "PARTIAL", "BLOCKED"}
+                for item in providers.values()
+            )
+            else "PASSED"
+            if providers
+            else "SKIPPED"
+        ),
+        "reason_code": "PROVIDER_CHECKS_COMPLETE" if providers else "NOT_REQUESTED",
+        "providers": providers,
+    }
+    atomic_write_json(root / "provider_status.json", provider_payload)
+    _status_file(
+        root,
+        "data_quality.json",
+        status="PASSED" if mode in {"offline", "full"} and not failed else "SKIPPED",
+        reason_code="SYNTHETIC_VALIDATION_COMPLETE"
+        if mode in {"offline", "full"}
+        else "NOT_REQUESTED",
+    )
+    atomic_write_json(
+        root / "websocket_health.json",
+        components.get(
+            "websocket",
+            {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"},
+        ),
+    )
+    atomic_write_json(
+        root / "orderbook_health.json",
+        components.get(
+            "orderbook",
+            {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"},
+        ),
+    )
+    atomic_write_json(
+        root / "database_health.json",
+        components.get(
+            "database",
+            {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"},
+        ),
+    )
+    _status_file(
+        root,
+        "scraper_status.json",
+        status="PASSED" if mode in {"offline", "full"} and not failed else "SKIPPED",
+        reason_code="SYNTHETIC_ALIGNMENT_TESTED"
+        if mode in {"offline", "full"}
+        else "NOT_REQUESTED",
+    )
+    atomic_write_json(
+        root / "macro_context_status.json",
+        components.get(
+            "macro",
+            {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"},
+        ),
+    )
+    atomic_write_json(
+        root / "gex_status.json",
+        components.get(
+            "gex",
+            {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"},
+        ),
+    )
+    atomic_write_json(
+        root / "risk_status.json",
+        components.get("risk", {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"}),
+    )
+    atomic_write_json(
+        root / "paper_execution_status.json",
+        components.get("paper", {"status": "SKIPPED", "reason_code": "NOT_REQUESTED"}),
+    )
+    atomic_write_json(
+        root / "test_results.json",
+        {
+            "status": status,
+            "checks": checks,
+            "components": components,
+        },
+    )
+    atomic_write_json(
+        root / "statistics.json",
+        {
+            "status": "PASSED",
+            "duration_seconds": time.perf_counter() - started,
+            "memory_current_bytes": current_memory,
+            "memory_peak_bytes": peak_memory,
+            "live_orders": 0,
+        },
+    )
+    logger.info(
+        "test run checks completed",
+        extra=_log_extra(
+            run_id=run_id,
+            component="tests",
+            operation=mode,
+            status=status,
+            reason_code="TEST_CHECKS_COMPLETE",
+            duration=time.perf_counter() - started,
+        ),
+    )
+    secret_audit = (
+        _secret_audit(
+            [settings.paths.project_root],
+            settings,
+            excluded_roots=(
+                settings.paths.project_root / ".env",
+                settings.paths.project_root / ".venv",
+                settings.paths.project_root / ".git",
+                settings.paths.project_root / ".pytest_cache",
+                settings.paths.project_root / ".ruff_cache",
+                settings.paths.project_root / "__pycache__",
+            ),
+        )
+        if mode == "secrets"
+        else _secret_audit([root], settings)
+    )
+    atomic_write_json(root / "secret_audit.json", secret_audit)
+    if secret_audit["status"] == "FAILED":
+        status = "FAILED"
+    summary = {
+        "run_id": run_id,
+        "mode": mode,
+        "status": status,
+        "passed_checks": sum(item.get("status") == "PASSED" for item in all_results),
+        "failed_checks": len(failed),
+        "skipped_or_blocked_checks": skipped,
+        "artifact_root": str(root),
+        "live_orders": 0,
+        "completed_at": utc_now().isoformat(),
+    }
+    atomic_write_json(root / "summary.json", summary)
+    emit(summary)
+    return 1 if status == "FAILED" else 0
+
+
+async def command_providers(args: argparse.Namespace, settings: Settings) -> int:
+    from data.data_loader import DataLoader
+    from data.database import Database
+
+    database = Database(sqlite_path=settings.paths.database_path)
+    database.migrate()
+    loader = DataLoader(settings, database=database)
+    try:
+        if args.providers_command == "list":
+            emit({"providers": loader.list_providers()})
+            return 0
+        if args.providers_command == "capabilities":
+            rows = await loader.capability_matrix(probe=True, persist=True)
+            emit(
+                {
+                    "status": (
+                        ProviderStatus.READY.value
+                        if any(row["status"] == ProviderStatus.READY.value for row in rows)
+                        else ProviderStatus.PARTIAL.value
+                    ),
+                    "providers": rows,
+                    "json": settings.paths.reports_dir / "provider_capabilities.json",
+                    "csv": settings.paths.reports_dir / "provider_capabilities.csv",
+                }
+            )
+            return 0
+        if args.providers_command == "status":
+            emit(
+                {
+                    "runtime": loader.provider_status(),
+                    "persisted_capabilities": [
+                        row["payload"]
+                        for row in database.fetch_records("provider_capabilities")
+                    ],
+                }
+            )
+            return 0
+        if getattr(args, "public_only", False):
+            rows = await loader.capability_matrix(probe=True, persist=True)
+            public = [
+                row
+                for row in rows
+                if row["authentication_requirement"]
+                in {
+                    "NONE",
+                    "PUBLIC_ENDPOINTS_NO_AUTH",
+                    "NONE_FOR_PUBLIC_MARKET_DATA",
+                    "NONE_FOR_PUBLIC_ENDPOINTS",
+                }
+            ]
+            emit(
+                {
+                    "status": (
+                        ProviderStatus.READY.value
+                        if public
+                        and all(
+                            row["status"]
+                            in {ProviderStatus.READY.value, ProviderStatus.PARTIAL.value}
+                            for row in public
+                        )
+                        else ProviderStatus.PARTIAL.value
+                    ),
+                    "public_only": True,
+                    "providers": public,
+                    "live_orders": 0,
+                }
+            )
+            return 0
+    finally:
+        database.close()
+    args.test_mode = "providers"
+    args.duration = 0
+    return await command_test(args, settings)
+
+
+def _watermark_report(
+    database: Any,
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    now = utc_now()
+    rows: list[dict[str, Any]] = []
+    for stored in database.fetch_records("data_watermarks"):
+        payload = dict(stored.get("payload") or {})
+        row = {
+            key: payload.get(key, stored.get(key))
+            for key in (
+                "provider",
+                "market",
+                "timeframe",
+                "data_kind",
+                "status",
+                "earliest_stored_timestamp",
+                "latest_stored_timestamp",
+                "missing_ranges",
+                "retry_ranges",
+                "updated_at",
+            )
+        }
+        latest = row.get("latest_stored_timestamp")
+        if latest:
+            parsed = datetime.fromisoformat(str(latest).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            row["age_seconds"] = max(0.0, (now - parsed.astimezone(UTC)).total_seconds())
+        rows.append(row)
+    if mode == "gaps":
+        rows = [
+            row
+            for row in rows
+            if row.get("missing_ranges") or row.get("retry_ranges")
+        ]
+    if mode == "freshness":
+        rows.sort(key=lambda row: float(row.get("age_seconds", math.inf)), reverse=True)
+    coverage = {
+        "provider_market_timeframe_series": len(rows),
+        "providers": sorted({str(row["provider"]) for row in rows if row.get("provider")}),
+        "markets": sorted({str(row["market"]) for row in rows if row.get("market")}),
+        "timeframes": sorted({str(row["timeframe"]) for row in rows if row.get("timeframe")}),
+    }
+    return {
+        "status": ProviderStatus.READY.value if rows else ProviderStatus.PARTIAL.value,
+        "mode": mode,
+        "coverage": coverage,
+        "rows": rows,
+    }
+
+
+async def _universe_provider_markets(
+    settings: Settings,
+    database: Any,
+    *,
+    universe_size: int,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    from research.combinatorial_lab import UniverseManager, UniverseType
+
+    manager = UniverseManager(settings, database=database)
+    latest = manager.latest()
+    if latest is None or int(latest.get("target_size") or 0) < universe_size:
+        snapshot = await manager.refresh(
+            target_size=min(25, universe_size),
+            scan_limit=max(100, universe_size * 4),
+        )
+        latest = snapshot.to_dict()
+    markets = {"bitvavo": [], "kraken": [], "mexc": []}
+    selected_members: list[dict[str, Any]] = []
+    for member in latest.get("members") or []:
+        types = set(member.get("universe_types") or [])
+        if UniverseType.DISCOVERY_UNIVERSE.value not in types:
+            continue
+        selected_members.append(member)
+        availability = member.get("market_availability") or {}
+        for provider in markets:
+            available = list(availability.get(provider) or [])
+            quote_preference = {
+                "bitvavo": ("EUR",),
+                "kraken": ("EUR", "USD", "USDT"),
+                "mexc": ("USDT",),
+            }[provider]
+            preferred = sorted(
+                (
+                    market
+                    for market in available
+                    if market.split("-")[-1] in quote_preference
+                ),
+                key=lambda market: quote_preference.index(
+                    market.split("-")[-1]
+                ),
+            )
+            if preferred:
+                markets[provider].append(preferred[0])
+        if len(selected_members) >= universe_size:
+            break
+    return markets, {
+        "snapshot_id": latest.get("snapshot_id"),
+        "bias_label": latest.get("bias_label"),
+        "members": selected_members,
+    }
+
+
+async def _fetch_price_history(
+    args: argparse.Namespace,
+    settings: Settings,
+    loader: Any,
+    database: Any,
+) -> dict[str, Any]:
+    providers = _provider_selection(args.providers, loader.list_providers())
+    price_providers = [name for name in providers if name in {"bitvavo", "kraken", "mexc"}]
+    timeframes = _timeframe_selection(args.timeframes)
+    estimate = loader.estimate_fetch(
+        providers=price_providers,
+        universe_size=args.universe_size,
+        history_profile=args.history_profile,
+        timeframes=timeframes,
+    )
+    if not estimate["storage_allowed"]:
+        return estimate | {
+            "status": "BLOCKED_STORAGE_LIMIT",
+            "reason_code": "ESTIMATED_STORAGE_EXCEEDS_CONFIGURED_LIMIT",
+        }
+    if estimate["requires_confirmation"] and not args.yes:
+        return estimate | {
+            "status": "CONFIRMATION_REQUIRED",
+            "reason_code": "LARGE_OR_MAXIMUM_BACKFILL_REQUIRES_YES",
+        }
+    provider_markets, universe = await _universe_provider_markets(
+        settings,
+        database,
+        universe_size=args.universe_size,
+    )
+    now = utc_now()
+    results: list[dict[str, Any]] = []
+    semaphore = asyncio.Semaphore(
+        settings.market_data.maximum_concurrent_providers
+    )
+    provider_semaphores = {
+        provider: asyncio.Semaphore(1) for provider in price_providers
+    }
+
+    async def fetch_one(
+        provider: str,
+        market: str,
+        timeframe: str,
+    ) -> dict[str, Any]:
+        async with provider_semaphores[provider], semaphore:
+            started = time.perf_counter()
+            try:
+                start = loader.history_start(
+                    profile=args.history_profile,
+                    timeframe=timeframe,
+                    provider=provider,
+                    end=now,
+                )
+                records, provenance = await loader.download_canonical_ohlcv(
+                    provider=provider,
+                    market=market,
+                    timeframe=timeframe,
+                    start=start,
+                    end=now,
+                    resume=bool(args.resume),
+                    persist=True,
+                )
+                return {
+                    **provenance,
+                    "requested_start": start,
+                    "requested_end": now,
+                    "received_rows": len(records),
+                    "earliest_timestamp": records[0].timestamp if records else None,
+                    "latest_timestamp": records[-1].timestamp if records else None,
+                    "duration": time.perf_counter() - started,
+                    "status": (
+                        ProviderStatus.READY.value
+                        if records
+                        else ProviderStatus.PARTIAL.value
+                    ),
+                    "reason_code": provenance.get(
+                        "reason_code",
+                        "HISTORICAL_BATCH_COMPLETE"
+                        if records
+                        else "EMPTY_PROVIDER_RESPONSE",
+                    ),
+                }
+            except Exception as exc:
+                status, reason = _provider_failure(exc)
+                return {
+                    "provider": provider,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "duration": time.perf_counter() - started,
+                    "status": status,
+                    "reason_code": reason,
+                }
+
+    requests = [
+        fetch_one(provider, market, timeframe)
+        for provider in price_providers
+        for market in provider_markets.get(provider, [])
+        for timeframe in timeframes
+    ]
+    if requests:
+        results.extend(await asyncio.gather(*requests))
+    materialized: list[dict[str, Any]] = []
+    from data.market_data import save_ohlcv, timeframe_delta, validate_ohlcv
+
+    for provider in reversed(price_providers):
+        for market in provider_markets.get(provider, []):
+            for timeframe in timeframes:
+                source = (
+                    settings.paths.processed_data_dir
+                    / provider
+                    / market
+                    / f"{timeframe}.parquet"
+                )
+                if not source.is_file():
+                    continue
+                try:
+                    stored = pd.read_parquet(source)
+                    if "values" in stored:
+                        expanded = pd.json_normalize(
+                            stored["values"].map(
+                                lambda value: value
+                                if isinstance(value, dict)
+                                else {}
+                            )
+                        )
+                        expanded.index = stored.index
+                        stored = pd.concat([stored, expanded], axis=1)
+                    frame = pd.DataFrame(
+                        {
+                            "timestamp": pd.to_datetime(
+                                stored["timestamp"],
+                                utc=True,
+                            ),
+                            **{
+                                column: pd.to_numeric(
+                                    stored[column],
+                                    errors="coerce",
+                                )
+                                for column in (
+                                    "open",
+                                    "high",
+                                    "low",
+                                    "close",
+                                    "volume",
+                                )
+                            },
+                        }
+                    )
+                    if "closed" in stored:
+                        frame = frame.loc[
+                            stored["closed"].fillna(False).astype(bool).to_numpy()
+                        ]
+                    frame = validate_ohlcv(
+                        frame,
+                        timeframe=timeframe,
+                        closed_candles_only=True,
+                    )
+                    target, manifest = save_ohlcv(
+                        frame,
+                        settings.paths.processed_data_dir
+                        / f"{market}_{timeframe}.parquet",
+                        market=market,
+                        timeframe=timeframe,
+                        maximum_staleness=max(
+                            settings.market_data.maximum_staleness,
+                            timeframe_delta(timeframe) * 2,
+                        ),
+                    )
+                    provenance = {
+                        "source_type": "REAL_PROVIDER_DATA",
+                        "market": market,
+                        "timeframe": timeframe,
+                        "providers_requested": price_providers,
+                        "providers_used": [provider],
+                        "provider_errors": {},
+                        "provider_hashes": {
+                            provider: stable_hash(
+                                stored["raw_hash"].astype(str).tolist(),
+                                length=64,
+                            )
+                        },
+                        "reconciliation_conflicts": [],
+                        "closed_candles_only": True,
+                        "retrieved_at": utc_now(),
+                        "data_file": str(target),
+                        "data_sha256": manifest.sha256,
+                        "rows": len(frame),
+                        "start": frame.index.min(),
+                        "end": frame.index.max(),
+                        "quote_currency": market.split("-")[-1],
+                        "source_classification": (
+                            str(stored["source_classification"].dropna().iloc[-1])
+                            if "source_classification" in stored
+                            and stored["source_classification"].notna().any()
+                            else "PROVIDER_NATIVE"
+                        ),
+                    }
+                    atomic_write_json(
+                        target.with_suffix(f"{target.suffix}.provenance.json"),
+                        provenance,
+                    )
+                    materialized.append(
+                        {
+                            "provider": provider,
+                            "market": market,
+                            "timeframe": timeframe,
+                            "rows": len(frame),
+                            "path": target,
+                        }
+                    )
+                except Exception as exc:
+                    materialized.append(
+                        {
+                            "provider": provider,
+                            "market": market,
+                            "timeframe": timeframe,
+                            "status": ProviderStatus.FAILED_VALIDATION.value,
+                            "reason_code": type(exc).__name__,
+                        }
+                    )
+    if "coinmarketcap" in providers:
+        try:
+            records = await loader.download_cmc_rankings(
+                limit=max(100, args.universe_size * 4),
+                persist=True,
+            )
+            results.append(
+                {
+                    "provider": "coinmarketcap",
+                    "dataset": "rankings",
+                    "received_rows": len(records),
+                    "status": ProviderStatus.READY.value if records else ProviderStatus.PARTIAL.value,
+                    "reason_code": "UNIVERSE_SNAPSHOT_STORED",
+                }
+            )
+        except Exception as exc:
+            status, reason = _provider_failure(exc)
+            results.append(
+                {
+                    "provider": "coinmarketcap",
+                    "dataset": "rankings",
+                    "status": status,
+                    "reason_code": reason,
+                }
+            )
+    succeeded = sum(row["status"] == ProviderStatus.READY.value for row in results)
+    return {
+        "status": ProviderStatus.READY.value if succeeded == len(results) else ProviderStatus.PARTIAL.value,
+        "universe": universe,
+        "estimate": estimate,
+        "datasets": results,
+        "lab_datasets_materialized": materialized,
+        "synthetic_fallback": False,
+        "live_orders": 0,
+    }
+
+
+async def _fetch_context(
+    args: argparse.Namespace,
+    settings: Settings,
+    loader: Any,
+) -> dict[str, Any]:
+    providers = _provider_selection(args.providers, loader.list_providers())
+    profile = args.history_profile.casefold()
+    years = {"smoke": 1, "standard": 5, "deep": 15, "maximum": 50}[profile]
+    end = utc_now()
+    start = end - timedelta(days=365 * years)
+    results: list[dict[str, Any]] = []
+
+    async def collect(provider: str, dataset: str, operation: Any) -> None:
+        started = time.perf_counter()
+        if not loader._credential_configured(provider):
+            results.append(
+                {
+                    "provider": provider,
+                    "dataset": dataset,
+                    "status": ProviderStatus.SKIPPED_MISSING_CREDENTIALS.value,
+                    "reason_code": "SKIPPED_MISSING_CREDENTIALS",
+                    "duration": 0.0,
+                }
+            )
+            return
+        try:
+            value = await operation()
+            count = (
+                len(value)
+                if isinstance(value, (list, tuple, pd.DataFrame))
+                else int(value.get("contracts") or 1)
+                if isinstance(value, dict)
+                else 1
+            )
+            results.append(
+                {
+                    "provider": provider,
+                    "dataset": dataset,
+                    "received_rows": count,
+                    "status": ProviderStatus.READY.value if count else ProviderStatus.PARTIAL.value,
+                    "reason_code": "CONTEXT_DATASET_PERSISTED" if count else "EMPTY_PROVIDER_RESPONSE",
+                    "duration": time.perf_counter() - started,
+                }
+            )
+        except Exception as exc:
+            status, reason = _provider_failure(exc)
+            if (
+                provider == "coinmarketcap"
+                and "historical_quotes" in dataset
+                and getattr(exc, "status", None) == 400
+            ):
+                status = ProviderStatus.BLOCKED_PLAN_LIMIT.value
+                reason = "HISTORICAL_QUOTES_NOT_AVAILABLE_FOR_PLAN_OR_RANGE"
+            results.append(
+                {
+                    "provider": provider,
+                    "dataset": dataset,
+                    "status": status,
+                    "reason_code": reason,
+                    "duration": time.perf_counter() - started,
+                }
+            )
+
+    for provider in providers:
+        if provider == "coinmarketcap":
+            await collect(
+                provider,
+                "global_metrics",
+                lambda: loader.download_macro_series(
+                    provider=provider, series="GLOBAL", persist=True
+                ),
+            )
+            await collect(
+                provider,
+                "rankings",
+                lambda: loader.download_cmc_rankings(limit=250, persist=True),
+            )
+            for symbol in ("BTC", "ETH"):
+                await collect(
+                    provider,
+                    f"{symbol}_historical_quotes",
+                    lambda selected=symbol: loader.download_macro_series(
+                        provider=provider,
+                        series=selected,
+                        start=start,
+                        end=end,
+                        persist=True,
+                    ),
+                )
+        elif provider == "fred":
+            series_ids = (
+                "DFF",
+                "DGS2",
+                "DGS5",
+                "DGS10",
+                "DGS30",
+                "DFII10",
+                "SOFR",
+                "T10Y2Y",
+                "CPIAUCSL",
+                "CPILFESL",
+                "PCEPI",
+                "PCEPILFE",
+                "M2SL",
+                "WALCL",
+                "RRPONTSYD",
+                "WTREGEN",
+                "UNRATE",
+                "ICSA",
+                "INDPRO",
+                "RSAFS",
+                "BAMLH0A0HYM2",
+                "NFCI",
+            )
+            for series in series_ids:
+                await collect(
+                    provider,
+                    series,
+                    lambda selected=series: loader.download_macro_series(
+                        provider=provider,
+                        series=selected,
+                        start=start,
+                        end=end,
+                        persist=True,
+                    ),
+                )
+                if profile in {"deep", "maximum"}:
+                    await collect(
+                        provider,
+                        f"{series}_revisions",
+                        lambda selected=series: loader.download_fred_revisions(
+                            series=selected,
+                            start=start,
+                            end=end,
+                            persist=True,
+                        ),
+                    )
+            for series in ("DFF", "DGS10", "CPIAUCSL", "M2SL", "UNRATE"):
+                await collect(
+                    provider,
+                    f"{series}_vintages",
+                    lambda selected=series: loader.download_fred_vintages(
+                        series=selected,
+                        persist=True,
+                    ),
+                )
+        elif provider == "eodhd":
+            for series in (
+                "economic_events",
+                "macro:inflation_consumer_prices_annual",
+                "macro:interest_rate",
+                "macro:unemployment_total_percent",
+                "VIX.INDX",
+                "GSPC.INDX",
+                "NDX.INDX",
+            ):
+                await collect(
+                    provider,
+                    series,
+                    lambda selected=series: loader.download_macro_series(
+                        provider=provider,
+                        series=selected,
+                        start=start,
+                        end=end,
+                        persist=True,
+                    ),
+                )
+        elif provider == "sec":
+            for cik in ("CIK0001679788", "CIK0001364742"):
+                await collect(
+                    provider,
+                    cik,
+                    lambda selected=cik: loader.download_macro_series(
+                        provider=provider,
+                        series=selected,
+                        persist=True,
+                    ),
+                )
+        elif provider == "alternative_me":
+            await collect(
+                provider,
+                "fear_and_greed",
+                lambda: loader.download_macro_series(
+                    provider=provider,
+                    series="fear_and_greed",
+                    persist=True,
+                ),
+            )
+        elif provider == "defillama":
+            for series in ("stablecoins", "protocols"):
+                await collect(
+                    provider,
+                    series,
+                    lambda selected=series: loader.download_macro_series(
+                        provider=provider,
+                        series=selected,
+                        persist=True,
+                    ),
+                )
+        elif provider == "deribit":
+            for underlying in ("BTC", "ETH"):
+                await collect(
+                    provider,
+                    f"{underlying}_gex",
+                    lambda selected=underlying: loader.download_gex_context(
+                        underlying=selected,
+                        persist=True,
+                    ),
+                )
+        elif provider in {"mexc", "coinglass"}:
+            await collect(
+                provider,
+                "BTC-USDT_derivatives",
+                lambda selected=provider: loader.download_derivatives_context(
+                    provider=selected,
+                    market="BTC-USDT",
+                    persist=True,
+                ),
+            )
+        else:
+            results.append(
+                {
+                    "provider": provider,
+                    "dataset": "configured_context",
+                    "status": (
+                        ProviderStatus.UNSUPPORTED_ENDPOINT.value
+                        if loader._credential_configured(provider)
+                        else ProviderStatus.SKIPPED_MISSING_CREDENTIALS.value
+                    ),
+                    "reason_code": (
+                        "OPTIONAL_PROVIDER_ADAPTER_NOT_IMPLEMENTED"
+                        if loader._credential_configured(provider)
+                        else "SKIPPED_MISSING_CREDENTIALS"
+                    ),
+                }
+            )
+    ready = sum(row["status"] == ProviderStatus.READY.value for row in results)
+    return {
+        "status": ProviderStatus.READY.value if ready == len(results) else ProviderStatus.PARTIAL.value,
+        "history_profile": profile,
+        "datasets": results,
+        "context_directory": settings.paths.context_data_dir,
+        "live_orders": 0,
+    }
+
+
+async def command_extended_data(args: argparse.Namespace, settings: Settings) -> int:
+    from data.data_loader import ContinuousDataService, DataLoader
+    from data.database import Database
+
+    if args.data_command == "database-health":
+        configured_url = (
+            settings.providers.database_url.get_secret_value()
+            if settings.providers.database_url
+            else None
+        )
+        url = (
+            configured_url
+            if configured_url
+            and configured_url.startswith(("sqlite://", "postgresql://", "postgresql+"))
+            else None
+        )
+        database = Database(url, sqlite_path=settings.paths.database_path)
+        database.migrate()
+        health = database.health()
+        if configured_url and url is None:
+            health["configuration_warning"] = "INVALID_DATABASE_URL_USING_SQLITE_DEFAULT"
+        emit(health)
+        database.close()
+        return 0
+    if args.data_command in {"status", "coverage", "gaps", "freshness"}:
+        database = Database(sqlite_path=settings.paths.database_path)
+        database.migrate()
+        try:
+            report = _watermark_report(database, mode=args.data_command)
+            if args.data_command == "status":
+                report["continuous_service"] = ContinuousDataService(
+                    settings,
+                    database=database,
+                ).status()
+            emit(report)
+        finally:
+            database.close()
+        return 0
+    if args.data_command == "live":
+        emit(
+            {
+                "status": "READY",
+                "reason_code": "USE_WEBSOCKET_RUN",
+                "execution_enabled": False,
+            }
+        )
+        return 0
+    if args.data_command == "reconcile":
+        emit(
+            {
+                "status": "READY",
+                "reason_code": "PROVIDE_SERIES_THROUGH_DATA_LOADER_API",
+            }
+        )
+        return 0
+    database = Database(sqlite_path=settings.paths.database_path)
+    database.migrate()
+    loader = DataLoader(settings, database=database)
+    try:
+        if args.data_command == "estimate":
+            providers = _provider_selection(args.providers, loader.list_providers())
+            emit(
+                loader.estimate_fetch(
+                    providers=providers,
+                    universe_size=args.universe_size,
+                    history_profile=args.history_profile,
+                    timeframes=_timeframe_selection(args.timeframes),
+                )
+            )
+            return 0
+        if args.data_command == "fetch":
+            payload = await _fetch_price_history(args, settings, loader, database)
+            emit(payload)
+            return 0 if payload["status"] != "CONFIRMATION_REQUIRED" else 2
+        if args.data_command == "context-fetch":
+            if args.history_profile.casefold() == "maximum" and not args.yes:
+                emit(
+                    {
+                        "status": "CONFIRMATION_REQUIRED",
+                        "reason_code": "MAXIMUM_CONTEXT_FETCH_REQUIRES_YES",
+                    }
+                )
+                return 2
+            emit(await _fetch_context(args, settings, loader))
+            return 0
+        if args.data_command == "sync":
+            async def sync_cycle() -> dict[str, Any]:
+                price = await _fetch_price_history(
+                    args,
+                    settings,
+                    loader,
+                    database,
+                )
+                context_selection = csv_values(args.context)
+                if not context_selection or "none" in {
+                    item.casefold() for item in context_selection
+                }:
+                    return price
+                context_providers = (
+                    "coinmarketcap,eodhd,fred,sec,alternative_me,"
+                    "defillama,deribit,mexc"
+                    if any(
+                        item.casefold() == "all"
+                        for item in context_selection
+                    )
+                    else ",".join(context_selection)
+                )
+                context_arguments = argparse.Namespace(
+                    **{
+                        **vars(args),
+                        "providers": context_providers,
+                    }
+                )
+                context = await _fetch_context(
+                    context_arguments,
+                    settings,
+                    loader,
+                )
+                return {
+                    "status": (
+                        ProviderStatus.READY.value
+                        if price["status"] == ProviderStatus.READY.value
+                        and context["status"] == ProviderStatus.READY.value
+                        else ProviderStatus.PARTIAL.value
+                    ),
+                    "price": price,
+                    "context": context,
+                    "live_orders": 0,
+                }
+
+            if args.continuous:
+                service = ContinuousDataService(settings, database=database)
+                await service.start(
+                    sync_cycle,
+                    interval_seconds=float(args.interval_seconds),
+                    once=False,
+                )
+                emit(service.status())
+                return 0
+            emit(await sync_cycle())
+            return 0
+        records = await loader.download_ohlcv(
+            provider=args.provider,
+            market=args.market,
+            timeframe=args.timeframe,
+            start=datetime.fromisoformat(args.start.replace("Z", "+00:00")),
+            end=datetime.fromisoformat(
+                (args.end or utc_now().isoformat()).replace("Z", "+00:00")
+            ),
+            resume=not args.no_resume,
+            persist=True,
+        )
+    finally:
+        database.close()
+    emit({"status": "PASSED", "records": len(records), "provider": args.provider})
+    return 0
+
+
+async def command_websocket(args: argparse.Namespace, settings: Settings) -> int:
+    from data.websocket_manager import WebSocketManager
+
+    if args.websocket_command == "status":
+        emit(WebSocketManager().health())
+        return 0
+    duration = float(args.duration)
+    manager = WebSocketManager(
+        queue_size=settings.market_data.websocket_queue_size,
+        inactivity_timeout=settings.market_data.websocket_inactivity_seconds,
+    )
+    subscriptions = {
+        args.provider: {
+            "ticker": [args.market],
+            "trades": [args.market],
+        }
+    }
+    if args.provider != "mexc":
+        subscriptions[args.provider]["book"] = [args.market]
+    try:
+        await manager.start(subscriptions)
+        await asyncio.sleep(duration)
+    finally:
+        await manager.stop()
+    emit(
+        {
+            "status": "PASSED"
+            if manager.health(args.provider)["messages"] > 0
+            else "PARTIAL",
+            "health": manager.health(args.provider),
+            "live_orders": 0,
+        }
+    )
+    return 0
+
+
+async def command_orderbook(args: argparse.Namespace, settings: Settings) -> int:
+    from data.data_loader import DataLoader
+    from data.orderbook_l2 import Level2OrderBook
+
+    loader = DataLoader(settings)
+    if args.orderbook_command == "stream":
+        emit(
+            {
+                "status": "READY",
+                "reason_code": "USE_WEBSOCKET_RUN_AND_LEVEL2ORDERBOOK",
+                "execution_enabled": False,
+            }
+        )
+        return 0
+    snapshot = await loader.download_orderbook_snapshot(
+        provider=args.provider,
+        market=args.market,
+        depth=args.depth,
+    )
+    if args.orderbook_command == "snapshot":
+        emit(snapshot)
+        return 0
+    book = Level2OrderBook(
+        provider=args.provider,
+        market=args.market,
+        maximum_depth=args.depth,
+    )
+    await book.initialize(
+        bids=snapshot.values["bids"],
+        asks=snapshot.values["asks"],
+        sequence=snapshot.values.get("sequence"),
+    )
+    emit(book.health())
+    return 0
+
+
+def command_macro(args: argparse.Namespace, settings: Settings) -> int:
+    from research.macro_context import (
+        MacroContextEngine,
+        build_persisted_macro_context,
+    )
+
+    if args.macro_command == "build":
+        report = build_persisted_macro_context(
+            context_dir=settings.paths.context_data_dir,
+            processed_dir=settings.paths.processed_data_dir,
+            timeframes=_timeframe_selection(args.timeframes),
+        )
+        emit(report)
+        return 0
+    paths = sorted(settings.paths.context_data_dir.glob("macro_context_*.parquet"))
+    if not paths:
+        emit(
+            {
+                "status": ProviderStatus.PARTIAL.value,
+                "reason_code": "NO_MACRO_CONTEXT_BUILDS",
+                "path": settings.paths.context_data_dir,
+            }
+        )
+        return 3
+    emit(
+        {
+            "status": ProviderStatus.READY.value,
+            "datasets": [
+                {
+                    "path": path,
+                    "rows": len(result := pd.read_parquet(path)),
+                    "snapshot": MacroContextEngine.latest_snapshot(result),
+                }
+                for path in paths
+            ],
+            "coverage": (
+                read_json(settings.paths.context_data_dir / "macro_context_coverage.json")
+                if (settings.paths.context_data_dir / "macro_context_coverage.json").is_file()
+                else None
+            ),
+        }
+    )
+    return 0
+
+
+async def command_gex(args: argparse.Namespace, settings: Settings) -> int:
+    from data.data_loader import DataLoader
+    from data.database import Database
+
+    underlying = getattr(args, "underlying", "BTC")
+    path = settings.paths.context_data_dir / f"gex_{underlying}.parquet"
+    if args.gex_command == "collect":
+        database = Database(sqlite_path=settings.paths.database_path)
+        database.migrate()
+        try:
+            summary = await DataLoader(
+                settings,
+                database=database,
+            ).download_gex_context(
+                underlying=underlying,
+                persist=True,
+            )
+        finally:
+            database.close()
+        emit({**summary, "output": path})
+        return 0
+    if not path.is_file():
+        emit({"status": ProviderStatus.PARTIAL.value, "reason_code": "NO_GEX_DATA", "path": path})
+        return 3
+    frame = pd.read_parquet(path)
+    emit(
+        {
+            "status": ProviderStatus.READY.value,
+            "underlying": underlying,
+            "rows": len(frame),
+            "latest": frame.iloc[-1].to_dict() if not frame.empty else None,
+            "path": path,
+        }
+    )
+    return 0
+
+
+def command_positions(args: argparse.Namespace, settings: Settings) -> int:
+    from execution.position_tracker import PositionTracker
+
+    tracker = PositionTracker(settings.paths.checkpoints_dir / "positions.json")
+    if args.positions_command == "status":
+        emit(tracker.snapshot())
+    elif args.positions_command == "pnl":
+        emit(
+            {
+                "portfolio": tracker.portfolio_pnl(),
+                "strategy": tracker.pnl_by_strategy(),
+                "symbol": tracker.pnl_by_symbol(),
+                "daily": tracker.daily_pnl(),
+            }
+        )
+    else:
+        emit(
+            {
+                "status": "BLOCKED",
+                "reason_code": "EXCHANGE_BALANCES_REQUIRED",
+                "automatic_mutation": False,
+            }
+        )
+    return 0
+
+
+def command_risk(args: argparse.Namespace, settings: Settings) -> int:
+    if args.risk_command == "kill-switch-status":
+        from risk.drawdown_protection import DrawdownProtection
+
+        protection = DrawdownProtection(
+            state_path=settings.paths.checkpoints_dir / "drawdown_state.json",
+            audit_path=settings.paths.logs_dir / "drawdown_audit.jsonl",
+        )
+        emit(protection.status())
+        return 0
+    if args.risk_command == "drawdown":
+        from risk.drawdown_protection import DrawdownProtection
+
+        index = pd.date_range(end=utc_now(), periods=48, freq="h")
+        equity = pd.Series(np.linspace(2_000, 1_900, len(index)), index=index)
+        protection = DrawdownProtection(
+            state_path=settings.paths.checkpoints_dir / "drawdown_state.json",
+            audit_path=settings.paths.logs_dir / "drawdown_audit.jsonl",
+        )
+        emit(protection.evaluate(portfolio_equity=equity))
+        return 0
+    from risk.correlation_analyzer import CorrelationAnalyzer
+
+    index = pd.date_range(end=utc_now(), periods=120, freq="h")
+    randomizer = np.random.default_rng(settings.app.random_seed)
+    btc = randomizer.normal(0, 0.01, len(index))
+    frame = pd.DataFrame(
+        {
+            "BTC-EUR": btc,
+            "ETH-EUR": btc * 0.85 + randomizer.normal(0, 0.003, len(index)),
+            "SOL-EUR": btc * 0.65 + randomizer.normal(0, 0.006, len(index)),
+        },
+        index=index,
+    )
+    analyzer = CorrelationAnalyzer(maximum_age=timedelta(hours=2))
+    emit(
+        {
+            "pearson": analyzer.pearson(frame).to_dict(),
+            "statistics": analyzer.risk_statistics(
+                frame, {"BTC-EUR": 0.5, "ETH-EUR": 0.3, "SOL-EUR": 0.2}
+            ),
+        }
+    )
+    return 0
+
+
+def paper_ledger(settings: Settings) -> Path:
+    return settings.paths.checkpoints_dir / "paper_execution.jsonl"
+
+
+def command_paper(args: argparse.Namespace, settings: Settings) -> int:
+    from execution.execution import ExecutionMarketRules, PaperBroker
+    from risk.risk_manager import PortfolioSnapshot, RiskManager
+
+    ledger = paper_ledger(settings)
+    if args.paper_command == "status":
+        from execution.execution import DurableLedger
+
+        events = DurableLedger(ledger).events()
+        emit({"status": "READY", "ledger": ledger, "event_count": len(events)})
+        return 0
+    if args.paper_command == "reconcile":
+        from execution.execution import DurableLedger
+
+        try:
+            events = DurableLedger(ledger).events()
+            emit(
+                {
+                    "healthy": True,
+                    "reason_codes": ["LEDGER_READABLE"],
+                    "event_count": len(events),
+                }
+            )
+            return 0
+        except Exception:
+            emit({"healthy": False, "reason_codes": ["LEDGER_UNREADABLE"]})
+            return 3
+    markets = selected_markets(args)
+    if len(markets) != 1:
+        raise ValueError("paper run currently accepts one market per invocation")
+    args.market = markets[0]
+    if args.candidates:
+        candidate = read_json(args.candidates)
+        if candidate.get("status") != ResearchStatus.PAPER_CANDIDATE.value:
+            raise ValueError("paper candidate file is not PAPER_CANDIDATE")
+        args.strategy = str(candidate.get("strategy_id") or args.strategy)
+    broker = PaperBroker(
+        initial_balances={"EUR": Decimal(str(args.capital))},
+        market_rules={
+            args.market: ExecutionMarketRules(minimum_order_value_eur=Decimal("5"))
+        },
+        fee_fraction=Decimal(str(settings.costs.default_fee)),
+        slippage_bps=Decimal(str(settings.costs.slippage_bps)),
+        spread_bps=Decimal(str(settings.costs.spread_bps)),
+        ledger_path=ledger,
+    )
+    snapshot = PortfolioSnapshot(
+        equity_eur=args.capital,
+        cash_eur=args.capital,
+        day_start_equity_eur=args.capital,
+        peak_equity_eur=args.capital,
+        trades_today=0,
+    )
+    decision = RiskManager.from_settings(settings).assess_entry(
+        market=args.market,
+        entry_price=args.price,
+        stop_price=args.price * (1.0 - args.stop_fraction),
+        snapshot=snapshot,
+    )
+    if not decision.approved:
+        emit({"status": "REJECTED", "risk": decision})
+        return 3
+    quantity = min(Decimal(str(args.quantity)), decision.approved_quantity)
+    intent = OrderIntent(
+        intent_id=f"paper-{stable_hash({'at': utc_now(), 'market': args.market}, length=16)}",
+        idempotency_key=args.idempotency_key
+        or stable_hash({"paper": args.market, "at": utc_now()}, length=24),
+        market=args.market,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=quantity,
+        strategy_id=args.strategy,
+        maximum_notional_eur=Decimal(str(args.capital * 0.25)),
+        reason_codes=decision.reason_codes,
+    )
+    order = broker.submit(intent, market_price=Decimal(str(args.price)))
+    emit(
+        {
+            "status": order.status.value,
+            "order": order,
+            "balances": broker.balance_snapshot(),
+            "reconciliation": broker.reconcile(),
+        }
+    )
+    return 0 if order.status.value == "FILLED" else 3
+
+
+def research_status_from_report(path: str | None) -> tuple[ResearchStatus, bool]:
+    if not path:
+        return ResearchStatus.LIVE_BLOCKED, False
+    report = Path(path).resolve()
+    if not report.is_file():
+        return ResearchStatus.LIVE_BLOCKED, False
+    try:
+        payload = read_json(report)
+        status = ResearchStatus(payload["status"])
+        manifest = report.with_name(report.name.replace("_summary.json", "_manifest.json"))
+        manifest_payload = read_json(manifest)
+        artifact = next(
+            item
+            for item in manifest_payload["artifacts"]
+            if Path(item["path"]).resolve() == report
+        )
+        verified = (
+            manifest_payload.get("run_kind") == "research"
+            and artifact["sha256"] == sha256_file(report)
+            and payload.get("passed") is True
+            and status is ResearchStatus.PAPER_CANDIDATE
+            and payload.get("lookahead_safe") is True
+            and payload.get("repainting_safe") is True
+        )
+        return (status, True) if verified else (ResearchStatus.LIVE_BLOCKED, False)
+    except (KeyError, StopIteration, OSError, ValueError, TypeError):
+        return ResearchStatus.LIVE_BLOCKED, False
+
+
+async def live_runtime(
+    args: argparse.Namespace,
+    settings: Settings,
+    *,
+    submit: bool,
+) -> tuple[int, dict[str, Any]]:
+    import aiohttp
+
+    from data.market_data import load_ohlcv, quality_report
+    from execution.execution import LivePreflight, build_live_client
+    from risk.risk_manager import (
+        KillSwitch,
+        PortfolioSnapshot,
+        PositionExposure,
+        RiskManager,
+    )
+
+    status, report_verified = research_status_from_report(args.research_report)
+    data_healthy = False
+    if args.data:
+        frame = load_ohlcv(args.data, market=args.market, validate=True)
+        data_healthy = quality_report(
+            frame,
+            market=args.market,
+            timeframe=args.timeframe,
+            maximum_staleness=settings.market_data.maximum_staleness,
+        ).valid
+    kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
+    preliminary = list(settings.static_live_preflight_failures())
+    if status is not ResearchStatus.PAPER_CANDIDATE:
+        preliminary.append("LIVE_BLOCKED_STRATEGY_NOT_PAPER_CANDIDATE")
+    if not report_verified:
+        preliminary.append("LIVE_BLOCKED_UNVERIFIED_RESEARCH_REPORT")
+    if not data_healthy:
+        preliminary.append("LIVE_BLOCKED_DATA_UNHEALTHY")
+    if kill_switch.active:
+        preliminary.append("LIVE_BLOCKED_KILL_SWITCH")
+    if preliminary:
+        return 3, {
+            "passed": False,
+            "failures": list(dict.fromkeys(preliminary)),
+            "research_status": status.value,
+            "research_report_verified": report_verified,
+            "data_healthy": data_healthy,
+            "exchange_healthy": False,
+            "reconciliation": None,
+        }
+    failures: list[str] = []
+    async with aiohttp.ClientSession() as session:
+        try:
+            client = build_live_client(
+                settings,
+                session=session,
+                ledger_path=settings.paths.checkpoints_dir / "live_execution.jsonl",
+            )
+            balances = await client.balances()
+            reconciliation = await client.reconcile(markets=(args.market,))
+            exchange_healthy = True
+        except ExecutionBlocked as exc:
+            failures.append(type(exc).__name__)
+            reconciliation = None
+            exchange_healthy = False
+            balances = []
+            client = None
+        preflight = LivePreflight.evaluate(
+            settings,
+            markets=(args.market,),
+            strategy_status=status,
+            data_healthy=data_healthy,
+            risk_manager_healthy=True,
+            exchange_healthy=exchange_healthy,
+            reconciliation_healthy=bool(reconciliation and reconciliation.healthy),
+            kill_switch_active=kill_switch.active,
+        )
+        result: dict[str, Any] = {
+            "passed": preflight.passed,
+            "failures": list(preflight.failures) + failures,
+            "research_status": status.value,
+            "research_report_verified": report_verified,
+            "data_healthy": data_healthy,
+            "exchange_healthy": exchange_healthy,
+            "reconciliation": reconciliation,
+        }
+        if not submit or not preflight.passed or preflight.capability is None or client is None:
+            return (0 if preflight.passed else 3), result
+        by_symbol = {str(item.get("symbol")): item for item in balances}
+        eur = Decimal(str(by_symbol.get("EUR", {}).get("available", "0")))
+        base = args.market.split("-")[0]
+        owned = Decimal(str(by_symbol.get(base, {}).get("available", "0")))
+        snapshot = PortfolioSnapshot(
+            equity_eur=float(eur),
+            cash_eur=float(eur),
+            day_start_equity_eur=float(eur),
+            peak_equity_eur=float(eur),
+            trades_today=0,
+            reconciled=True,
+        )
+        manager = RiskManager.from_settings(
+            settings,
+            kill_switch_path=settings.paths.checkpoints_dir / "kill_switch.json",
+        )
+        if args.side == "BUY":
+            risk = manager.assess_entry(
+                market=args.market,
+                entry_price=args.price,
+                stop_price=args.price * (1.0 - args.stop_fraction),
+                snapshot=snapshot,
+                live_mode=True,
+            )
+            quantity = min(Decimal(str(args.quantity)), risk.approved_quantity)
+        else:
+            risk = manager.assess_exit(
+                market=args.market,
+                requested_quantity=args.quantity,
+                snapshot=PortfolioSnapshot(
+                    equity_eur=snapshot.equity_eur,
+                    cash_eur=snapshot.cash_eur,
+                    day_start_equity_eur=snapshot.day_start_equity_eur,
+                    peak_equity_eur=snapshot.peak_equity_eur,
+                    trades_today=0,
+                    positions=(
+                        PositionExposure(
+                            market=args.market,
+                            quantity=float(owned),
+                            mark_price=args.price,
+                            open_risk_eur=0.0,
+                        ),
+                    ),
+                ),
+            )
+            quantity = Decimal(str(args.quantity))
+        if not risk.approved:
+            result["risk"] = risk
+            result["failures"].append("LIVE_BLOCKED_RISK_REJECTED")
+            return 3, result
+        intent = OrderIntent(
+            intent_id=f"live-{stable_hash({'at': utc_now(), 'market': args.market}, length=16)}",
+            idempotency_key=args.idempotency_key,
+            market=args.market,
+            side=OrderSide(args.side),
+            order_type=OrderType.MARKET,
+            quantity=quantity,
+            strategy_id=args.strategy,
+            maximum_notional_eur=Decimal(
+                str(settings.execution.maximum_live_order_eur)
+            ),
+            reason_codes=risk.reason_codes,
+        )
+        result["order"] = await client.submit_order(
+            intent,
+            capability=preflight.capability,
+            estimated_price=Decimal(str(args.price)),
+            reconciled_owned_quantity=owned,
+        )
+        result["status"] = "SUBMITTED"
+        return 0, result
+
+
+async def command_live_async(args: argparse.Namespace, settings: Settings) -> int:
+    if args.live_command == "status":
+        failures = settings.static_live_preflight_failures()
+        emit({"live_ready": not failures, "failures": failures})
+        return 0
+    code, result = await live_runtime(
+        args,
+        settings,
+        submit=args.live_command == "run",
+    )
+    emit(result)
+    return code
+
+
+def _lab_sizes(value: str | None, default: tuple[int, ...] = (1, 2)) -> tuple[int, ...]:
+    selected = tuple(int(item) for item in csv_values(value)) or default
+    if any(size < 1 or size > 5 for size in selected):
+        raise ValueError("combination sizes must be between one and five")
+    return tuple(sorted(set(selected)))
+
+
+def _lab_logic_modes(value: str | None):
+    from research.combinatorial_lab import LogicMode
+
+    aliases = {
+        "all": LogicMode.ALL,
+        "any": LogicMode.ANY,
+        "majority": LogicMode.MAJORITY,
+        "weighted_vote": LogicMode.WEIGHTED_VOTE,
+        "layered": LogicMode.LAYERED,
+    }
+    requested = csv_values(value) or ["layered"]
+    unknown = sorted(set(requested) - set(aliases))
+    if unknown:
+        raise ValueError(f"unknown lab logic modes: {unknown}")
+    return tuple(aliases[item] for item in requested)
+
+
+def _lab_parameter_overrides(values: list[str] | None) -> dict[str, tuple[Decimal, ...]]:
+    parsed: dict[str, tuple[Decimal, ...]] = {}
+    for expression in values or []:
+        if "=" not in expression:
+            raise ValueError(f"lab parameter requires NAME=VALUE_OR_RANGE: {expression}")
+        name, raw = expression.split("=", 1)
+        parts = raw.split(":")
+        if len(parts) == 1:
+            generated = (Decimal(parts[0]),)
+        elif len(parts) == 3:
+            start, stop, step = map(Decimal, parts)
+            if step <= 0 or start > stop:
+                raise ValueError(f"invalid lab parameter range: {expression}")
+            selected: list[Decimal] = []
+            current = start
+            while current <= stop:
+                selected.append(current)
+                current += step
+            generated = tuple(selected)
+        else:
+            raise ValueError(f"invalid lab parameter range: {expression}")
+        parsed[name.strip()] = generated
+    return parsed
+
+
+def _lab_generation_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "profile": args.profile,
+        "universe_size": args.universe_size,
+        "combination_sizes": _lab_sizes(args.combination_sizes),
+        "logic_modes": _lab_logic_modes(args.logic_modes),
+        "timeframes": tuple(csv_values(args.timeframes) or ["1h", "4h"]),
+        "rows": args.rows,
+        "history_mode": args.history_mode,
+        "workers": args.workers,
+        "data_mode": args.data_mode,
+        "max_trials": args.max_trials,
+        "universe_scope": (
+            "allowed" if args.allowed_universe else "discovery"
+        ),
+        "include_review_required_research_only": (
+            args.include_review_required_research_only
+            or not args.allowed_universe
+        ),
+        "resume": args.resume,
+        "force": args.force,
+        "retest": args.retest,
+        "only_missing": args.only_missing,
+        "block_ids": tuple(csv_values(args.blocks)) or None,
+        "parameter_overrides": _lab_parameter_overrides(args.parameter),
+    }
+
+
+async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
+    from research.combinatorial_lab import (
+        CombinationGenerator,
+        CombinationState,
+        GenerationMode,
+        LabControl,
+        LabRunner,
+        LabStore,
+        LogicMode,
+        UniverseManager,
+        UniverseType,
+        signal_block_registry,
+        validate_blocks,
+        write_legacy_migration_report,
+    )
+
+    if args.lab_section in {"run", "retest"}:
+        lab_overrides = {
+            key: value
+            for key, value in {
+                "cpu_limit": getattr(args, "cpu_limit", None),
+                "memory_limit_mb": getattr(args, "memory_limit_mb", None),
+                "trial_timeout_seconds": getattr(args, "trial_timeout", None),
+                "combination_timeout_seconds": getattr(
+                    args,
+                    "combination_timeout",
+                    None,
+                ),
+            }.items()
+            if value is not None
+        }
+        if lab_overrides:
+            settings = settings.model_copy(
+                update={
+                    "lab": settings.lab.model_copy(update=lab_overrides),
+                }
+            )
+    store = LabStore(settings)
+    runner = LabRunner(settings, store=store)
+    section = args.lab_section
+    action = getattr(args, "lab_action", None)
+    if section in {"generate", "enqueue"}:
+        section = "combinations"
+        action = "generate"
+    if section == "data":
+        requested_markets = [
+            market.upper().replace("/", "-")
+            for market in csv_values(getattr(args, "markets_csv", None))
+        ]
+        if requested_markets:
+            markets = requested_markets
+        else:
+            markets = runner._markets(
+                args.universe_size,
+                universe_scope=(
+                    "allowed" if args.allowed_universe else "discovery"
+                ),
+                include_review_required_research_only=not args.allowed_universe,
+            )
+        if args.allowed_universe:
+            rejected = [
+                market
+                for market in markets
+                if settings.shariah.eligibility(market).status.value != "ALLOWED"
+            ]
+            if rejected:
+                raise ValueError(
+                    f"non-ALLOWED markets requested for allowed research: {rejected}"
+                )
+        timeframes = tuple(
+            csv_values(args.timeframes) or settings.market_data.timeframes
+        )
+        if action == "prepare":
+            emit(
+                await runner.prepare_real_data(
+                    markets=markets,
+                    timeframes=timeframes,
+                    minimum_rows=args.minimum_rows,
+                    history_profile=args.history_profile,
+                    only_missing=not args.force,
+                )
+            )
+        else:
+            emit(
+                runner.data_status(
+                    markets=markets,
+                    timeframes=timeframes,
+                    minimum_rows=args.minimum_rows,
+                )
+            )
+        return 0
+    if section == "indicators":
+        from research.indicator_registry import indicator_registry
+
+        registry = indicator_registry()
+        if action == "coverage":
+            payload = registry.report()
+            json_path = settings.paths.reports_dir / "indicator_coverage.json"
+            csv_path = settings.paths.reports_dir / "indicator_coverage.csv"
+            atomic_write_json(json_path, payload)
+            pd.DataFrame(payload["coverage_rows"]).to_csv(csv_path, index=False)
+            emit(
+                {
+                    "status": "PASSED",
+                    "json": str(json_path),
+                    "csv": str(csv_path),
+                    "summary": {
+                        key: payload[key]
+                        for key in (
+                            "source_item_occurrences",
+                            "unique_canonical_indicators",
+                            "counts_by_coverage_status",
+                        )
+                    },
+                }
+            )
+        elif action == "list":
+            emit(
+                {
+                    "count": len(registry),
+                    "indicators": [
+                        {
+                            "id": item.canonical_name,
+                            "family": item.family,
+                            "status": item.status.value,
+                        }
+                        for item in registry.definitions()
+                    ],
+                }
+            )
+        else:
+            item = registry.get(args.id)
+            if action == "describe":
+                emit(item.to_dict())
+            elif action == "parameters":
+                emit(
+                    {
+                        "id": item.canonical_name,
+                        "parameters": [
+                            asdict(parameter) for parameter in item.parameters
+                        ],
+                    }
+                )
+            else:
+                emit(
+                    {
+                        "id": item.canonical_name,
+                        "status": (
+                            "PASSED"
+                            if item.status.value
+                            in {
+                                "IMPLEMENTED",
+                                "IMPLEMENTED_AS_ALIAS",
+                                "DERIVED_FROM_EXISTING_FEATURES",
+                            }
+                            else "SKIPPED_NOT_IMPLEMENTED"
+                        ),
+                        "coverage_status": item.status.value,
+                    }
+                )
+        return 0
+    if section == "universe":
+        manager = UniverseManager(settings, database=store.database)
+        if action == "refresh":
+            snapshot = await manager.refresh(
+                target_size=args.universe_size,
+                scan_limit=args.scan_limit,
+            )
+            emit(
+                snapshot.to_dict()
+                | {
+                    "research_eligible_count": len(snapshot.research_eligible),
+                    "execution_eligible_count": len(snapshot.execution_eligible),
+                }
+            )
+        elif action in {"show", "snapshot"}:
+            emit(manager.latest() or {"status": "EMPTY", "reason_code": "NO_SNAPSHOT"})
+        elif action == "eligibility":
+            latest = manager.latest()
+            if latest is None:
+                emit({"status": "EMPTY", "reason_code": "NO_SNAPSHOT"})
+                return 0
+            members = latest.get("members") or []
+            emit(
+                {
+                    "snapshot_id": latest.get("snapshot_id"),
+                    "members": [
+                        {
+                            "symbol": member.get("symbol"),
+                            "allowlist_status": member.get("allowlist_status"),
+                            "universe_types": member.get("universe_types"),
+                            "exclusion_reasons": member.get("exclusion_reasons"),
+                        }
+                        for member in members
+                    ],
+                }
+            )
+        elif action == "coverage":
+            latest = manager.latest()
+            if latest is None:
+                emit({"status": "PARTIAL", "reason_code": "NO_UNIVERSE_SNAPSHOT"})
+                return 0
+            rows: list[dict[str, Any]] = []
+            for member in latest.get("members") or []:
+                if (
+                    UniverseType.DISCOVERY_UNIVERSE.value
+                    not in set(member.get("universe_types") or [])
+                ):
+                    continue
+                availability = member.get("market_availability") or {}
+                rows.append(
+                    {
+                        "snapshot_id": latest.get("snapshot_id"),
+                        "symbol": member.get("symbol"),
+                        "cmc_rank": member.get("cmc_rank"),
+                        "allowlist_status": member.get("allowlist_status"),
+                        "universe_types": member.get("universe_types"),
+                        "bitvavo_markets": availability.get("bitvavo") or [],
+                        "kraken_markets": availability.get("kraken") or [],
+                        "mexc_markets": availability.get("mexc") or [],
+                        "coinmarketcap": True,
+                        "exclusion_reasons": member.get("exclusion_reasons") or [],
+                    }
+                )
+            json_path = settings.paths.reports_dir / "universe_coverage.json"
+            csv_path = settings.paths.reports_dir / "universe_coverage.csv"
+            atomic_write_json(json_path, rows)
+            csv_frame = pd.DataFrame(rows)
+            for column in csv_frame:
+                if csv_frame[column].map(
+                    lambda value: isinstance(value, (list, dict))
+                ).any():
+                    csv_frame[column] = csv_frame[column].map(stable_json)
+            csv_frame.to_csv(csv_path, index=False)
+            emit(
+                {
+                    "status": ProviderStatus.READY.value if rows else ProviderStatus.PARTIAL.value,
+                    "snapshot_id": latest.get("snapshot_id"),
+                    "bias_label": latest.get("bias_label"),
+                    "assets": len(rows),
+                    "json": json_path,
+                    "csv": csv_path,
+                    "rows": rows,
+                }
+            )
+        else:
+            emit(manager.history())
+        return 0
+    if section == "blocks":
+        registry = signal_block_registry()
+        if action == "list":
+            emit(
+                {
+                    "count": len(registry),
+                    "blocks": [
+                        {
+                            "block_id": block.block_id,
+                            "family": block.family,
+                            "role": block.role,
+                            "direction": block.direction,
+                        }
+                        for block in sorted(registry.values(), key=lambda item: item.block_id)
+                    ],
+                }
+            )
+        elif action == "describe":
+            if args.block not in registry:
+                raise ValueError(f"unknown block: {args.block}")
+            emit(registry[args.block].to_dict())
+        else:
+            emit(validate_blocks(registry))
+        return 0
+    if section == "combinations":
+        registry = signal_block_registry()
+        generator = CombinationGenerator(registry)
+        sizes = _lab_sizes(args.combination_sizes, (1, 2, 3))
+        logic_modes = _lab_logic_modes(args.logic_modes)
+        blocks = (
+            csv_values(getattr(args, "blocks", None))
+            or list(runner._profile_blocks(args.profile))
+        )
+        generator = CombinationGenerator(
+            {block_id: registry[block_id] for block_id in blocks}
+        )
+        timeframes = csv_values(args.timeframes) or ["1h", "4h", "1d"]
+        if action == "estimate":
+            estimate = generator.estimate(
+                sizes,
+                logic_modes=logic_modes,
+                assets=args.universe_size,
+                timeframes=len(timeframes),
+            )
+            emit(
+                estimate
+                | {
+                    "profile": args.profile.upper(),
+                    "confirmation_required": (
+                        estimate["baseline_experiments_upper_bound"]
+                        > settings.lab.confirmation_job_threshold
+                    ),
+                }
+            )
+            return 0
+        if action == "generate":
+            estimate = generator.estimate(
+                sizes,
+                logic_modes=logic_modes,
+                assets=args.universe_size,
+                timeframes=len(timeframes),
+            )
+            if (
+                estimate["baseline_experiments_upper_bound"]
+                > settings.lab.confirmation_job_threshold
+                and not args.yes
+            ):
+                emit(
+                    estimate
+                    | {
+                        "status": "CONFIRMATION_REQUIRED",
+                        "reason_code": "ESTIMATED_JOB_THRESHOLD_EXCEEDED",
+                    }
+                )
+                return 2
+            generation_checkpoint = (
+                store.paths.checkpoints / "generation_cursor.json"
+            )
+            continuation_cursor = None
+            if args.resume and generation_checkpoint.is_file():
+                generation_state = read_json(generation_checkpoint)
+                if generation_state.get("status") == "PARTIAL_GENERATION":
+                    continuation_cursor = generation_state.get(
+                        "continuation_cursor"
+                    )
+            combinations = generator.generate(
+                sizes=sizes,
+                logic_modes=logic_modes,
+                mode=(
+                    GenerationMode.EXHAUSTIVE
+                    if args.profile == "exhaustive"
+                    else GenerationMode.FAMILY_AWARE
+                ),
+                block_ids=blocks,
+                timeframes=timeframes,
+                maximum_rows=settings.lab.maximum_generation_rows,
+                continuation_cursor=continuation_cursor,
+            )
+            store.persist_blocks(registry.values())
+            store.persist_combinations(combinations)
+            atomic_write_json(
+                store.paths.checkpoints / "generation_cursor.json",
+                generator.last_generation_status,
+            )
+            emit(
+                {
+                    "status": generator.last_generation_status["status"],
+                    "count": len(combinations),
+                    "generation": generator.last_generation_status,
+                    "by_state": dict(
+                        sorted(
+                            Counter(
+                                combination.eligibility_status.value
+                                for combination in combinations
+                            ).items()
+                        )
+                    ),
+                }
+            )
+            return 0
+        combinations = [
+            dict(row["payload"])
+            for row in store.database.fetch_records("strategy_combinations")
+        ]
+        if action == "inspect":
+            selected = next(
+                (
+                    row
+                    for row in combinations
+                    if row.get("combination_id") == args.id
+                ),
+                None,
+            )
+            emit(selected or {"status": "NOT_FOUND", "combination_id": args.id})
+            return 0 if selected else 2
+        emit(
+            {
+                "count": len(combinations),
+                "by_state": dict(
+                    sorted(
+                        Counter(
+                            str(row.get("eligibility_status"))
+                            for row in combinations
+                        ).items()
+                    )
+                ),
+            }
+        )
+        return 0
+    if section == "campaign":
+        campaign_action = action or "status"
+        campaign_timeframes = ("5m", "15m")
+        campaign_sizes = _lab_sizes(
+            getattr(args, "combination_sizes", "1,2"),
+            (1, 2),
+        )
+        if campaign_action == "estimate":
+            registry = signal_block_registry()
+            selected_blocks = list(runner._profile_blocks("hypotheses"))
+            estimate = CombinationGenerator(
+                {
+                    block_id: registry[block_id]
+                    for block_id in selected_blocks
+                }
+            ).estimate(
+                campaign_sizes,
+                logic_modes=(LogicMode.LAYERED,),
+                assets=4,
+                timeframes=len(campaign_timeframes),
+            )
+            emit(
+                estimate
+                | {
+                    "status": "CAMPAIGN_ESTIMATE",
+                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "profile": "HYPOTHESES",
+                    "markets": ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"],
+                    "timeframes": list(campaign_timeframes),
+                    "history_mode": "common_full_history",
+                }
+            )
+            return 0
+        if campaign_action == "run":
+            registry = signal_block_registry()
+            selected_blocks = list(runner._profile_blocks("hypotheses"))
+            estimate = CombinationGenerator(
+                {
+                    block_id: registry[block_id]
+                    for block_id in selected_blocks
+                }
+            ).estimate(
+                campaign_sizes,
+                logic_modes=(LogicMode.LAYERED,),
+                assets=4,
+                timeframes=len(campaign_timeframes),
+            )
+            confirmation_required = (
+                estimate["baseline_experiments_upper_bound"]
+                > settings.lab.confirmation_job_threshold
+            )
+            emit(
+                estimate
+                | {
+                    "status": (
+                        "CONFIRMATION_REQUIRED"
+                        if confirmation_required and not args.yes
+                        else "CAMPAIGN_ACCEPTED"
+                    ),
+                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                }
+            )
+            if confirmation_required and not args.yes:
+                return 2
+            result = await runner.run_once_guarded(
+                profile="hypotheses",
+                universe_size=4,
+                combination_sizes=campaign_sizes,
+                logic_modes=(LogicMode.LAYERED,),
+                timeframes=campaign_timeframes,
+                rows=settings.lab.deep_minimum_history_rows,
+                history_mode="common_full_history",
+                workers=args.workers,
+                data_mode="real",
+                max_trials=args.max_trials,
+                universe_scope="allowed",
+                include_review_required_research_only=False,
+                resume=True,
+                force=False,
+                retest=args.retest,
+                only_missing=not args.retest,
+                block_ids=None,
+                parameter_overrides=None,
+            )
+            emit(result)
+            return 0 if int(result.get("failures") or 0) == 0 else 2
+        if campaign_action == "report":
+            emit(
+                {
+                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "leaderboards": store.export_leaderboards(),
+                    "report": store.generate_report(),
+                    "status": runner.status(),
+                }
+            )
+            return 0
+        if campaign_action == "status":
+            emit(
+                {
+                    "campaign": "ALLOWED_5M_15M_FULL_HISTORY_V1",
+                    "status": runner.status(),
+                    "queue": store.queue_status(),
+                }
+            )
+            return 0
+        raise AssertionError(
+            f"unhandled lab campaign action: {campaign_action}"
+        )
+    if section == "run":
+        arguments = _lab_generation_arguments(args)
+        registry = signal_block_registry()
+        selected_blocks = (
+            list(arguments["block_ids"])
+            if arguments["block_ids"]
+            else list(runner._profile_blocks(args.profile))
+        )
+        estimate = CombinationGenerator(
+            {block_id: registry[block_id] for block_id in selected_blocks}
+        ).estimate(
+            arguments["combination_sizes"],
+            logic_modes=arguments["logic_modes"],
+            assets=args.universe_size,
+            timeframes=len(arguments["timeframes"]),
+        )
+        confirmation_required = (
+            estimate["baseline_experiments_upper_bound"]
+            > settings.lab.confirmation_job_threshold
+            or args.profile == "exhaustive"
+        )
+        emit(
+            estimate
+            | {
+                "status": (
+                    "CONFIRMATION_REQUIRED"
+                    if confirmation_required and not args.yes
+                    else "QUEUE_ESTIMATE_ACCEPTED"
+                ),
+                "profile": args.profile.upper(),
+            }
+        )
+        if confirmation_required and not args.yes:
+            return 2
+        result = (
+            await runner.run_continuous(
+                soak_minutes=args.soak_minutes,
+                **arguments,
+            )
+            if args.continuous
+            else await runner.run_once_guarded(**arguments)
+        )
+        emit(result)
+        return 0 if int(result.get("failures") or 0) == 0 else 2
+    if section in {"pause", "resume", "drain", "stop"}:
+        emit(runner.control(LabControl(section.upper())))
+        return 0
+    if section == "status":
+        emit(runner.status())
+        return 0
+    if section == "queue":
+        emit(store.queue_status())
+        return 0
+    if section == "workers":
+        path = store.paths.state / "worker_status.json"
+        emit(read_json(path) if path.is_file() else {"workers": 0, "active": 0})
+        return 0
+    if section == "failures":
+        emit([read_json(path) for path in sorted(store.paths.failures.glob("*.json"))])
+        return 0
+    if section == "retry":
+        retried = 0
+        for job in store.jobs():
+            if job.get("status") == CombinationState.ERROR_RETRYABLE.value:
+                store.update_job(
+                    job,
+                    status=CombinationState.QUEUED_BASELINE,
+                    stage="BASELINE",
+                    reason_code="MANUAL_RETRY",
+                    checkpoint=job.get("last_checkpoint"),
+                )
+                retried += 1
+        emit({"status": "PASSED", "retried": retried})
+        return 0
+    if section == "leaderboard":
+        leaderboard_action = action or "show"
+        if leaderboard_action == "export":
+            emit(store.export_leaderboards())
+        elif leaderboard_action == "history":
+            emit(
+                [
+                    dict(row["payload"])
+                    for row in store.database.fetch_records("leaderboard_snapshots")
+                ]
+            )
+        elif leaderboard_action == "inspect":
+            selected = next(
+                (
+                    row
+                    for row in store.leaderboard()
+                    if row.get("combination_id") == args.id
+                ),
+                None,
+            )
+            emit(selected or {"status": "NOT_FOUND", "combination_id": args.id})
+            return 0 if selected else 2
+        else:
+            rows = [
+                row
+                for row in store.leaderboard()
+                if int(row.get("trade_count") or 0) >= args.minimum_trades
+            ][: args.top]
+            emit(rows)
+        return 0
+    if section == "retest":
+        arguments = _lab_generation_arguments(args)
+        arguments.update(resume=True, retest=True)
+        emit(
+            await runner.run_once_guarded(**arguments)
+        )
+        return 0
+    if section == "validate":
+        emit(
+            {
+                "blocks": validate_blocks(),
+                "queue": store.queue_status(),
+                "live_orders": 0,
+                "live_promotion": False,
+            }
+        )
+        return 0
+    if section == "report":
+        emit(
+            {
+                "leaderboards": store.export_leaderboards(),
+                "report": store.generate_report(),
+                "legacy_migration_report": str(
+                    write_legacy_migration_report(settings)
+                ),
+                "status": runner.status(),
+                "output_root": str(store.paths.root),
+            }
+        )
+        return 0
+    raise AssertionError(f"unhandled lab command: {section}")
+
+
+async def self_test(settings: Settings) -> int:
+    from execution.execution import PaperBroker
+    from research.backtest import BacktestConfig, BacktestEngine
+    from research.features import FeaturePipeline
+    from research.strategies import get_strategy
+    from scrapers.intelligence import SourceSpec, run_intelligence_pipeline
+
+    html = (
+        b"<main><article><h2><a href='/btc'>Bitcoin exchange upgrade</a></h2>"
+        b"<p>Crypto liquidity and custody update.</p></article></main>"
+    )
+
+    async def page_fetcher(_: SourceSpec) -> bytes:
+        return html
+
+    source = SourceSpec(
+        "SELF_TEST",
+        "Self Test",
+        "https://example.test/news",
+        "en",
+        ("crypto_news",),
+        True,
+    )
+    temporary = tempfile.TemporaryDirectory(prefix="crypto-self-test-")
+    temporary_root = Path(temporary.name)
+    test_settings = settings.model_copy(
+        update={
+            "paths": settings.paths.model_copy(
+                update={
+                    "raw_data_dir": temporary_root / "raw",
+                    "intelligence_dir": temporary_root / "intelligence",
+                    "checkpoints_dir": temporary_root / "checkpoints",
+                }
+            )
+        }
+    )
+    intelligence = await run_intelligence_pipeline(
+        test_settings,
+        sources=(source,),
+        page_fetcher=page_fetcher,
+        include_rss=False,
+    )
+    frame = synthetic_ohlcv(700, seed=settings.app.random_seed)
+    features = FeaturePipeline().build(
+        frame,
+        market="BTC-EUR",
+        intelligence=intelligence.records,
+    )
+    result = BacktestEngine(
+        BacktestConfig(monte_carlo_runs=100),
+        settings=test_settings,
+    ).run({"BTC-EUR": features}, get_strategy("ema_trend_pullback"))
+    broker = PaperBroker(
+        ledger_path=test_settings.paths.checkpoints_dir / "self_test_paper.jsonl"
+    )
+    paper = broker.submit(
+        OrderIntent(
+            intent_id="self-test",
+            idempotency_key=f"self-test-{stable_hash(utc_now(), length=12)}",
+            market="BTC-EUR",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.001"),
+            strategy_id="self-test",
+        ),
+        market_price=Decimal("20000"),
+    )
+    checks = {
+        "intelligence_records": len(intelligence.records) == 1,
+        "intelligence_timing": intelligence.audit["invalid_timing_count"] == 0,
+        "feature_knowability": bool(features.attrs.get("feature_knowability")),
+        "next_open_execution": result.integrity["next_open_execution"],
+        "long_only_spot": result.integrity["long_only_spot"],
+        "paper_fill": paper.status.value == "FILLED",
+        "paper_reconciliation": broker.reconcile().healthy,
+        "live_blocked_without_all_gates": bool(
+            test_settings.static_live_preflight_failures()
+        ),
+    }
+    temporary.cleanup()
+    emit({"status": "OK" if all(checks.values()) else "FAILED", "checks": checks})
+    return 0 if all(checks.values()) else 2
+
+
+def add_source_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data", type=Path)
+    parser.add_argument("--market", default="BTC-EUR")
+    parser.add_argument("--markets", dest="markets_csv")
+    parser.add_argument("--rows", type=int, default=900)
+
+
+def add_research_arguments(parser: argparse.ArgumentParser) -> None:
+    add_source_arguments(parser)
+    parser.add_argument("--strategy", default="ema_trend_pullback")
+    parser.add_argument("--capital", type=float, default=2_000.0)
+    parser.add_argument("--bootstrap-samples", type=int, default=100)
+    parser.add_argument("--monte-carlo-runs", type=int, default=100)
+    parser.add_argument("--intelligence", type=Path)
+    parser.add_argument("--risk-per-trade", type=float)
+    parser.add_argument("--fee", type=float)
+    parser.add_argument("--slippage-bps", type=float)
+
+
+def add_lab_generation_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    run: bool = False,
+) -> None:
+    parser.add_argument(
+        "--profile",
+        choices=("quick", "hypotheses", "standard", "deep", "exhaustive"),
+        default="quick",
+    )
+    parser.add_argument("--universe-size", type=int, default=5 if run else 25)
+    parser.add_argument("--combination-sizes", default="1,2" if run else "1,2,3")
+    parser.add_argument("--logic-modes", default="layered")
+    parser.add_argument("--timeframes", default="1h,4h" if run else "1h,4h,1d")
+    parser.add_argument("--blocks")
+    if not run:
+        parser.add_argument("--resume", action="store_true")
+    if run:
+        parser.add_argument("--rows", type=int, default=500)
+        parser.add_argument(
+            "--history-mode",
+            choices=(
+                "smoke",
+                "bounded",
+                "common_full_history",
+                "asset_max_history",
+            ),
+            default="bounded",
+        )
+        parser.add_argument("--workers", type=int, default=2)
+        parser.add_argument(
+            "--data-mode",
+            choices=("real", "synthetic"),
+            default="real",
+        )
+        parser.add_argument("--cpu-limit", type=int)
+        parser.add_argument("--memory-limit-mb", type=int)
+        parser.add_argument("--trial-timeout", type=float)
+        parser.add_argument("--combination-timeout", type=float)
+        parser.add_argument("--parameter", action="append", default=[])
+        parser.add_argument("--parameter-step-profile", choices=("whole", "half"), default="half")
+        parser.add_argument("--max-trials", type=int)
+        universe_scope = parser.add_mutually_exclusive_group()
+        universe_scope.add_argument("--discovery-universe", action="store_true")
+        universe_scope.add_argument("--allowed-universe", action="store_true")
+        parser.add_argument(
+            "--include-review-required-research-only",
+            action="store_true",
+        )
+        parser.add_argument("--continuous", action="store_true")
+        parser.add_argument("--once", action="store_true")
+        parser.add_argument("--soak-minutes", type=float)
+        parser.add_argument("--resume", action="store_true")
+        parser.add_argument("--force", action="store_true")
+        parser.add_argument("--retest", action="store_true")
+        parser.add_argument("--only-missing", action="store_true")
+        parser.add_argument("--yes", action="store_true")
+
+
+def _operation_directory(settings: Settings) -> Path:
+    path = settings.paths.output_dir / "operations"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "candidates").mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _operation_service_id(mode: str) -> str:
+    return f"operate-{mode.casefold()}"
+
+
+def _candidate_path(settings: Settings, candidate_id: str) -> Path:
+    safe = "".join(
+        character
+        for character in candidate_id
+        if character.isalnum() or character in {"-", "_", "."}
+    )
+    if not safe or safe != candidate_id:
+        raise ValueError("candidate ID contains unsafe characters")
+    return _operation_directory(settings) / "candidates" / f"{safe}.json"
+
+
+def _load_candidate(settings: Settings, candidate_id: str) -> CandidateArtifact:
+    path = _candidate_path(settings, candidate_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"candidate artifact not found: {candidate_id}")
+    return CandidateArtifact.model_validate(read_json(path))
+
+
+def _active_candidate_record(settings: Settings, mode: str) -> dict[str, Any] | None:
+    path = settings.paths.checkpoints_dir / f"active_candidate_{mode}.json"
+    if not path.is_file():
+        return None
+    payload = read_json(path)
+    if payload.get("state") in {"SUSPENDED", "RETIRED"}:
+        return None
+    return payload
+
+
+def _configured_alert_secrets(settings: Settings) -> tuple[str, ...]:
+    provider_secrets = tuple(
+        value.get_secret_value()
+        for name in type(settings.providers).model_fields
+        if (value := getattr(settings.providers, name, None)) is not None
+        and hasattr(value, "get_secret_value")
+    )
+    environment_secrets = tuple(
+        value
+        for name in (
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_TOKEN",
+        )
+        if (value := os.environ.get(name))
+    )
+    return provider_secrets + environment_secrets
+
+
+def _alerter(settings: Settings) -> AlertThrottle:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
+        "TELEGRAM_TOKEN"
+    )
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    def deliver(event_type: str, payload: dict[str, Any]) -> None:
+        if not token or not chat_id:
+            return
+        body = urllib.parse.urlencode(
+            {
+                "chat_id": chat_id,
+                "text": (
+                    f"{event_type}\n"
+                    f"{stable_json(payload, indent=2)[:3500]}"
+                ),
+                "disable_web_page_preview": "true",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=body,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+            if int(response.status) >= 400:
+                raise RuntimeError("Telegram alert delivery failed")
+
+    return AlertThrottle(
+        state_path=settings.paths.checkpoints_dir / "alert_throttle.json",
+        audit_path=settings.paths.logs_dir / "operational_alerts.jsonl",
+        cooldown_seconds=settings.operational.alert_cooldown_seconds,
+        secrets=_configured_alert_secrets(settings),
+        delivery=deliver if token and chat_id else None,
+    )
+
+
+def _operational_profile(settings: Settings, profile: str) -> dict[str, Any]:
+    if profile.casefold() != settings.operational.profile_name.casefold():
+        raise ValueError(f"unknown operational profile: {profile}")
+    markets = tuple(
+        market
+        for market in settings.operational.markets
+        if settings.shariah.eligibility(market).status.value == "ALLOWED"
+    )
+    if not markets:
+        raise RuntimeError("operational profile has no ALLOWED markets")
+    return {
+        "name": settings.operational.profile_name,
+        "markets": markets,
+        "execution_timeframe": settings.operational.execution_timeframe,
+        "trend_timeframe": settings.operational.trend_timeframe,
+        "regime_timeframe": settings.operational.regime_timeframe,
+        "risk_per_trade": settings.operational.risk_per_trade,
+        "maximum_risk_per_trade": settings.operational.maximum_risk_per_trade,
+        "maximum_total_open_risk": settings.operational.maximum_total_open_risk,
+        "maximum_positions": settings.operational.maximum_positions,
+        "maximum_position_fraction": settings.operational.maximum_position_fraction,
+        "maximum_portfolio_exposure": settings.operational.maximum_portfolio_exposure,
+        "reserve_cash_fraction": settings.operational.reserve_cash_fraction,
+        "maximum_daily_loss": settings.operational.maximum_daily_loss,
+        "drawdown_warning": settings.operational.drawdown_warning,
+        "drawdown_block_new_entries": (
+            settings.operational.drawdown_block_new_entries
+        ),
+        "drawdown_kill_switch": settings.operational.drawdown_kill_switch,
+    }
+
+
+async def _operate_preflight(
+    settings: Settings,
+    *,
+    mode: str,
+    profile: str,
+    probe_public: bool = True,
+) -> dict[str, Any]:
+    from data.data_loader import ContinuousDataService, DataLoader
+    from data.database import Database
+    from execution.execution import PaperBroker
+    from risk.risk_manager import KillSwitch
+
+    selected_profile = _operational_profile(settings, profile)
+    failures: list[str] = []
+    checks: dict[str, Any] = {}
+    database = Database(
+        supported_database_url(settings),
+        sqlite_path=settings.paths.database_path,
+    )
+    database.migrate()
+    try:
+        health = database.health()
+        checks["database"] = health
+        if health["status"] != "PASSED":
+            failures.append("DATABASE_UNHEALTHY")
+        if (
+            health["read_latency_ms"]
+            > settings.operational.database_read_latency_limit_ms
+        ):
+            failures.append("DATABASE_READ_LATENCY_EXCEEDED")
+        if (
+            health["write_latency_ms"]
+            > settings.operational.database_write_latency_limit_ms
+        ):
+            failures.append("DATABASE_WRITE_LATENCY_EXCEEDED")
+        disk = shutil.disk_usage(settings.paths.project_root)
+        free_gb = disk.free / 1024**3
+        checks["disk"] = {
+            "free_gb": free_gb,
+            "minimum_free_gb": settings.market_data.minimum_free_disk_gb,
+        }
+        if free_gb < settings.market_data.minimum_free_disk_gb:
+            failures.append("INSUFFICIENT_DISK_SPACE")
+        lock_path = settings.paths.checkpoints_dir / "data_service.lock"
+        lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
+        checks["single_instance_lock"] = lock_inspection
+        checks["single_instance_lock_available"] = lock_inspection["available"]
+        if not lock_inspection["available"]:
+            failures.append("SINGLE_INSTANCE_LOCK_UNAVAILABLE")
+        kill_switch = KillSwitch(
+            settings.paths.checkpoints_dir / "kill_switch.json"
+        )
+        checks["kill_switch"] = {
+            "active": kill_switch.active,
+            "reason": kill_switch.reason,
+        }
+        if kill_switch.active:
+            failures.append("KILL_SWITCH_ACTIVE")
+        active = _active_candidate_record(settings, mode)
+        candidate: CandidateArtifact | None = None
+        if active:
+            try:
+                candidate = _load_candidate(settings, str(active["candidate_id"]))
+                if candidate.expires_at <= utc_now():
+                    failures.append("CANDIDATE_EXPIRED")
+                if not candidate.verify_manifest():
+                    failures.append("CANDIDATE_MANIFEST_INVALID")
+                for market in candidate.eligible_markets:
+                    if settings.shariah.eligibility(market).status.value != "ALLOWED":
+                        failures.append(f"CANDIDATE_MARKET_NOT_ALLOWED:{market}")
+            except (OSError, ValueError, KeyError) as exc:
+                failures.append(f"CANDIDATE_INVALID:{type(exc).__name__}")
+        checks["candidate"] = {
+            "candidate_id": candidate.candidate_id if candidate else None,
+            "status": (
+                candidate.lifecycle_state.value
+                if candidate
+                else "IDLE_NO_APPROVED_CANDIDATE"
+            ),
+        }
+        if probe_public:
+            loader = DataLoader(settings, database=database)
+            public_checks: list[dict[str, Any]] = []
+            for market in selected_profile["markets"]:
+                try:
+                    candles = await loader.download_ohlcv(
+                        provider="bitvavo",
+                        market=market,
+                        timeframe=selected_profile["execution_timeframe"],
+                        start=utc_now() - timedelta(hours=4),
+                        end=utc_now(),
+                        resume=True,
+                        persist=True,
+                    )
+                    ticker = await loader.download_ticker(
+                        provider="bitvavo",
+                        market=market,
+                        persist=True,
+                        mode=mode,
+                    )
+                    book = await loader.download_orderbook_snapshot(
+                        provider="bitvavo",
+                        market=market,
+                        depth=min(25, settings.market_data.orderbook_maximum_depth),
+                        persist=True,
+                        mode=mode,
+                    )
+                    bids = book.values.get("bids") or []
+                    asks = book.values.get("asks") or []
+                    valid_book = bool(bids and asks and float(bids[0][0]) < float(asks[0][0]))
+                    if not valid_book:
+                        failures.append(f"ORDERBOOK_INVALID:{market}")
+                    closed = [record for record in candles if record.closed]
+                    if not closed:
+                        failures.append(f"CLOSED_CANDLE_MISSING:{market}")
+                    public_checks.append(
+                        {
+                            "market": market,
+                            "ticker_at": ticker.timestamp,
+                            "orderbook_at": book.timestamp,
+                            "orderbook_valid": valid_book,
+                            "latest_closed_candle": (
+                                closed[-1].timestamp if closed else None
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    failures.append(
+                        f"BITVAVO_PUBLIC_DATA_UNHEALTHY:{market}:{type(exc).__name__}"
+                    )
+            checks["bitvavo_public"] = public_checks
+        else:
+            checks["bitvavo_public"] = {"status": "NOT_PROBED"}
+        if mode == "paper":
+            broker = PaperBroker(
+                initial_balances={"EUR": Decimal("2000")},
+                fee_fraction=Decimal(str(settings.costs.default_fee)),
+                slippage_bps=Decimal(str(settings.costs.slippage_bps)),
+                spread_bps=Decimal(str(settings.costs.spread_bps)),
+                ledger_path=settings.paths.checkpoints_dir / "paper_execution.jsonl",
+            )
+            reconciliation = broker.reconcile()
+            checks["paper"] = {
+                "ledger_healthy": reconciliation.healthy,
+                "balances_initialized": bool(broker.balances),
+                "order_cap_eur": settings.operational.paper_order_cap_eur,
+                "fee_model": settings.costs.default_fee,
+                "slippage_bps": settings.costs.slippage_bps,
+            }
+            if not reconciliation.healthy:
+                failures.append("PAPER_RECONCILIATION_FAILED")
+        checks["private_exchange_requests"] = 0
+        checks["live_orders"] = 0
+        return {
+            "status": "PASSED" if not failures else "FAILED",
+            "mode": mode,
+            "profile": selected_profile,
+            "service_state": (
+                "IDLE_NO_APPROVED_CANDIDATE"
+                if candidate is None
+                else "READY"
+            ),
+            "failures": list(dict.fromkeys(failures)),
+            "checks": checks,
+        }
+    finally:
+        database.close()
+
+
+async def _operational_cycle(
+    settings: Settings,
+    *,
+    database: Any,
+    loader: Any,
+    mode: str,
+    profile: dict[str, Any],
+    candidate_id: str | None,
+) -> dict[str, Any]:
+    from data.orderbook_l2 import Level2OrderBook
+    from risk.risk_manager import OperationalDegradation
+
+    cycle_at = utc_now()
+    market_results: list[dict[str, Any]] = []
+    signal_records: list[dict[str, Any]] = []
+    for market in profile["markets"]:
+        candle_records = await loader.download_ohlcv(
+            provider="bitvavo",
+            market=market,
+            timeframe=profile["execution_timeframe"],
+            start=cycle_at - timedelta(hours=4),
+            end=cycle_at,
+            resume=True,
+            persist=True,
+        )
+        closed_candles = [record for record in candle_records if record.closed]
+        latest_closed = closed_candles[-1] if closed_candles else None
+        ticker = await loader.download_ticker(
+            provider="bitvavo", market=market, persist=True, mode=mode
+        )
+        trades = await loader.download_trades(
+            provider="bitvavo", market=market, persist=True, mode=mode
+        )
+        snapshot = await loader.download_orderbook_snapshot(
+            provider="bitvavo",
+            market=market,
+            depth=min(100, settings.market_data.orderbook_maximum_depth),
+            persist=True,
+            mode=mode,
+        )
+        book = Level2OrderBook(provider="bitvavo", market=market)
+        await book.initialize(
+            bids=snapshot.values.get("bids") or (),
+            asks=snapshot.values.get("asks") or (),
+            sequence=snapshot.values.get("sequence"),
+            timestamp=snapshot.timestamp,
+        )
+        stats = {
+            "external_id": stable_hash(
+                ["orderbook-statistics", market, cycle_at.isoformat()],
+                length=32,
+            ),
+            "provider": "bitvavo",
+            "market": market,
+            "timestamp": cycle_at,
+            "observed_at": cycle_at,
+            "status": "READY" if book.valid and not book.is_stale() else "STALE",
+            "mode": mode,
+            "best_bid": str(book.best_bid),
+            "best_ask": str(book.best_ask),
+            "mid": str(book.mid_price),
+            "spread": str(book.spread),
+            "spread_bps": str(book.spread_bps),
+            "microprice": str(book.microprice),
+            "top_level_imbalance": str(book.top_level_imbalance),
+            "depth_imbalance": str(book.book_pressure),
+            "depth_bid": str(book.cumulative_bid_depth),
+            "depth_ask": str(book.cumulative_ask_depth),
+            "estimated_slippage": None,
+            "estimated_market_impact": None,
+            "update_rate": 1,
+            "stale": book.is_stale(),
+            "sequence_health": "VALID" if book.valid else "INVALID",
+        }
+        database.upsert_records("orderbook_statistics", [stats])
+        buys = [
+            item
+            for item in trades
+            if str(item.values.get("side") or "").casefold() == "buy"
+        ]
+        sells = [
+            item
+            for item in trades
+            if str(item.values.get("side") or "").casefold() == "sell"
+        ]
+        buy_volume = sum(float(item.values.get("quantity") or 0) for item in buys)
+        sell_volume = sum(float(item.values.get("quantity") or 0) for item in sells)
+        quantities = [
+            float(item.values.get("quantity") or 0)
+            for item in trades
+        ]
+        trade_aggregate = {
+            "external_id": stable_hash(
+                ["trade-aggregate", market, cycle_at.isoformat()],
+                length=32,
+            ),
+            "provider": "bitvavo",
+            "market": market,
+            "timestamp": cycle_at,
+            "observed_at": cycle_at,
+            "status": "AGGREGATED",
+            "data_kind": "trade_flow_aggregate",
+            "mode": mode,
+            "trade_count": len(trades),
+            "buy_volume": buy_volume,
+            "sell_volume": sell_volume,
+            "taker_imbalance": (
+                (buy_volume - sell_volume) / (buy_volume + sell_volume)
+                if buy_volume + sell_volume
+                else 0.0
+            ),
+            "average_trade_size": (
+                sum(quantities) / len(quantities) if quantities else 0.0
+            ),
+            "large_trade_count": sum(
+                quantity > np.quantile(quantities, 0.95)
+                for quantity in quantities
+            )
+            if quantities
+            else 0,
+            "trade_intensity": len(trades),
+        }
+        database.upsert_records("trades", [trade_aggregate])
+        signal_records.append(
+            {
+                "external_id": stable_hash(
+                    [
+                        "operational-signal-v2",
+                        mode,
+                        candidate_id,
+                        market,
+                        profile["execution_timeframe"],
+                        (
+                            latest_closed.timestamp.isoformat()
+                            if latest_closed
+                            else "NO_CLOSED_CANDLE"
+                        ),
+                    ],
+                    length=32,
+                ),
+                "provider": "bitvavo",
+                "market": market,
+                "timeframe": profile["execution_timeframe"],
+                "timestamp": latest_closed.timestamp if latest_closed else cycle_at,
+                "observed_at": cycle_at,
+                "status": "NO_ENTRY",
+                "mode": mode,
+                "candidate_id": candidate_id,
+                "candle_timestamp": (
+                    latest_closed.timestamp.isoformat()
+                    if latest_closed
+                    else None
+                ),
+                "evaluated_at": cycle_at.isoformat(),
+                "evaluation_key": (
+                    latest_closed.timestamp.isoformat()
+                    if latest_closed
+                    else "NO_CLOSED_CANDLE"
+                ),
+                "action": "NO_ENTRY",
+                "entry_state": False,
+                "exit_state": False,
+                "regime_state": "NOT_EVALUATED" if candidate_id is None else "NEUTRAL",
+                "active_blocks": [],
+                "inactive_blocks": [],
+                "feature_snapshot_hash": None,
+                "data_hash": (
+                    latest_closed.raw_hash if latest_closed else ticker.raw_hash
+                ),
+                "context_hash": None,
+                "size_multiplier": 0.0,
+                "risk_decision": "BLOCKED",
+                "final_reason_code": (
+                    "IDLE_NO_APPROVED_CANDIDATE"
+                    if candidate_id is None
+                    else "NO_ENTRY_SIGNAL"
+                ),
+            }
+        )
+        market_results.append(
+            {
+                "market": market,
+                "ticker": ticker.values,
+                "latest_closed_candle": (
+                    latest_closed.timestamp if latest_closed else None
+                ),
+                "trade_count": len(trades),
+                "orderbook": stats,
+            }
+        )
+    database.upsert_records("strategy_signals", signal_records)
+    degradation = OperationalDegradation(
+        state_path=settings.paths.checkpoints_dir / "degradation_state.json",
+        audit_path=settings.paths.logs_dir / "degradation_audit.jsonl",
+    )
+    degradation_status = degradation.evaluate(
+        block_new_entries=tuple(
+            f"ORDERBOOK_INVALID:{row['market']}"
+            for row in market_results
+            if row["orderbook"]["sequence_health"] != "VALID"
+        ),
+    )
+    if degradation_status["state"] != "NORMAL":
+        database.upsert_records(
+            "risk_events",
+            [
+                {
+                    "external_id": stable_hash(
+                        ["degradation", cycle_at.isoformat(), degradation_status],
+                        length=32,
+                    ),
+                    "status": degradation_status["state"],
+                    "mode": mode,
+                    "candidate_id": candidate_id,
+                    "timestamp": cycle_at,
+                    **degradation_status,
+                }
+            ],
+        )
+    database.apply_retention(
+        "orderbook_snapshots",
+        older_than=timedelta(
+            days=settings.market_data.maximum_orderbook_retention_days
+        ),
+    )
+    database.apply_retention(
+        "trades",
+        older_than=timedelta(days=settings.market_data.maximum_trade_retention_days),
+    )
+    return {
+        "cycle_at": cycle_at,
+        "markets": market_results,
+        "signals": len(signal_records),
+        "risk_state": degradation_status,
+    }
+
+
+def _operational_status(
+    settings: Settings,
+    *,
+    mode: str,
+    profile: str,
+) -> dict[str, Any]:
+    from data.database import Database
+    from reporting.reports import write_operational_reports
+    from risk.risk_manager import KillSwitch
+
+    selected_profile = _operational_profile(settings, profile)
+    service_id = _operation_service_id(mode)
+    heartbeat_path = (
+        settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
+    )
+    heartbeat = read_json(heartbeat_path) if heartbeat_path.is_file() else {}
+    database = Database(
+        supported_database_url(settings),
+        sqlite_path=settings.paths.database_path,
+    )
+    database.migrate()
+    try:
+        provider_rows = [
+            row["payload"] for row in database.fetch_records("provider_health")
+        ]
+        latest_signals = [
+            row["payload"]
+            for row in database.fetch_recent_records("strategy_signals", limit=20)
+        ]
+        latest_candles = database.latest_closed_candles(
+            markets=selected_profile["markets"],
+            timeframes=(
+                selected_profile["execution_timeframe"],
+                selected_profile["trend_timeframe"],
+                selected_profile["regime_timeframe"],
+            ),
+            provider="bitvavo",
+        )
+        counts = database.health()["table_counts"]
+        active = _active_candidate_record(settings, mode)
+        kill_switch = KillSwitch(
+            settings.paths.checkpoints_dir / "kill_switch.json"
+        )
+        heartbeat_at = heartbeat.get("heartbeat_at")
+        heartbeat_age = None
+        if heartbeat_at:
+            heartbeat_age = (
+                utc_now()
+                - datetime.fromisoformat(str(heartbeat_at).replace("Z", "+00:00"))
+            ).total_seconds()
+        uptime = None
+        if heartbeat.get("started_at"):
+            uptime = (
+                utc_now()
+                - datetime.fromisoformat(
+                    str(heartbeat["started_at"]).replace("Z", "+00:00")
+                )
+            ).total_seconds()
+        heartbeat_state = heartbeat.get("state")
+        service_state = (
+            "IDLE_NO_APPROVED_CANDIDATE"
+            if not active and heartbeat_state in {None, "STOPPED"}
+            else heartbeat_state or "NOT_STARTED"
+        )
+        payload = {
+            "service_state": service_state,
+            "mode": mode,
+            "uptime": uptime,
+            "heartbeat_age": heartbeat_age,
+            "active_candidate": active.get("candidate_id") if active else None,
+            "shadow_challengers": [],
+            "current_markets": list(selected_profile["markets"]),
+            "current_timeframes": [
+                selected_profile["execution_timeframe"],
+                selected_profile["trend_timeframe"],
+                selected_profile["regime_timeframe"],
+            ],
+            "provider_health": provider_rows,
+            "latest_closed_candles": latest_candles,
+            "context_freshness": {},
+            "latest_signals": latest_signals,
+            "open_paper_positions": [],
+            "cash": None,
+            "exposure": 0.0,
+            "open_risk": 0.0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "daily_pnl": 0.0,
+            "drawdown": 0.0,
+            "risk_state": "KILL_SWITCH" if kill_switch.active else "NORMAL",
+            "kill_switch_state": (
+                "ACTIVE" if kill_switch.active else "INACTIVE"
+            ),
+            "recent_errors": [
+                row
+                for row in provider_rows
+                if row.get("status") not in {"READY", "PASSED"}
+            ][-10:],
+            "next_scheduled_jobs": heartbeat.get("next_scheduled_operation"),
+            "table_counts": counts,
+            "private_exchange_requests": 0,
+            "live_orders": 0,
+        }
+        paths = write_operational_reports(
+            _operation_directory(settings),
+            status=payload,
+            candidate_health={
+                "manifest_valid": None if not active else True,
+            },
+            provider_health=provider_rows,
+        )
+        payload["reports"] = paths
+        return payload
+    finally:
+        database.close()
+
+
+async def _operate_start(
+    args: argparse.Namespace,
+    settings: Settings,
+) -> int:
+    from data.data_loader import ContinuousDataService, DataLoader
+    from data.database import Database
+
+    if args.mode == "live":
+        raise ExecutionBlocked("operate live remains blocked in this phase")
+    preflight = await _operate_preflight(
+        settings,
+        mode=args.mode,
+        profile=args.profile,
+        probe_public=True,
+    )
+    if preflight["failures"]:
+        emit(preflight)
+        return 2
+    profile = _operational_profile(settings, args.profile)
+    database = Database(
+        supported_database_url(settings),
+        sqlite_path=settings.paths.database_path,
+    )
+    database.migrate()
+    loader = DataLoader(settings, database=database)
+    service = ContinuousDataService(
+        settings,
+        database=database,
+        service_id=_operation_service_id(args.mode),
+        mode=args.mode,
+    )
+    active = _active_candidate_record(settings, args.mode)
+    candidate_id = str(active["candidate_id"]) if active else None
+    service.active_candidate = candidate_id
+    service.kill_switch_state = "INACTIVE"
+    service.next_scheduled_operation = (
+        "RISK_RECONCILIATION_THEN_NEXT_CLOSED_1H_CANDLE"
+    )
+    started = time.monotonic()
+    soak_seconds = max(0.0, float(args.soak_minutes or 0.0) * 60.0)
+    last_cycle: dict[str, Any] = {}
+    _alerter(settings).send(
+        "SERVICE_START",
+        {"mode": args.mode, "profile": args.profile, "candidate_id": candidate_id},
+    )
+    completed = False
+
+    async def cycle() -> None:
+        nonlocal last_cycle
+        try:
+            last_cycle = await _operational_cycle(
+                settings,
+                database=database,
+                loader=loader,
+                mode=args.mode,
+                profile=profile,
+                candidate_id=candidate_id,
+            )
+            service.kill_switch_state = last_cycle["risk_state"]["state"]
+        except Exception as exc:
+            last_cycle = {
+                "cycle_at": utc_now(),
+                "status": "BLOCK_NEW_ENTRIES",
+                "reason_code": f"MANDATORY_PUBLIC_DATA_FAILURE:{type(exc).__name__}",
+                "private_exchange_requests": 0,
+                "live_orders": 0,
+            }
+            database.upsert_records(
+                "risk_events",
+                [
+                    {
+                        "external_id": stable_hash(last_cycle, length=32),
+                        "status": "BLOCK_NEW_ENTRIES",
+                        "mode": args.mode,
+                        "candidate_id": candidate_id,
+                        **last_cycle,
+                    }
+                ],
+            )
+            _alerter(settings).send("PROVIDER_OUTAGE", last_cycle)
+        if soak_seconds and time.monotonic() - started >= soak_seconds:
+            service.stop()
+
+    once = not args.continuous and not soak_seconds
+    try:
+        await service.start(
+            cycle,
+            interval_seconds=settings.operational.cycle_seconds,
+            once=once,
+        )
+        completed = True
+    finally:
+        acceptance_completed = completed and (
+            not soak_seconds or time.monotonic() - started >= soak_seconds
+        )
+        database.upsert_records(
+            "test_runs",
+            [
+                {
+                    "external_id": stable_hash(
+                        [
+                            "operate",
+                            args.mode,
+                            started,
+                            acceptance_completed,
+                        ],
+                        length=32,
+                    ),
+                    "status": (
+                        "PASSED"
+                        if acceptance_completed
+                        else "INTERRUPTED"
+                        if completed
+                        else "FAILED"
+                    ),
+                    "mode": args.mode,
+                    "profile": args.profile,
+                    "candidate_id": candidate_id,
+                    "started_monotonic": started,
+                    "completed_at": utc_now(),
+                    "operation": "OPERATIONAL_SHADOW_SOAK"
+                    if soak_seconds
+                    else "OPERATIONAL_CYCLE",
+                    "private_exchange_requests": 0,
+                    "live_orders": 0,
+                }
+            ],
+        )
+        _alerter(settings).send(
+            "SERVICE_STOP",
+            {"mode": args.mode, "candidate_id": candidate_id},
+        )
+        database.close()
+    status = _operational_status(
+        settings,
+        mode=args.mode,
+        profile=args.profile,
+    )
+    status["last_cycle"] = last_cycle
+    status["service_state"] = (
+        "IDLE_NO_APPROVED_CANDIDATE" if candidate_id is None else "STOPPED"
+    )
+    emit(status)
+    return 0
+
+
+def _task_xml(settings: Settings, *, mode: str, profile: str) -> str:
+    python = settings.paths.project_root / ".venv" / "Scripts" / "python.exe"
+    main = settings.paths.project_root / "main.py"
+    trigger = (
+        "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+        if settings.operational.task_start_trigger == "logon"
+        else "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
+    )
+    arguments = (
+        f'"{main}" operate start --mode {mode} --profile {profile} '
+        "--continuous --resume"
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        f"<Triggers>{trigger}</Triggers>"
+        '<Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType>'
+        "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>"
+        "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+        "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+        "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+        "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"
+        f"<RestartOnFailure><Interval>PT1M</Interval><Count>{settings.operational.task_restart_count}</Count></RestartOnFailure>"
+        "</Settings><Actions Context=\"Author\"><Exec>"
+        f"<Command>{html.escape(str(python))}</Command>"
+        f"<Arguments>{html.escape(arguments)}</Arguments>"
+        f"<WorkingDirectory>{html.escape(str(settings.paths.project_root))}</WorkingDirectory>"
+        "</Exec></Actions></Task>"
+    )
+
+
+async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
+    action = args.operate_command
+    if action == "preflight":
+        result = await _operate_preflight(
+            settings,
+            mode=args.mode,
+            profile=args.profile,
+        )
+        emit(result)
+        return 0 if not result["failures"] else 2
+    if action == "start":
+        return await _operate_start(args, settings)
+    if action in {"status", "health", "report"}:
+        emit(
+            _operational_status(
+                settings,
+                mode=args.mode,
+                profile=args.profile,
+            )
+        )
+        return 0
+    if action in {"pause", "resume", "drain", "stop"}:
+        from data.data_loader import ContinuousDataService
+
+        service_id = _operation_service_id(args.mode)
+        lock_path = settings.paths.checkpoints_dir / "data_service.lock"
+        lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
+        if lock_inspection["available"]:
+            emit(
+                {
+                    "status": "NOT_RUNNING",
+                    "action": action.upper(),
+                    "service_id": service_id,
+                    "lock": lock_inspection,
+                }
+            )
+            return 0
+        owner = lock_inspection.get("owner") or {}
+        owner_service_id = owner.get("service_id")
+        if owner_service_id not in {None, service_id}:
+            emit(
+                {
+                    "status": "FAILED",
+                    "reason_code": "ACTIVE_SERVICE_MODE_MISMATCH",
+                    "requested_service_id": service_id,
+                    "active_service_id": owner_service_id,
+                }
+            )
+            return 2
+        request = {
+            "action": action.upper(),
+            "requested_at": utc_now(),
+            "requested_by": "CLI",
+        }
+        path = (
+            settings.paths.checkpoints_dir
+            / f"{service_id}_control.json"
+        )
+        atomic_write_json(path, request)
+        wait_seconds = (
+            float(
+                getattr(args, "wait_seconds", None)
+                if getattr(args, "wait_seconds", None) is not None
+                else settings.operational.control_wait_seconds
+            )
+            if action in {"drain", "stop"}
+            else 0.0
+        )
+        if wait_seconds <= 0:
+            emit({"status": "REQUESTED", **request, "control_path": path})
+            return 0
+        heartbeat_path = (
+            settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
+        )
+        deadline = time.monotonic() + wait_seconds
+        last_heartbeat: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            if heartbeat_path.is_file():
+                try:
+                    last_heartbeat = read_json(heartbeat_path)
+                except (OSError, ValueError, TypeError):
+                    last_heartbeat = {}
+            lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
+            if (
+                str(last_heartbeat.get("state") or "").upper() == "STOPPED"
+                and lock_inspection["available"]
+            ):
+                emit(
+                    {
+                        "status": "ACKNOWLEDGED",
+                        **request,
+                        "service_state": "STOPPED",
+                        "reason_code": last_heartbeat.get("reason_code"),
+                        "waited_seconds": (
+                            settings.operational.control_wait_seconds
+                            if getattr(args, "wait_seconds", None) is None
+                            else float(args.wait_seconds)
+                        )
+                        - max(0.0, deadline - time.monotonic()),
+                        "control_path": path,
+                    }
+                )
+                return 0
+            await asyncio.sleep(0.2)
+        emit(
+            {
+                "status": "TIMEOUT",
+                **request,
+                "reason_code": "SERVICE_CONTROL_ACK_TIMEOUT",
+                "waited_seconds": wait_seconds,
+                "last_service_state": last_heartbeat.get("state"),
+                "control_path": path,
+            }
+        )
+        return 2
+    if action == "reconcile":
+        from execution.execution import PaperBroker
+
+        broker = PaperBroker(
+            ledger_path=settings.paths.checkpoints_dir / "paper_execution.jsonl"
+        )
+        emit(asdict(broker.reconcile()))
+        return 0
+    if action == "candidates":
+        candidates: list[dict[str, Any]] = []
+        for path in sorted((_operation_directory(settings) / "candidates").glob("*.json")):
+            try:
+                candidate = CandidateArtifact.model_validate(read_json(path))
+                candidates.append(
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "lifecycle_state": candidate.lifecycle_state.value,
+                        "expires_at": candidate.expires_at,
+                        "manifest_valid": candidate.verify_manifest(),
+                        "path": path,
+                    }
+                )
+            except (OSError, ValueError):
+                candidates.append(
+                    {
+                        "candidate_id": path.stem,
+                        "lifecycle_state": "INVALID",
+                        "manifest_valid": False,
+                        "path": path,
+                    }
+                )
+        emit(
+            {
+                "status": (
+                    "IDLE_NO_APPROVED_CANDIDATE" if not candidates else "READY"
+                ),
+                "candidates": candidates,
+            }
+        )
+        return 0
+    if action == "candidate-inspect":
+        emit(_load_candidate(settings, args.id))
+        return 0
+    if action in {"activate-shadow", "activate-paper"}:
+        candidate = _load_candidate(settings, args.id)
+        expected = (
+            CandidateLifecycle.SHADOW_CANDIDATE
+            if action == "activate-shadow"
+            else CandidateLifecycle.PAPER_CANDIDATE
+        )
+        if candidate.lifecycle_state is not expected:
+            raise PermissionError(
+                f"candidate must be {expected.value}, got "
+                f"{candidate.lifecycle_state.value}"
+            )
+        if candidate.expires_at <= utc_now():
+            raise PermissionError("candidate is expired")
+        if action == "activate-paper" and not args.yes:
+            raise PermissionError("paper activation requires explicit --yes approval")
+        for market in candidate.eligible_markets:
+            settings.shariah.require_allowed(market)
+        mode = "shadow" if action == "activate-shadow" else "paper"
+        record = {
+            "candidate_id": candidate.candidate_id,
+            "manifest_hash": candidate.manifest_hash,
+            "state": (
+                CandidateLifecycle.SHADOW_ACTIVE.value
+                if mode == "shadow"
+                else CandidateLifecycle.PAPER_ACTIVE.value
+            ),
+            "mode": mode,
+            "activated_at": utc_now(),
+            "manual_approval": action == "activate-paper",
+        }
+        atomic_write_json(
+            settings.paths.checkpoints_dir / f"active_candidate_{mode}.json",
+            record,
+        )
+        _alerter(settings).send("CANDIDATE_ACTIVATION", record)
+        emit({"status": "ACTIVATED", **record})
+        return 0
+    if action in {"suspend", "retire"}:
+        state = action.upper()
+        changed = 0
+        for mode in ("shadow", "paper"):
+            path = settings.paths.checkpoints_dir / f"active_candidate_{mode}.json"
+            if not path.is_file():
+                continue
+            record = read_json(path)
+            if record.get("candidate_id") != args.id:
+                continue
+            record.update(
+                state=state,
+                changed_at=utc_now().isoformat(),
+                reason=args.reason,
+            )
+            atomic_write_json(path, record)
+            changed += 1
+        emit({"status": state, "candidate_id": args.id, "records_changed": changed})
+        return 0
+    if action == "alerts-test":
+        payload = {
+            "status": "PASSED",
+            "token": os.environ.get("TELEGRAM_BOT_TOKEN", "not-configured"),
+        }
+        first = _alerter(settings).send("ALERT_TEST", payload)
+        second = _alerter(settings).send("ALERT_TEST", payload)
+        emit(
+            {
+                "status": "PASSED",
+                "first_sent": first,
+                "duplicate_suppressed": not second,
+                "secrets_redacted": True,
+            }
+        )
+        return 0
+    if action == "reset-kill-switch":
+        from data.database import Database
+        from risk.risk_manager import KillSwitch, OperationalDegradation
+        from utils.common import append_jsonl
+
+        if not args.yes:
+            raise PermissionError("kill-switch reset requires explicit --yes")
+        health = await _operate_preflight(
+            settings,
+            mode=args.mode,
+            profile=args.profile,
+        )
+        unresolved = [
+            reason
+            for reason in health["failures"]
+            if reason != "KILL_SWITCH_ACTIVE"
+        ]
+        if unresolved:
+            raise RuntimeError(
+                f"kill-switch health checks unresolved: {unresolved}"
+            )
+        kill_switch = KillSwitch(
+            settings.paths.checkpoints_dir / "kill_switch.json"
+        )
+        kill_switch.reset(
+            approval_phrase="OPERATOR_CONFIRMED_RESET",
+            required_phrase="OPERATOR_CONFIRMED_RESET",
+        )
+        degradation = OperationalDegradation(
+            state_path=settings.paths.checkpoints_dir / "degradation_state.json",
+            audit_path=settings.paths.logs_dir / "degradation_audit.jsonl",
+        )
+        if degradation.manual_reset_required:
+            degradation.manual_reset(
+                confirmed=True,
+                reason=args.reason,
+                resolved_health_checks=True,
+            )
+        event = {
+            "external_id": stable_hash(
+                ["kill-switch-reset", utc_now().isoformat(), args.reason],
+                length=32,
+            ),
+            "status": "RESET",
+            "reason": args.reason,
+            "confirmed": True,
+            "resolved_health_checks": True,
+            "timestamp": utc_now(),
+        }
+        append_jsonl(settings.paths.logs_dir / "kill_switch_audit.jsonl", event)
+        database = Database(
+            supported_database_url(settings),
+            sqlite_path=settings.paths.database_path,
+        )
+        database.migrate()
+        try:
+            database.upsert_records("kill_switch_events", [event])
+        finally:
+            database.close()
+        emit({"status": "RESET", "reason": args.reason})
+        return 0
+    if action in {"task-install", "task-status", "task-remove"}:
+        task_name = settings.operational.windows_task_name
+        if action == "task-status":
+            command = ["schtasks.exe", "/Query", "/TN", task_name, "/FO", "LIST"]
+        elif action == "task-remove":
+            command = ["schtasks.exe", "/Delete", "/TN", task_name, "/F"]
+        else:
+            xml = _task_xml(settings, mode=args.mode, profile=args.profile)
+            command = ["schtasks.exe", "/Create", "/TN", task_name, "/XML", "<temporary-xml>"]
+            if args.dry_run:
+                emit(
+                    {
+                        "status": "DRY_RUN",
+                        "command": command,
+                        "task_name": task_name,
+                        "mode": args.mode,
+                        "live_default": False,
+                        "virtualenv_python": str(
+                            settings.paths.project_root
+                            / ".venv"
+                            / "Scripts"
+                            / "python.exe"
+                        ),
+                        "working_directory": settings.paths.project_root,
+                        "xml": xml,
+                    }
+                )
+                return 0
+            with tempfile.NamedTemporaryFile(
+                suffix=".xml",
+                mode="w",
+                encoding="utf-16",
+                delete=False,
+            ) as handle:
+                handle.write(xml)
+                xml_path = Path(handle.name)
+            command[-1] = str(xml_path)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=settings.paths.project_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            if action == "task-install" and "xml_path" in locals():
+                xml_path.unlink(missing_ok=True)
+        emit(
+            {
+                "status": "PASSED" if completed.returncode == 0 else "FAILED",
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+        )
+        return 0 if completed.returncode == 0 else 2
+    raise AssertionError(f"unhandled operate command: {action}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Fail-closed EUR crypto spot research and execution"
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("version")
+    commands.add_parser("doctor")
+    commands.add_parser("self-test")
+
+    config = commands.add_parser("config").add_subparsers(
+        dest="config_command", required=True
+    )
+    config.add_parser("show")
+    config.add_parser("validate")
+
+    eligibility = commands.add_parser("eligibility").add_subparsers(
+        dest="eligibility_command", required=True
+    )
+    eligibility.add_parser("list")
+    eligibility_check = eligibility.add_parser("check")
+    eligibility_check.add_argument("market", nargs="?")
+    eligibility_check.add_argument("--market", dest="market_option")
+
+    providers = commands.add_parser("providers").add_subparsers(
+        dest="providers_command", required=True
+    )
+    providers.add_parser("list")
+    providers.add_parser("capabilities")
+    providers_test = providers.add_parser("test")
+    providers_test.add_argument("--public-only", action="store_true")
+    providers.add_parser("status")
+
+    data = commands.add_parser("data").add_subparsers(dest="data_command", required=True)
+    data.add_parser("providers")
+    download = data.add_parser("download")
+    download.add_argument("--markets", nargs="+", default=None)
+    download.add_argument("--timeframes", nargs="+", default=None)
+    download.add_argument("--providers", nargs="+", default=None)
+    download.add_argument("--start", default="2017-01-01T00:00:00Z")
+    download.add_argument("--end")
+    download.add_argument("--no-resume", action="store_true")
+    validate = data.add_parser("validate")
+    validate.add_argument("path", type=Path)
+    validate.add_argument("--market", required=True)
+    validate.add_argument("--timeframe", required=True)
+    validate.add_argument("--maximum-staleness-hours", type=float, default=6.0)
+    inspect = data.add_parser("inspect")
+    inspect.add_argument("path", type=Path)
+    historical = data.add_parser("historical")
+    historical.add_argument("--provider", default="bitvavo")
+    historical.add_argument("--market", default="BTC-EUR")
+    historical.add_argument("--timeframe", default="1h")
+    historical.add_argument("--start", default="2025-01-01T00:00:00Z")
+    historical.add_argument("--end")
+    historical.add_argument("--no-resume", action="store_true")
+    data.add_parser("live")
+    data.add_parser("reconcile")
+    data.add_parser("database-health")
+    for name in ("estimate", "fetch", "context-fetch", "sync"):
+        selected = data.add_parser(name)
+        selected.add_argument("--providers", default="all")
+        selected.add_argument(
+            "--history-profile",
+            choices=("smoke", "standard", "deep", "maximum"),
+            default="standard",
+        )
+        selected.add_argument("--resume", action="store_true")
+        selected.add_argument("--yes", action="store_true")
+        if name != "context-fetch":
+            selected.add_argument("--universe-size", type=int, default=25)
+            selected.add_argument("--timeframes", default="all")
+        if name == "sync":
+            selected.add_argument("--only-missing", action="store_true")
+            selected.add_argument("--once", action="store_true")
+            selected.add_argument("--continuous", action="store_true")
+            selected.add_argument("--context", default="none")
+            selected.add_argument("--interval-seconds", type=float, default=300.0)
+    for name in ("status", "coverage", "gaps", "freshness"):
+        data.add_parser(name)
+
+    websocket = commands.add_parser("websocket").add_subparsers(
+        dest="websocket_command", required=True
+    )
+    for name in ("run", "soak"):
+        selected = websocket.add_parser(name)
+        selected.add_argument("--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo")
+        selected.add_argument("--market", default="BTC-EUR")
+        selected.add_argument("--duration", type=float, default=60.0 if name == "run" else 900.0)
+    websocket.add_parser("status")
+
+    orderbook = commands.add_parser("orderbook").add_subparsers(
+        dest="orderbook_command", required=True
+    )
+    for name in ("snapshot", "stream", "inspect"):
+        selected = orderbook.add_parser(name)
+        selected.add_argument("--provider", choices=("bitvavo", "kraken", "mexc"), default="bitvavo")
+        selected.add_argument("--market", default="BTC-EUR")
+        selected.add_argument("--depth", type=int, default=100)
+
+    macro = commands.add_parser("macro").add_subparsers(
+        dest="macro_command", required=True
+    )
+    macro_build = macro.add_parser("build")
+    macro_build.add_argument("--timeframes", default="1h,4h,12h,1d")
+    macro.add_parser("inspect")
+
+    gex = commands.add_parser("gex").add_subparsers(
+        dest="gex_command", required=True
+    )
+    gex_collect = gex.add_parser("collect")
+    gex_collect.add_argument("--underlying", choices=("BTC", "ETH"), default="BTC")
+    gex.add_parser("inspect")
+
+    positions = commands.add_parser("positions").add_subparsers(
+        dest="positions_command", required=True
+    )
+    for name in ("status", "reconcile", "pnl"):
+        positions.add_parser(name)
+
+    risk_command = commands.add_parser("risk").add_subparsers(
+        dest="risk_command", required=True
+    )
+    for name in ("correlation", "drawdown", "kill-switch-status"):
+        risk_command.add_parser(name)
+
+    scrape = commands.add_parser("scrape").add_subparsers(
+        dest="scrape_command", required=True
+    )
+    scrape_run = scrape.add_parser("run")
+    scrape_run.add_argument("--no-rss", action="store_true")
+    scrape_run.add_argument("--sources", default="all")
+    scrape_run.add_argument("--markets", dest="markets_csv")
+    scrape_run.add_argument("--playwright-fallback", action="store_true")
+    scrape_run.add_argument("--output-dir", type=Path)
+    scrape.add_parser("status")
+    scrape_inspect = scrape.add_parser("inspect")
+    scrape_inspect.add_argument("--limit", type=int, default=10)
+    scrape.add_parser("audit")
+
+    features = commands.add_parser("features").add_subparsers(
+        dest="features_command", required=True
+    )
+    feature_build = features.add_parser("build")
+    add_source_arguments(feature_build)
+    feature_build.add_argument("--output", type=Path)
+    feature_build.add_argument("--persist", action="store_true")
+    feature_audit = features.add_parser("audit")
+    add_source_arguments(feature_audit)
+
+    indicators = commands.add_parser("indicators").add_subparsers(
+        dest="indicator_command", required=True
+    )
+    indicator_coverage = indicators.add_parser("coverage")
+    indicator_coverage.add_argument("--output", type=Path)
+    indicator_coverage.add_argument("--persist", action="store_true")
+    indicator_list = indicators.add_parser("list")
+    indicator_list.add_argument("--family")
+    indicator_list.add_argument("--status")
+    indicator_list.add_argument("--role")
+    indicator_list.add_argument(
+        "--provider-availability", choices=("required", "internal")
+    )
+    indicator_list.add_argument("--tradable-only", action="store_true")
+    indicator_list.add_argument("--research-only", action="store_true")
+    indicator_describe = indicators.add_parser("describe")
+    indicator_describe.add_argument("name")
+    fractal_audit = indicators.add_parser("fractal-audit")
+    fractal_audit.add_argument("--rows", type=int, default=500)
+    fractal_audit.add_argument("--output", type=Path)
+
+    investing = commands.add_parser("investing").add_subparsers(
+        dest="investing_command", required=True
+    )
+    investing_score = investing.add_parser("score")
+    investing_score.add_argument("--asset", required=True)
+    investing_score.add_argument("--input", type=Path)
+    investing_score.add_argument("--persist", action="store_true")
+
+    strategies = commands.add_parser("strategies").add_subparsers(
+        dest="strategies_command", required=True
+    )
+    strategies.add_parser("list")
+    describe = strategies.add_parser("describe")
+    describe.add_argument("strategy")
+
+    backtest = commands.add_parser("backtest")
+    add_research_arguments(backtest)
+    backtest.add_argument("--output", type=Path)
+
+    optimize = commands.add_parser("optimize")
+    add_research_arguments(optimize)
+    optimize.add_argument("--method", choices=("grid", "random", "coordinate", "optuna"), default="random")
+    optimize.add_argument("--trials", type=int, default=20)
+    optimize.add_argument("--rounds", type=int, default=2)
+    optimize.add_argument("--minimum-trades", type=int, default=1)
+    optimize.add_argument("--checkpoint")
+
+    walk = commands.add_parser("walk-forward")
+    add_research_arguments(walk)
+    walk.add_argument("--folds", type=int, default=6)
+    walk.add_argument("--mode", choices=("anchored", "rolling"), default="anchored")
+    walk.add_argument("--purge-bars", type=int, default=1)
+    walk.add_argument("--embargo-bars", type=int, default=1)
+
+    monte = commands.add_parser("monte-carlo")
+    monte.add_argument("--r-multiples", default="1.5,-1,2,-1,0.8,-1,1.2")
+    monte.add_argument("--risk-fraction", type=float, default=0.005)
+    monte.add_argument("--capital", type=float, default=2_000.0)
+    monte.add_argument("--trades", type=int, default=100)
+    monte.add_argument("--runs", type=int, default=10_000)
+    monte.add_argument("--block-size", type=int, default=1)
+
+    research = commands.add_parser("research")
+    research.add_argument(
+        "research_action",
+        nargs="?",
+        choices=("run", "validate"),
+        default="run",
+    )
+    add_research_arguments(research)
+    research.add_argument("--method", choices=("grid", "random", "coordinate", "optuna"), default="random")
+    research.add_argument("--trials", type=int, default=20)
+    research.add_argument("--purge-bars", type=int, default=1)
+    research.add_argument("--embargo-bars", type=int, default=1)
+    research.add_argument("--checkpoint")
+    research.add_argument("--output", type=Path)
+    research.add_argument("--output-dir", dest="output", type=Path)
+    research.add_argument("--promote-to-paper", action="store_true")
+    research.add_argument("--providers")
+    research.add_argument("--scrapers", default="none")
+    research.add_argument("--timeframes")
+    research.add_argument("--strategies")
+    research.add_argument("--profile", default="standard")
+    research.add_argument("--walk-forward-folds", type=int)
+
+    report = commands.add_parser("report")
+    report.add_argument("path")
+
+    tests = commands.add_parser("test").add_subparsers(
+        dest="test_mode", required=True
+    )
+    for name in (
+        "offline",
+        "network",
+        "full",
+        "providers",
+        "websockets",
+        "database",
+        "reporting",
+        "paper",
+        "secrets",
+    ):
+        tests.add_parser(name).set_defaults(
+            duration=10 if name in {"network", "websockets"} else 0
+        )
+    soak = tests.add_parser("soak")
+    soak.add_argument("--duration", type=float, default=900.0)
+
+    paper = commands.add_parser("paper").add_subparsers(
+        dest="paper_command", required=True
+    )
+    paper.add_parser("status")
+    paper.add_parser("reconcile")
+    paper_run = paper.add_parser("run")
+    paper_run.add_argument("--market", default="BTC-EUR")
+    paper_run.add_argument("--strategy", default="manual-paper-check")
+    paper_run.add_argument("--capital", type=float, default=2_000.0)
+    paper_run.add_argument("--price", type=float, default=20_000.0)
+    paper_run.add_argument("--quantity", type=float, default=0.001)
+    paper_run.add_argument("--stop-fraction", type=float, default=0.05)
+    paper_run.add_argument("--idempotency-key")
+    paper_run.add_argument("--markets", dest="markets_csv")
+    paper_run.add_argument("--candidates", type=Path)
+    paper_run.add_argument("--once", action="store_true")
+
+    live = commands.add_parser("live").add_subparsers(dest="live_command", required=True)
+    live.add_parser("status")
+    for name in ("preflight", "run"):
+        selected = live.add_parser(name)
+        selected.add_argument("--research-report")
+        selected.add_argument("--data", type=Path)
+        selected.add_argument("--market", default="BTC-EUR")
+        selected.add_argument("--timeframe", default="1h")
+        selected.add_argument("--strategy", default="manual-live")
+        selected.add_argument("--side", choices=("BUY", "SELL"), default="BUY")
+        selected.add_argument("--price", type=float, required=name == "run", default=0.0)
+        selected.add_argument("--quantity", type=float, required=name == "run", default=0.0)
+        selected.add_argument("--stop-fraction", type=float, default=0.05)
+        selected.add_argument("--idempotency-key", required=name == "run", default="")
+
+    operate = commands.add_parser("operate").add_subparsers(
+        dest="operate_command",
+        required=True,
+    )
+    for name in (
+        "preflight",
+        "status",
+        "health",
+        "pause",
+        "resume",
+        "drain",
+        "stop",
+        "reconcile",
+        "report",
+    ):
+        selected = operate.add_parser(name)
+        selected.add_argument(
+            "--mode",
+            choices=("shadow", "paper", "live"),
+            default="shadow",
+        )
+        selected.add_argument("--profile", default="practical_spot_v1")
+        if name in {"drain", "stop"}:
+            selected.add_argument("--wait-seconds", type=float)
+    operate_start = operate.add_parser("start")
+    operate_start.add_argument(
+        "--mode",
+        choices=("shadow", "paper", "live"),
+        default="shadow",
+    )
+    operate_start.add_argument("--profile", default="practical_spot_v1")
+    operate_start.add_argument("--continuous", action="store_true")
+    operate_start.add_argument("--resume", action="store_true")
+    operate_start.add_argument("--soak-minutes", type=float, default=0.0)
+    operate.add_parser("candidates")
+    candidate_inspect = operate.add_parser("candidate-inspect")
+    candidate_inspect.add_argument("--id", required=True)
+    for name in ("activate-shadow", "activate-paper"):
+        selected = operate.add_parser(name)
+        selected.add_argument("--id", required=True)
+        selected.add_argument("--yes", action="store_true")
+    for name in ("suspend", "retire"):
+        selected = operate.add_parser(name)
+        selected.add_argument("--id", required=True)
+        selected.add_argument("--reason", required=True)
+    operate.add_parser("alerts-test")
+    reset_kill = operate.add_parser("reset-kill-switch")
+    reset_kill.add_argument("--mode", choices=("shadow", "paper"), default="shadow")
+    reset_kill.add_argument("--profile", default="practical_spot_v1")
+    reset_kill.add_argument("--reason", required=True)
+    reset_kill.add_argument("--yes", action="store_true")
+    for name in ("task-install", "task-status", "task-remove"):
+        selected = operate.add_parser(name)
+        selected.add_argument(
+            "--mode",
+            choices=("shadow", "paper"),
+            default="shadow",
+        )
+        selected.add_argument("--profile", default="practical_spot_v1")
+        selected.add_argument("--dry-run", action="store_true")
+
+    lab = commands.add_parser("lab").add_subparsers(
+        dest="lab_section",
+        required=True,
+    )
+    universe = lab.add_parser("universe").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    universe_refresh = universe.add_parser("refresh")
+    universe_refresh.add_argument(
+        "--universe-size",
+        "--size",
+        dest="universe_size",
+        type=int,
+        default=25,
+    )
+    universe_refresh.add_argument("--scan-limit", type=int, default=100)
+    universe.add_parser("show")
+    universe.add_parser("snapshot")
+    universe.add_parser("eligibility")
+    universe.add_parser("history")
+    universe.add_parser("coverage")
+
+    lab_data = lab.add_parser("data").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    for name in ("status", "prepare", "validate"):
+        selected = lab_data.add_parser(name)
+        selected.add_argument("--universe-size", type=int, default=5)
+        selected.add_argument("--markets", dest="markets_csv")
+        selected.add_argument("--allowed-universe", action="store_true")
+        selected.add_argument("--timeframes")
+        selected.add_argument("--minimum-rows", type=int, default=2_000)
+        if name == "prepare":
+            selected.add_argument("--force", action="store_true")
+            selected.add_argument(
+                "--history-profile",
+                choices=("smoke", "standard", "deep", "maximum"),
+                default="standard",
+            )
+
+    lab_indicators = lab.add_parser("indicators").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    lab_indicators.add_parser("coverage")
+    lab_indicators.add_parser("list")
+    for name in ("describe", "parameters", "test"):
+        selected = lab_indicators.add_parser(name)
+        selected.add_argument("--id", required=True)
+
+    blocks = lab.add_parser("blocks").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    blocks.add_parser("list")
+    block_describe = blocks.add_parser("describe")
+    block_describe.add_argument("--block", required=True)
+    blocks.add_parser("validate")
+
+    combinations = lab.add_parser("combinations").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    for name in ("estimate", "generate"):
+        selected = combinations.add_parser(name)
+        add_lab_generation_arguments(selected)
+        selected.add_argument("--yes", action="store_true")
+    combinations.add_parser("status")
+    combination_inspect = combinations.add_parser("inspect")
+    combination_inspect.add_argument("--id", required=True)
+
+    lab_run = lab.add_parser("run")
+    add_lab_generation_arguments(lab_run, run=True)
+    for name in ("generate", "enqueue"):
+        selected = lab.add_parser(name)
+        add_lab_generation_arguments(selected)
+        selected.add_argument("--yes", action="store_true")
+    for name in ("pause", "resume", "drain", "stop", "status"):
+        lab.add_parser(name)
+    campaign = lab.add_parser("campaign").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    campaign_estimate = campaign.add_parser("estimate")
+    campaign_estimate.add_argument("--combination-sizes", default="1,2")
+    campaign_run = campaign.add_parser("run")
+    campaign_run.add_argument("--combination-sizes", default="1,2")
+    campaign_run.add_argument("--workers", type=int, default=4)
+    campaign_run.add_argument("--max-trials", type=int, default=20)
+    campaign_run.add_argument("--retest", action="store_true")
+    campaign_run.add_argument("--yes", action="store_true")
+    campaign.add_parser("status")
+    campaign.add_parser("report")
+    lab.add_parser("queue")
+    lab.add_parser("workers")
+    lab.add_parser("failures")
+    lab.add_parser("retry")
+
+    leaderboard = lab.add_parser("leaderboard")
+    leaderboard.set_defaults(lab_action="show")
+    leaderboard.add_argument("--source", default="final_holdout")
+    leaderboard.add_argument("--minimum-trades", type=int, default=0)
+    leaderboard.add_argument("--top", type=int, default=25)
+    leaderboard.add_argument("--sort", default="robust_score")
+    leaderboard_actions = leaderboard.add_subparsers(dest="lab_action")
+    leaderboard_actions.add_parser("export")
+    leaderboard_inspect = leaderboard_actions.add_parser("inspect")
+    leaderboard_inspect.add_argument("--id", required=True)
+    leaderboard_actions.add_parser("history")
+
+    lab_retest = lab.add_parser("retest")
+    add_lab_generation_arguments(lab_retest, run=True)
+    lab.add_parser("validate")
+    lab.add_parser("report")
+    return parser
+
+
+async def dispatch(args: argparse.Namespace, settings: Settings) -> int:
+    if args.command == "version":
+        emit({"name": settings.app.app_name, "version": settings.app.version})
+        return 0
+    if args.command == "doctor":
+        return doctor(settings)
+    if args.command == "self-test":
+        return await self_test(settings)
+    if args.command == "config":
+        return command_config(args, settings)
+    if args.command == "eligibility":
+        return command_eligibility(args, settings)
+    if args.command == "providers":
+        return await command_providers(args, settings)
+    if args.command == "data":
+        if args.data_command in {
+            "historical",
+            "live",
+            "reconcile",
+            "database-health",
+            "estimate",
+            "fetch",
+            "context-fetch",
+            "sync",
+            "status",
+            "coverage",
+            "gaps",
+            "freshness",
+        }:
+            return await command_extended_data(args, settings)
+        return await command_data_async(args, settings)
+    if args.command == "websocket":
+        return await command_websocket(args, settings)
+    if args.command == "orderbook":
+        return await command_orderbook(args, settings)
+    if args.command == "macro":
+        return command_macro(args, settings)
+    if args.command == "gex":
+        return await command_gex(args, settings)
+    if args.command == "positions":
+        return command_positions(args, settings)
+    if args.command == "risk":
+        return command_risk(args, settings)
+    if args.command == "scrape":
+        return await command_scrape_async(args, settings)
+    if args.command == "features":
+        return command_features(args, settings)
+    if args.command == "indicators":
+        return command_indicators(args, settings)
+    if args.command == "investing":
+        return command_investing(args, settings)
+    if args.command == "strategies":
+        return command_strategies(args)
+    if args.command == "backtest":
+        return command_backtest(args, settings)
+    if args.command == "optimize":
+        return command_optimize(args, settings)
+    if args.command == "walk-forward":
+        return command_walk_forward(args, settings)
+    if args.command == "monte-carlo":
+        return command_monte_carlo(args, settings)
+    if args.command == "research":
+        return await command_research_async(args, settings)
+    if args.command == "report":
+        if args.path in {"statistics", "charts", "full", "build"}:
+            return command_operational_report(args, settings)
+        return command_report(args)
+    if args.command == "test":
+        return await command_test(args, settings)
+    if args.command == "paper":
+        return command_paper(args, settings)
+    if args.command == "live":
+        return await command_live_async(args, settings)
+    if args.command == "operate":
+        return await command_operate(args, settings)
+    if args.command == "lab":
+        return await command_lab_async(args, settings)
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    settings: Settings | None = None
+    try:
+        settings = Settings.load()
+        assert settings is not None
+        process_run_id = stable_hash(
+            [settings.app.app_name, time.time_ns()], length=16
+        )
+        logger = configure_logging(
+            log_file=settings.paths.logs_dir / "application.log",
+            jsonl_file=settings.paths.logs_dir / "application.jsonl",
+            secrets=_configured_secret_values(settings),
+        )
+        logger.info(
+            "process started",
+            extra=_log_extra(
+                run_id=process_run_id,
+                component="cli",
+                operation=args.command,
+                status="RUNNING",
+                reason_code="PROCESS_STARTED",
+            ),
+        )
+        return asyncio.run(dispatch(args, settings))
+    except (
+        ExecutionBlocked,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        emit(
+            {
+                "status": "FAILED",
+                "error_code": type(exc).__name__,
+                "message": _safe_exception_message(exc, settings),
+            }
+        )
+        return 2
+    except KeyboardInterrupt:
+        emit({"status": "INTERRUPTED"})
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

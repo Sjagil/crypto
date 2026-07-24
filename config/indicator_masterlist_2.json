@@ -1,0 +1,1001 @@
+{
+  "version": 1,
+  "part": 2,
+  "items": [
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Spot volume",
+      "source_line": 272
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Futures volume",
+      "source_line": 273
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Perpetual volume",
+      "source_line": 274
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Options volume",
+      "source_line": 275
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Quote volume",
+      "source_line": 276
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Base-asset volume",
+      "source_line": 277
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Dollar volume",
+      "source_line": 278
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume moving average",
+      "source_line": 279
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Relative volume",
+      "source_line": 280
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume z-score",
+      "source_line": 281
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume percentile",
+      "source_line": 282
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Buy volume",
+      "source_line": 283
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Sell volume",
+      "source_line": 284
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Taker buy volume",
+      "source_line": 285
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Taker sell volume",
+      "source_line": 286
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Klassieke volume-indicatoren",
+      "source_line": 287
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "OBV: On-Balance Volume",
+      "source_line": 288
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Accumulation/Distribution Line",
+      "source_line": 289
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Chaikin A/D Oscillator",
+      "source_line": 290
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Chaikin Money Flow",
+      "source_line": 291
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Money Flow Index",
+      "source_line": 292
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Price Trend",
+      "source_line": 293
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Price Volume Trend",
+      "source_line": 294
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Klinger Volume Oscillator",
+      "source_line": 295
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Force Index",
+      "source_line": 296
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Ease of Movement",
+      "source_line": 297
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Negative Volume Index",
+      "source_line": 298
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Positive Volume Index",
+      "source_line": 299
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Oscillator",
+      "source_line": 300
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Percentage Volume Oscillator",
+      "source_line": 301
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Weighted MACD",
+      "source_line": 302
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Twiggs Money Flow",
+      "source_line": 303
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Flow Indicator",
+      "source_line": 304
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Williams Accumulation/Distribution",
+      "source_line": 305
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "VWAP-familie",
+      "source_line": 306
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "VWAP",
+      "source_line": 307
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Session VWAP",
+      "source_line": 308
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Daily VWAP",
+      "source_line": 309
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Weekly VWAP",
+      "source_line": 310
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Monthly VWAP",
+      "source_line": 311
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Rolling VWAP",
+      "source_line": 312
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Anchored VWAP",
+      "source_line": 313
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Event-anchored VWAP",
+      "source_line": 314
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Earnings-anchored VWAP",
+      "source_line": 315
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Cycle-low anchored VWAP",
+      "source_line": 316
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Weighted Moving Average",
+      "source_line": 317
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Profile",
+      "source_line": 318
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume Profile",
+      "source_line": 319
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Visible Range Volume Profile",
+      "source_line": 320
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Fixed Range Volume Profile",
+      "source_line": 321
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "POC: Point of Control",
+      "source_line": 322
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "VAH: Value Area High",
+      "source_line": 323
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "VAL: Value Area Low",
+      "source_line": 324
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "High Volume Nodes",
+      "source_line": 325
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Low Volume Nodes",
+      "source_line": 326
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Volume gaps",
+      "source_line": 327
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Developing POC",
+      "source_line": 328
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Naked POC",
+      "source_line": 329
+    },
+    {
+      "family": "VOLUME_FLOW",
+      "display_name": "Time Price Opportunity Profile",
+      "source_line": 330
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Bid-ask spread",
+      "source_line": 337
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Percentage spread",
+      "source_line": 338
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Effective spread",
+      "source_line": 339
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Market depth",
+      "source_line": 340
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Depth binnen 0,1%, 0,5%, 1% en 2%",
+      "source_line": 341
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Bid liquidity",
+      "source_line": 342
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Ask liquidity",
+      "source_line": 343
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Order-book imbalance",
+      "source_line": 344
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Weighted order-book imbalance",
+      "source_line": 345
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Microprice",
+      "source_line": 346
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Midprice",
+      "source_line": 347
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Book pressure",
+      "source_line": 348
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Liquidity walls",
+      "source_line": 349
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Replenishment rate",
+      "source_line": 350
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Cancellation rate",
+      "source_line": 351
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Quote velocity",
+      "source_line": 352
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Order-book slope",
+      "source_line": 353
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Depth concentration",
+      "source_line": 354
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Liquidity gaps",
+      "source_line": 355
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Tradeflowindicatoren",
+      "source_line": 356
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Delta",
+      "source_line": 357
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Cumulative Volume Delta",
+      "source_line": 358
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Taker buy/sell ratio",
+      "source_line": 359
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Aggressive buy volume",
+      "source_line": 360
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Aggressive sell volume",
+      "source_line": 361
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Trade imbalance",
+      "source_line": 362
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Large-trade ratio",
+      "source_line": 363
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Whale trade count",
+      "source_line": 364
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Average trade size",
+      "source_line": 365
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Median trade size",
+      "source_line": 366
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Trade intensity",
+      "source_line": 367
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Number of trades",
+      "source_line": 368
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Volume per trade",
+      "source_line": 369
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Buy-to-sell transaction ratio",
+      "source_line": 370
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Footprint imbalance",
+      "source_line": 371
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Stacked imbalance",
+      "source_line": 372
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Absorption",
+      "source_line": 373
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Exhaustion",
+      "source_line": 374
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Failed auction",
+      "source_line": 375
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Iceberg detection",
+      "source_line": 376
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "VPIN",
+      "source_line": 377
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Kyle’s Lambda",
+      "source_line": 378
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Amihud illiquidity",
+      "source_line": 379
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Slippage estimate",
+      "source_line": 380
+    },
+    {
+      "family": "ORDERFLOW_MICROSTRUCTURE",
+      "display_name": "Market impact estimate",
+      "source_line": 381
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Swing high",
+      "source_line": 390
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Swing low",
+      "source_line": 391
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Higher high",
+      "source_line": 392
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Higher low",
+      "source_line": 393
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Lower high",
+      "source_line": 394
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Lower low",
+      "source_line": 395
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Break of Structure",
+      "source_line": 396
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Change of Character",
+      "source_line": 397
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Market Structure Shift",
+      "source_line": 398
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Internal structure",
+      "source_line": 399
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "External structure",
+      "source_line": 400
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Confirmed fractals",
+      "source_line": 401
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Williams fractals",
+      "source_line": 402
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "ZigZag",
+      "source_line": 403
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Pivot highs",
+      "source_line": 404
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Pivot lows",
+      "source_line": 405
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Steun en weerstand",
+      "source_line": 406
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Horizontale steun",
+      "source_line": 407
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Horizontale weerstand",
+      "source_line": 408
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Previous day high/low",
+      "source_line": 409
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Previous week high/low",
+      "source_line": 410
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Previous month high/low",
+      "source_line": 411
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "All-time high",
+      "source_line": 412
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Range high/low",
+      "source_line": 413
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Opening range",
+      "source_line": 414
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Fibonacci retracements",
+      "source_line": 415
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Fibonacci extensions",
+      "source_line": 416
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Pivot Points",
+      "source_line": 417
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Classic pivots",
+      "source_line": 418
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Fibonacci pivots",
+      "source_line": 419
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Camarilla pivots",
+      "source_line": 420
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Woodie pivots",
+      "source_line": 421
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "DeMark pivots",
+      "source_line": 422
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Liquiditeitsstructuur",
+      "source_line": 423
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Equal highs",
+      "source_line": 424
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Equal lows",
+      "source_line": 425
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Liquidity pools",
+      "source_line": 426
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Stop clusters",
+      "source_line": 427
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Buy-side liquidity",
+      "source_line": 428
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Sell-side liquidity",
+      "source_line": 429
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Liquidity sweep",
+      "source_line": 430
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Stop run",
+      "source_line": 431
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Failed breakout",
+      "source_line": 432
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Breakout retest",
+      "source_line": 433
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Fair Value Gap",
+      "source_line": 434
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Imbalance zones",
+      "source_line": 435
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Order blocks",
+      "source_line": 436
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Breaker blocks",
+      "source_line": 437
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Mitigation blocks",
+      "source_line": 438
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Supply zones",
+      "source_line": 439
+    },
+    {
+      "family": "MARKET_STRUCTURE",
+      "display_name": "Demand zones",
+      "source_line": 440
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Hammer",
+      "source_line": 449
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Inverted Hammer",
+      "source_line": 450
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Hanging Man",
+      "source_line": 451
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Shooting Star",
+      "source_line": 452
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Bullish Engulfing",
+      "source_line": 453
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Bearish Engulfing",
+      "source_line": 454
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Piercing Pattern",
+      "source_line": 455
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Dark Cloud Cover",
+      "source_line": 456
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Morning Star",
+      "source_line": 457
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Evening Star",
+      "source_line": 458
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Morning Doji Star",
+      "source_line": 459
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Evening Doji Star",
+      "source_line": 460
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three White Soldiers",
+      "source_line": 461
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three Black Crows",
+      "source_line": 462
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Abandoned Baby",
+      "source_line": 463
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Tweezer Top",
+      "source_line": 464
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Tweezer Bottom",
+      "source_line": 465
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Harami",
+      "source_line": 466
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Harami Cross",
+      "source_line": 467
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Belt Hold",
+      "source_line": 468
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Counterattack",
+      "source_line": 469
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three Inside Up",
+      "source_line": 470
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three Inside Down",
+      "source_line": 471
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three Outside Up",
+      "source_line": 472
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three Outside Down",
+      "source_line": 473
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Doji- en twijfelpatronen",
+      "source_line": 474
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Doji",
+      "source_line": 475
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Long-Legged Doji",
+      "source_line": 476
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Dragonfly Doji",
+      "source_line": 477
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Gravestone Doji",
+      "source_line": 478
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Rickshaw Man",
+      "source_line": 479
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Spinning Top",
+      "source_line": 480
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "High-Wave Candle",
+      "source_line": 481
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Voortzettingspatronen",
+      "source_line": 482
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Rising Three Methods",
+      "source_line": 483
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Falling Three Methods",
+      "source_line": 484
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Mat Hold",
+      "source_line": 485
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Upside Tasuki Gap",
+      "source_line": 486
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Downside Tasuki Gap",
+      "source_line": 487
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Separating Lines",
+      "source_line": 488
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Three-Line Strike",
+      "source_line": 489
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "Thrusting Pattern",
+      "source_line": 490
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "On-Neck Pattern",
+      "source_line": 491
+    },
+    {
+      "family": "CANDLESTICK",
+      "display_name": "In-Neck Pattern",
+      "source_line": 492
+    }
+  ]
+}

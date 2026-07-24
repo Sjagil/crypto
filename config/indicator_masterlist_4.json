@@ -1,0 +1,1251 @@
+{
+  "version": 1,
+  "part": 4,
+  "items": [
+    {
+      "family": "STABLECOIN",
+      "display_name": "Totale stablecoin market cap",
+      "source_line": 766
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin market-cap growth",
+      "source_line": 767
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin supply per chain",
+      "source_line": 768
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin inflows per chain",
+      "source_line": 769
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin outflows per chain",
+      "source_line": 770
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin exchange reserve",
+      "source_line": 771
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin exchange inflow",
+      "source_line": 772
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin exchange outflow",
+      "source_line": 773
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin exchange netflow",
+      "source_line": 774
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin transfer volume",
+      "source_line": 775
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin transaction count",
+      "source_line": 776
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin active addresses",
+      "source_line": 777
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "USDT dominance",
+      "source_line": 778
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "USDC dominance",
+      "source_line": 779
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin dominance",
+      "source_line": 780
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin velocity",
+      "source_line": 781
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin peg deviation",
+      "source_line": 782
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin depeg duration",
+      "source_line": 783
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin Supply Ratio",
+      "source_line": 784
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "SSR Oscillator",
+      "source_line": 785
+    },
+    {
+      "family": "STABLECOIN",
+      "display_name": "Stablecoin buying-power ratio",
+      "source_line": 786
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "TOTAL: totale cryptomarktkapitalisatie",
+      "source_line": 800
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "TOTAL2: cryptomarkt exclusief BTC",
+      "source_line": 801
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "TOTAL3: cryptomarkt exclusief BTC en ETH",
+      "source_line": 802
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "OTHERS: kleinere altcoins",
+      "source_line": 803
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "DeFi market cap",
+      "source_line": 804
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Layer-1 market cap",
+      "source_line": 805
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Layer-2 market cap",
+      "source_line": 806
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "AI-token market cap",
+      "source_line": 807
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Meme-token market cap",
+      "source_line": 808
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "RWA-token market cap",
+      "source_line": 809
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Stablecoin market cap",
+      "source_line": 810
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Dominantie-indicatoren",
+      "source_line": 811
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "BTC Dominance",
+      "source_line": 812
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "ETH Dominance",
+      "source_line": 813
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "USDT Dominance",
+      "source_line": 814
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "USDC Dominance",
+      "source_line": 815
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Stablecoin Dominance",
+      "source_line": 816
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Altcoin Dominance",
+      "source_line": 817
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "DeFi Dominance",
+      "source_line": 818
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Layer-1 Dominance",
+      "source_line": 819
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Sector Dominance",
+      "source_line": 820
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "ETH/BTC",
+      "source_line": 837
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "SOL/BTC",
+      "source_line": 838
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Altcoin market cap/BTC market cap",
+      "source_line": 839
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "TOTAL2/BTC",
+      "source_line": 840
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "TOTAL3/BTC",
+      "source_line": 841
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Stablecoin market cap/BTC market cap",
+      "source_line": 842
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "DeFi market cap/ETH market cap",
+      "source_line": 843
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "BTC volume/total crypto volume",
+      "source_line": 844
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "BTC realized cap/crypto market cap",
+      "source_line": 845
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Marktbreedte",
+      "source_line": 846
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Percentage coins boven 20 EMA",
+      "source_line": 847
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Percentage coins boven 50 EMA",
+      "source_line": 848
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Percentage coins boven 200 SMA",
+      "source_line": 849
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Percentage coins met positieve 7-daagse return",
+      "source_line": 850
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Percentage coins met positieve 30-daagse return",
+      "source_line": 851
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "New highs versus new lows",
+      "source_line": 852
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Advance-decline line",
+      "source_line": 853
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Advance-decline ratio",
+      "source_line": 854
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Equal-weighted crypto-index",
+      "source_line": 855
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Cap-weighted crypto-index",
+      "source_line": 856
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Median altcoin return",
+      "source_line": 857
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Breadth thrust",
+      "source_line": 858
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Altseason Index",
+      "source_line": 859
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Sector breadth",
+      "source_line": 860
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Cross-sectional dispersion",
+      "source_line": 861
+    },
+    {
+      "family": "CRYPTO_MACRO",
+      "display_name": "Correlation dispersion",
+      "source_line": 862
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Crypto Fear & Greed Index",
+      "source_line": 868
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Social sentiment score",
+      "source_line": 869
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Bullish/bearish mention ratio",
+      "source_line": 870
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "News sentiment",
+      "source_line": 871
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Reddit sentiment",
+      "source_line": 872
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "X/Twitter sentiment",
+      "source_line": 873
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Telegram sentiment",
+      "source_line": 874
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "YouTube search interest",
+      "source_line": 875
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Google Trends",
+      "source_line": 876
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Wikipedia page views",
+      "source_line": 877
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "App-download rankings",
+      "source_line": 878
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Exchange app rankings",
+      "source_line": 879
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Search-volume acceleration",
+      "source_line": 880
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Influencer activity",
+      "source_line": 881
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Meme activity",
+      "source_line": 882
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Retail attention index",
+      "source_line": 883
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Funding rate",
+      "source_line": 888
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Long/short ratio",
+      "source_line": 889
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Put/call ratio",
+      "source_line": 890
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Options skew",
+      "source_line": 891
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Futures basis",
+      "source_line": 892
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Open-interest acceleration",
+      "source_line": 893
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Liquidation imbalance",
+      "source_line": 894
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Margin borrowing",
+      "source_line": 895
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Whale positioning",
+      "source_line": 896
+    },
+    {
+      "family": "SENTIMENT",
+      "display_name": "Smart-money positioning",
+      "source_line": 897
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Spot Bitcoin ETF daily net flow",
+      "source_line": 902
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Spot Ethereum ETF daily net flow",
+      "source_line": 903
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Cumulative ETF inflows",
+      "source_line": 904
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "ETF assets under management",
+      "source_line": 905
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "ETF trading volume",
+      "source_line": 906
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "ETF premium/discount",
+      "source_line": 907
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "ETF creation/redemption activity",
+      "source_line": 908
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "CME open interest",
+      "source_line": 909
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "CME basis",
+      "source_line": 910
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "CME gap",
+      "source_line": 911
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Institutional custody balances",
+      "source_line": 912
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Corporate treasury purchases",
+      "source_line": 913
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Fund flows",
+      "source_line": 914
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Grayscale premium/discount",
+      "source_line": 915
+    },
+    {
+      "family": "INSTITUTIONAL_FLOW",
+      "display_name": "Exchange-traded-product holdings",
+      "source_line": 916
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "TVL",
+      "source_line": 925
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Adjusted TVL",
+      "source_line": 926
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "TVL growth",
+      "source_line": 927
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "TVL market share",
+      "source_line": 928
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "TVL per chain",
+      "source_line": 929
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "TVL per protocol",
+      "source_line": 930
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Net deposits",
+      "source_line": 931
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Bridge inflows",
+      "source_line": 932
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Bridge outflows",
+      "source_line": 933
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Net bridge flow",
+      "source_line": 934
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Stablecoin liquidity",
+      "source_line": 935
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "DEX liquidity",
+      "source_line": 936
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Lending liquidity",
+      "source_line": 937
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Active loans",
+      "source_line": 938
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Borrowed value",
+      "source_line": 939
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Utilization rate",
+      "source_line": 940
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Economische activiteit",
+      "source_line": 941
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Protocol fees",
+      "source_line": 942
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Chain fees",
+      "source_line": 943
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "App fees",
+      "source_line": 944
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Protocol revenue",
+      "source_line": 945
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Token-holder revenue",
+      "source_line": 946
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Real Economic Value",
+      "source_line": 947
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "DEX volume",
+      "source_line": 948
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Perpetual DEX volume",
+      "source_line": 949
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Lending volume",
+      "source_line": 950
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "NFT volume",
+      "source_line": 951
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Bridge volume",
+      "source_line": 952
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Number of users",
+      "source_line": 953
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Active users",
+      "source_line": 954
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "New users",
+      "source_line": 955
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Retention",
+      "source_line": 956
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Transactions per user",
+      "source_line": 957
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Revenue per user",
+      "source_line": 958
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Waardering",
+      "source_line": 959
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Market cap/TVL",
+      "source_line": 960
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "FDV/TVL",
+      "source_line": 961
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Market cap/revenue",
+      "source_line": 962
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "FDV/revenue",
+      "source_line": 963
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Market cap/fees",
+      "source_line": 964
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "FDV/fees",
+      "source_line": 965
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Price-to-sales",
+      "source_line": 966
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Price-to-fees",
+      "source_line": 967
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Price-to-earningsachtige ratio",
+      "source_line": 968
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Revenue yield",
+      "source_line": 969
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Fee yield",
+      "source_line": 970
+    },
+    {
+      "family": "DEFI_CHAIN_FUNDAMENTALS",
+      "display_name": "Token-holder yield",
+      "source_line": 971
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Circulating supply",
+      "source_line": 980
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Total supply",
+      "source_line": 981
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Maximum supply",
+      "source_line": 982
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Fully Diluted Valuation",
+      "source_line": 983
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Market cap",
+      "source_line": 984
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Market cap/FDV ratio",
+      "source_line": 985
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Float",
+      "source_line": 986
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Free float",
+      "source_line": 987
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Emission rate",
+      "source_line": 988
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Annual inflation",
+      "source_line": 989
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Burn rate",
+      "source_line": 990
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Net issuance",
+      "source_line": 991
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Token unlock schedule",
+      "source_line": 992
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Unlocks als percentage van circulating supply",
+      "source_line": 993
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Insider allocation",
+      "source_line": 994
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Team allocation",
+      "source_line": 995
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "VC allocation",
+      "source_line": 996
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Treasury allocation",
+      "source_line": 997
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Community allocation",
+      "source_line": 998
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Staking ratio",
+      "source_line": 999
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Liquid staking ratio",
+      "source_line": 1000
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Vesting concentration",
+      "source_line": 1001
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Verplicht gebruik van token",
+      "source_line": 1011
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Gasfunctie",
+      "source_line": 1012
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Collateralfunctie",
+      "source_line": 1013
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Governancefunctie",
+      "source_line": 1014
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Fee discounts",
+      "source_line": 1015
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Fee capture",
+      "source_line": 1016
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Revenue sharing",
+      "source_line": 1017
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Buybacks",
+      "source_line": 1018
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Burns",
+      "source_line": 1019
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Staking demand",
+      "source_line": 1020
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Validator demand",
+      "source_line": 1021
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Treasury demand",
+      "source_line": 1022
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Protocol-owned liquidity",
+      "source_line": 1023
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Token-holder cashflow",
+      "source_line": 1024
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Real yield versus emissieyield",
+      "source_line": 1025
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Active addresses",
+      "source_line": 1027
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Monthly active users",
+      "source_line": 1028
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Daily active users",
+      "source_line": 1029
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "New addresses",
+      "source_line": 1030
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Developer activity",
+      "source_line": 1031
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "GitHub commits",
+      "source_line": 1032
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Number of developers",
+      "source_line": 1033
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Ecosystem projects",
+      "source_line": 1034
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Transaction count",
+      "source_line": 1035
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Transfer volume",
+      "source_line": 1036
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Stablecoin supply",
+      "source_line": 1037
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "DEX volume",
+      "source_line": 1038
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Application revenue",
+      "source_line": 1039
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "User retention",
+      "source_line": 1040
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Geographic adoption",
+      "source_line": 1041
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Exchange availability",
+      "source_line": 1042
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Wallet integrations",
+      "source_line": 1043
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Veiligheid en decentralisatie",
+      "source_line": 1044
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Validator count",
+      "source_line": 1045
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Nakamoto coefficient",
+      "source_line": 1046
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Staking concentration",
+      "source_line": 1047
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Mining-pool concentration",
+      "source_line": 1048
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Client diversity",
+      "source_line": 1049
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Geographic decentralization",
+      "source_line": 1050
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Governance concentration",
+      "source_line": 1051
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Top-10 holder concentration",
+      "source_line": 1052
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Insider concentration",
+      "source_line": 1053
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Treasury transparency",
+      "source_line": 1054
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Audit quality",
+      "source_line": 1055
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Bug-bountyprogramma",
+      "source_line": 1056
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Exploit history",
+      "source_line": 1057
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Downtime history",
+      "source_line": 1058
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Finality failures",
+      "source_line": 1059
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Slashing incidents",
+      "source_line": 1060
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Bridge security",
+      "source_line": 1061
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Oracle dependency",
+      "source_line": 1062
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Admin keys",
+      "source_line": 1063
+    },
+    {
+      "family": "INVESTING_FUNDAMENTALS",
+      "display_name": "Multisig concentration",
+      "source_line": 1064
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Top-10 holder percentage",
+      "source_line": 1066
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Top-100 holder percentage",
+      "source_line": 1067
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Gini coefficient",
+      "source_line": 1068
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Whale concentration",
+      "source_line": 1069
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Exchange-wallet concentration",
+      "source_line": 1070
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Team-wallet concentration",
+      "source_line": 1071
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Treasury-wallet concentration",
+      "source_line": 1072
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Number of holders",
+      "source_line": 1073
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Holder growth",
+      "source_line": 1074
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Average holding period",
+      "source_line": 1075
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Whale accumulation",
+      "source_line": 1076
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Whale distribution",
+      "source_line": 1077
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Smart-money holdings",
+      "source_line": 1078
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Long-term holder percentage",
+      "source_line": 1079
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Retail holder percentage",
+      "source_line": 1080
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Dormant supply",
+      "source_line": 1081
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Insider transfers",
+      "source_line": 1082
+    },
+    {
+      "family": "HOLDER_DISTRIBUTION",
+      "display_name": "Unlock-to-volume ratio",
+      "source_line": 1083
+    }
+  ]
+}

@@ -1,0 +1,1394 @@
+"""Canonical causal feature pipeline for crypto spot research."""
+
+from __future__ import annotations
+
+import math
+import os
+import tempfile
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from datetime import timedelta
+from decimal import Decimal
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from core.contracts import IntelligenceRecord
+from data.market_data import OHLCV_COLUMNS, validate_ohlcv
+from utils.common import atomic_write_json, stable_hash
+
+EPSILON = 1e-12
+_PARAMETERIZED_FEATURE_CACHE: dict[str, pd.Series] = {}
+_PARAMETERIZED_FEATURE_CACHE_LIMIT = 512
+
+
+def _smoothing_period(period: int | float | Decimal) -> tuple[float, int]:
+    value = float(period)
+    if not math.isfinite(value) or value < 1:
+        raise ValueError("period must be a finite value of at least one")
+    return value, int(math.ceil(value))
+
+
+def sma(series: pd.Series, period: int) -> pd.Series:
+    if not isinstance(period, int):
+        raise TypeError("SMA windows are integer-only")
+    return series.rolling(period, min_periods=period).mean()
+
+
+def wma(series: pd.Series, period: int) -> pd.Series:
+    if not isinstance(period, int):
+        raise TypeError("WMA windows are integer-only")
+    if period < 1:
+        raise ValueError("WMA period must be positive")
+    weights = np.arange(1, period + 1, dtype=float)
+    denominator = float(weights.sum())
+    return series.rolling(period, min_periods=period).apply(
+        lambda values: float(np.dot(values, weights) / denominator),
+        raw=True,
+    )
+
+
+def vwma(price: pd.Series, volume: pd.Series, period: int) -> pd.Series:
+    if not isinstance(period, int):
+        raise TypeError("VWMA windows are integer-only")
+    denominator = volume.rolling(period, min_periods=period).sum()
+    return (price * volume).rolling(period, min_periods=period).sum() / denominator.replace(
+        0, np.nan
+    )
+
+
+def ema(series: pd.Series, period: int | float | Decimal) -> pd.Series:
+    value, warmup = _smoothing_period(period)
+    return series.ewm(span=value, adjust=False, min_periods=warmup).mean()
+
+
+def dema(series: pd.Series, period: int | float | Decimal) -> pd.Series:
+    first = ema(series, period)
+    return 2.0 * first - ema(first, period)
+
+
+def tema(series: pd.Series, period: int | float | Decimal) -> pd.Series:
+    first = ema(series, period)
+    second = ema(first, period)
+    third = ema(second, period)
+    return 3.0 * first - 3.0 * second + third
+
+
+def hma(series: pd.Series, period: int) -> pd.Series:
+    if not isinstance(period, int):
+        raise TypeError("HMA windows are integer-only")
+    if period < 2:
+        raise ValueError("HMA period must be at least two")
+    half = max(1, period // 2)
+    root = max(1, int(math.sqrt(period)))
+    return wma(2.0 * wma(series, half) - wma(series, period), root)
+
+
+def kama(
+    series: pd.Series,
+    period: int = 10,
+    *,
+    fast: int = 2,
+    slow: int = 30,
+) -> pd.Series:
+    if not all(isinstance(value, int) for value in (period, fast, slow)):
+        raise TypeError("KAMA periods are integer-only")
+    change = series.diff(period).abs()
+    volatility = series.diff().abs().rolling(period, min_periods=period).sum()
+    efficiency = change / volatility.replace(0, np.nan)
+    fast_alpha = 2.0 / (fast + 1.0)
+    slow_alpha = 2.0 / (slow + 1.0)
+    smoothing = (efficiency * (fast_alpha - slow_alpha) + slow_alpha).pow(2)
+    values = series.to_numpy(dtype=float)
+    coefficients = smoothing.to_numpy(dtype=float)
+    output = np.full(len(series), np.nan)
+    if len(series) > period:
+        output[period] = float(np.mean(values[: period + 1]))
+        for index in range(period + 1, len(series)):
+            if not np.isfinite(coefficients[index]):
+                continue
+            previous = output[index - 1]
+            if not np.isfinite(previous):
+                previous = values[index - 1]
+            output[index] = previous + coefficients[index] * (values[index] - previous)
+    return pd.Series(output, index=series.index)
+
+
+def wilder(series: pd.Series, period: int | float | Decimal) -> pd.Series:
+    value, warmup = _smoothing_period(period)
+    return series.ewm(alpha=1.0 / value, adjust=False, min_periods=warmup).mean()
+
+
+def true_range(data: pd.DataFrame) -> pd.Series:
+    previous_close = data["close"].shift(1)
+    return pd.concat(
+        (
+            data["high"] - data["low"],
+            (data["high"] - previous_close).abs(),
+            (data["low"] - previous_close).abs(),
+        ),
+        axis=1,
+    ).max(axis=1)
+
+
+def atr(
+    data: pd.DataFrame, period: int | float | Decimal = 14
+) -> pd.Series:
+    return wilder(true_range(data), period)
+
+
+def rsi(
+    series: pd.Series, period: int | float | Decimal = 14
+) -> pd.Series:
+    delta = series.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    average_gain = wilder(gains, period)
+    average_loss = wilder(losses, period)
+    ratio = average_gain / average_loss.replace(0, np.nan)
+    result = 100.0 - 100.0 / (1.0 + ratio)
+    result = result.mask((average_gain == 0) & (average_loss == 0), 50.0)
+    result = result.mask((average_loss == 0) & (average_gain > 0), 100.0)
+    return result
+
+
+def rolling_zscore(series: pd.Series, period: int) -> pd.Series:
+    mean = series.rolling(period, min_periods=period).mean()
+    std = series.rolling(period, min_periods=period).std(ddof=0)
+    return (series - mean) / std.replace(0, np.nan)
+
+
+def parameterized_feature_series(
+    data: pd.DataFrame,
+    feature_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    market: str | None = None,
+    timeframe: str | None = None,
+    provider_context_hash: str = "",
+    cache_dir: Path | None = None,
+) -> pd.Series:
+    """Canonical parameterized feature calculation with deterministic caching."""
+
+    frame = validate_ohlcv(
+        data,
+        timeframe=timeframe or data.attrs.get("timeframe"),
+        closed_candles_only=bool(timeframe or data.attrs.get("timeframe")),
+    )
+    data_hash = sha256(
+        pd.util.hash_pandas_object(
+            frame.loc[:, list(OHLCV_COLUMNS)],
+            index=True,
+        ).values.tobytes()
+    ).hexdigest()
+    canonical = {
+        key: (
+            format(value, "f")
+            if isinstance(value, Decimal)
+            else str(value)
+        )
+        for key, value in sorted(parameters.items())
+    }
+    key_material = {
+        "data_hash": data_hash,
+        "market": market or frame.attrs.get("market"),
+        "timeframe": timeframe or frame.attrs.get("timeframe"),
+        "feature_id": feature_id,
+        "feature_version": "1.0.0",
+        "parameters": canonical,
+        "provider_context_hash": provider_context_hash,
+    }
+    cache_key = stable_hash(key_material, length=64)
+    cached = _PARAMETERIZED_FEATURE_CACHE.get(cache_key)
+    if cached is not None and cached.index.equals(frame.index):
+        result = cached.copy()
+        result.attrs["feature_cache"] = "MEMORY_HIT"
+        result.attrs["feature_cache_key"] = cache_key
+        return result
+    persisted = cache_dir / f"{cache_key}.parquet" if cache_dir else None
+    if persisted is not None and persisted.is_file():
+        loaded = pd.read_parquet(persisted)
+        result = loaded["value"]
+        result.index = pd.DatetimeIndex(loaded.index)
+        if result.index.equals(frame.index):
+            _PARAMETERIZED_FEATURE_CACHE[cache_key] = result.copy()
+            result.attrs["feature_cache"] = "PERSISTED_HIT"
+            result.attrs["feature_cache_key"] = cache_key
+            return result
+    if feature_id == "rsi":
+        result = rsi(frame["close"], parameters["period"])
+    elif feature_id == "ema":
+        result = ema(frame["close"], parameters["period"])
+    elif feature_id == "atr":
+        result = atr(frame, parameters["period"])
+    elif feature_id == "bollinger_lower":
+        period = int(parameters["period"])
+        multiplier = float(parameters["multiplier"])
+        center = sma(frame["close"], period)
+        deviation = frame["close"].rolling(
+            period,
+            min_periods=period,
+        ).std(ddof=0)
+        result = center - multiplier * deviation
+    else:
+        raise KeyError(f"unsupported parameterized feature: {feature_id}")
+    result = result.rename(feature_id)
+    result.attrs["feature_cache"] = "MISS"
+    result.attrs["feature_cache_key"] = cache_key
+    if len(_PARAMETERIZED_FEATURE_CACHE) >= _PARAMETERIZED_FEATURE_CACHE_LIMIT:
+        _PARAMETERIZED_FEATURE_CACHE.pop(next(iter(_PARAMETERIZED_FEATURE_CACHE)))
+    _PARAMETERIZED_FEATURE_CACHE[cache_key] = result.copy()
+    if persisted is not None:
+        persisted.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=persisted.parent,
+            prefix=f".{cache_key}.",
+            suffix=".parquet",
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            result.to_frame("value").to_parquet(temporary)
+            try:
+                os.replace(temporary, persisted)
+            except PermissionError:
+                # Parallel process workers can finish the same deterministic
+                # feature simultaneously.  On Windows replacing the file can
+                # fail while the winning worker's completed parquet is open.
+                if not persisted.is_file():
+                    raise
+        finally:
+            temporary.unlink(missing_ok=True)
+        manifest_path = persisted.with_suffix(".manifest.json")
+        try:
+            atomic_write_json(
+                manifest_path,
+                key_material | {"cache_key": cache_key, "rows": len(result)},
+            )
+        except PermissionError:
+            if not manifest_path.is_file():
+                raise
+    return result
+
+
+def return_features(
+    data: pd.DataFrame,
+    benchmark: pd.DataFrame | None = None,
+    *,
+    maximum_benchmark_age: timedelta = timedelta(days=3),
+) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    close = data["close"]
+    output["typical_price"] = (data["high"] + data["low"] + close) / 3.0
+    output["median_price"] = (data["high"] + data["low"]) / 2.0
+    output["weighted_close"] = (data["high"] + data["low"] + 2.0 * close) / 4.0
+    output["ohlc_average"] = data[["open", "high", "low", "close"]].mean(axis=1)
+    output["absolute_return"] = close.diff()
+    output["percentage_return"] = close.pct_change()
+    output["log_return"] = np.log(close).diff()
+    output["cumulative_return"] = (1.0 + output["percentage_return"]).cumprod() - 1.0
+    for period in (7, 20, 30):
+        output[f"rolling_return_{period}"] = close.pct_change(period)
+    realized = output["log_return"].rolling(20, min_periods=20).std(ddof=0)
+    output["volatility_adjusted_return_20"] = (
+        output["percentage_return"] / realized.replace(0, np.nan)
+    )
+    if benchmark is not None:
+        benchmark_close, _ = _causal_benchmark_close(
+            data.index,
+            benchmark,
+            maximum_age=maximum_benchmark_age,
+        )
+        benchmark_return = benchmark_close.pct_change()
+        output["benchmark_relative_return"] = output["percentage_return"] - benchmark_return
+        covariance = output["percentage_return"].rolling(60).cov(benchmark_return)
+        variance = benchmark_return.rolling(60).var(ddof=1)
+        output["rolling_beta_60"] = covariance / variance.replace(0, np.nan)
+        output["rolling_alpha_60"] = (
+            output["percentage_return"].rolling(60).mean()
+            - output["rolling_beta_60"] * benchmark_return.rolling(60).mean()
+        )
+    else:
+        output["benchmark_relative_return"] = np.nan
+        output["rolling_beta_60"] = np.nan
+        output["rolling_alpha_60"] = np.nan
+    return output
+
+
+def trend_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    for period in (20, 50, 200):
+        output[f"sma_{period}"] = sma(data["close"], period)
+        output[f"ema_{period}"] = ema(data["close"], period)
+    output["wma_20"] = wma(data["close"], 20)
+    output["vwma_20"] = vwma(data["close"], data["volume"], 20)
+    output["dema_20"] = dema(data["close"], 20)
+    output["tema_20"] = tema(data["close"], 20)
+    output["hma_20"] = hma(data["close"], 20)
+    output["kama_10"] = kama(data["close"], 10)
+    output["ema_50_slope"] = output["ema_50"].pct_change(5) / 5.0
+    output["distance_ema_20"] = data["close"] / output["ema_20"] - 1.0
+    output["distance_ema_50"] = data["close"] / output["ema_50"] - 1.0
+    for period in (20, 55):
+        output[f"donchian_high_{period}"] = data["high"].rolling(period).max().shift(1)
+        output[f"donchian_low_{period}"] = data["low"].rolling(period).min().shift(1)
+
+    period = 14
+    upward = data["high"].diff()
+    downward = -data["low"].diff()
+    plus_dm = upward.where((upward > downward) & (upward > 0), 0.0)
+    minus_dm = downward.where((downward > upward) & (downward > 0), 0.0)
+    atr14 = atr(data, period)
+    plus_di = 100.0 * wilder(plus_dm, period) / atr14.replace(0, np.nan)
+    minus_di = 100.0 * wilder(minus_dm, period) / atr14.replace(0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    output["plus_di_14"] = plus_di
+    output["minus_di_14"] = minus_di
+    output["adx_14"] = wilder(dx, period)
+
+    def aroon_position(values: np.ndarray, high: bool) -> float:
+        position = int(np.argmax(values) if high else np.argmin(values))
+        return 100.0 * position / max(1, len(values) - 1)
+
+    output["aroon_up_25"] = data["high"].rolling(25).apply(
+        lambda values: aroon_position(values, True),
+        raw=True,
+    )
+    output["aroon_down_25"] = data["low"].rolling(25).apply(
+        lambda values: aroon_position(values, False),
+        raw=True,
+    )
+    total_range = true_range(data).rolling(period).sum()
+    price_range = data["high"].rolling(period).max() - data["low"].rolling(period).min()
+    output["choppiness_14"] = (
+        100.0 * np.log10(total_range / price_range.replace(0, np.nan)) / np.log10(period)
+    )
+    line, direction = supertrend(data, period=10, multiplier=3.0)
+    output["supertrend"] = line
+    output["supertrend_direction"] = direction
+    return output
+
+
+def supertrend(
+    data: pd.DataFrame,
+    *,
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> tuple[pd.Series, pd.Series]:
+    average_range = atr(data, period)
+    midpoint = (data["high"] + data["low"]) / 2.0
+    upper = midpoint + multiplier * average_range
+    lower = midpoint - multiplier * average_range
+    final_upper = upper.copy()
+    final_lower = lower.copy()
+    direction = pd.Series(1, index=data.index, dtype=np.int8)
+    line = pd.Series(np.nan, index=data.index, dtype=float)
+    for index in range(1, len(data)):
+        previous = index - 1
+        if np.isnan(average_range.iloc[index]):
+            continue
+        if np.isnan(final_upper.iloc[previous]) or upper.iloc[index] < final_upper.iloc[previous] or data["close"].iloc[previous] > final_upper.iloc[previous]:
+            final_upper.iloc[index] = upper.iloc[index]
+        else:
+            final_upper.iloc[index] = final_upper.iloc[previous]
+        if np.isnan(final_lower.iloc[previous]) or lower.iloc[index] > final_lower.iloc[previous] or data["close"].iloc[previous] < final_lower.iloc[previous]:
+            final_lower.iloc[index] = lower.iloc[index]
+        else:
+            final_lower.iloc[index] = final_lower.iloc[previous]
+        if direction.iloc[previous] < 0 and data["close"].iloc[index] > final_upper.iloc[previous]:
+            direction.iloc[index] = 1
+        elif direction.iloc[previous] > 0 and data["close"].iloc[index] < final_lower.iloc[previous]:
+            direction.iloc[index] = -1
+        else:
+            direction.iloc[index] = direction.iloc[previous]
+        line.iloc[index] = (
+            final_lower.iloc[index] if direction.iloc[index] > 0 else final_upper.iloc[index]
+        )
+    return line, direction
+
+
+def _streak(close: pd.Series) -> pd.Series:
+    values = close.to_numpy(dtype=float)
+    result = np.zeros(len(values), dtype=float)
+    for index in range(1, len(values)):
+        if values[index] > values[index - 1]:
+            result[index] = max(1.0, result[index - 1] + 1.0)
+        elif values[index] < values[index - 1]:
+            result[index] = min(-1.0, result[index - 1] - 1.0)
+    return pd.Series(result, index=close.index)
+
+
+def momentum_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    close = data["close"]
+    output["rsi_14"] = rsi(close, 14)
+    rsi_min = output["rsi_14"].rolling(14).min()
+    rsi_max = output["rsi_14"].rolling(14).max()
+    output["stoch_rsi_14"] = 100.0 * (output["rsi_14"] - rsi_min) / (
+        rsi_max - rsi_min
+    ).replace(0, np.nan)
+    fast, slow = ema(close, 12), ema(close, 26)
+    output["macd"] = fast - slow
+    output["macd_signal"] = ema(output["macd"], 9)
+    output["macd_histogram"] = output["macd"] - output["macd_signal"]
+    output["ppo"] = 100.0 * (fast - slow) / slow.replace(0, np.nan)
+    output["roc_12"] = close.pct_change(12) * 100.0
+    typical = (data["high"] + data["low"] + close) / 3.0
+    typical_mean = typical.rolling(20).mean()
+    mean_deviation = typical.rolling(20).apply(
+        lambda values: float(np.mean(np.abs(values - np.mean(values)))),
+        raw=True,
+    )
+    output["cci_20"] = (typical - typical_mean) / (0.015 * mean_deviation).replace(0, np.nan)
+    highest = data["high"].rolling(14).max()
+    lowest = data["low"].rolling(14).min()
+    output["williams_r_14"] = -100.0 * (highest - close) / (
+        highest - lowest
+    ).replace(0, np.nan)
+    raw_flow = typical * data["volume"]
+    direction = np.sign(typical.diff()).fillna(0)
+    positive_flow = raw_flow.where(direction > 0, 0.0).rolling(14).sum()
+    negative_flow = raw_flow.where(direction < 0, 0.0).rolling(14).sum()
+    money_ratio = positive_flow / negative_flow.replace(0, np.nan)
+    output["mfi_14"] = 100.0 - 100.0 / (1.0 + money_ratio)
+    streak_rsi = rsi(_streak(close), 2)
+    change = close.pct_change()
+    percent_rank = change.rolling(100).apply(
+        lambda values: 100.0 * np.mean(values[:-1] < values[-1]),
+        raw=True,
+    )
+    output["connors_rsi"] = (rsi(close, 3) + streak_rsi + percent_rank) / 3.0
+    return output
+
+
+def volatility_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    tr = true_range(data)
+    atr14 = atr(data, 14)
+    output["true_range"] = tr
+    output["atr_14"] = atr14
+    output["normalized_atr_14"] = atr14 / data["close"]
+    returns = np.log(data["close"]).diff()
+    output["rolling_volatility_20"] = returns.rolling(20).std(ddof=0)
+    middle = sma(data["close"], 20)
+    standard = data["close"].rolling(20).std(ddof=0)
+    output["bollinger_middle"] = middle
+    output["bollinger_upper"] = middle + 2.0 * standard
+    output["bollinger_lower"] = middle - 2.0 * standard
+    output["bollinger_width"] = (
+        output["bollinger_upper"] - output["bollinger_lower"]
+    ) / middle
+    keltner_middle = ema(data["close"], 20)
+    output["keltner_middle"] = keltner_middle
+    output["keltner_upper"] = keltner_middle + 2.0 * atr(data, 10)
+    output["keltner_lower"] = keltner_middle - 2.0 * atr(data, 10)
+
+    log_hl = np.log(data["high"] / data["low"])
+    log_co = np.log(data["close"] / data["open"])
+    log_ho = np.log(data["high"] / data["open"])
+    log_lo = np.log(data["low"] / data["open"])
+    output["parkinson_volatility_20"] = np.sqrt(
+        log_hl.pow(2).rolling(20).mean() / (4.0 * np.log(2.0))
+    )
+    garman_klass = 0.5 * log_hl.pow(2) - (2.0 * np.log(2.0) - 1.0) * log_co.pow(2)
+    output["garman_klass_volatility_20"] = np.sqrt(
+        garman_klass.clip(lower=0).rolling(20).mean()
+    )
+    rogers_satchell = log_ho * np.log(data["high"] / data["close"]) + log_lo * np.log(
+        data["low"] / data["close"]
+    )
+    output["rogers_satchell_volatility_20"] = np.sqrt(
+        rogers_satchell.clip(lower=0).rolling(20).mean()
+    )
+    overnight = np.log(data["open"] / data["close"].shift(1))
+    close_open = np.log(data["close"] / data["open"])
+    k = 0.34 / (1.34 + (20 + 1) / (20 - 1))
+    yz_variance = (
+        overnight.rolling(20).var(ddof=1)
+        + k * close_open.rolling(20).var(ddof=1)
+        + (1.0 - k) * rogers_satchell.rolling(20).mean()
+    )
+    output["yang_zhang_volatility_20"] = np.sqrt(yz_variance.clip(lower=0))
+    output["ewma_volatility"] = returns.ewm(alpha=0.06, adjust=False).std(bias=False)
+    return output
+
+
+def optional_garch_forecast(close: pd.Series) -> pd.Series:
+    output = pd.Series(np.nan, index=close.index, name="garch_forecast")
+    clean_returns = (100.0 * np.log(close).diff()).dropna()
+    if len(clean_returns) < 100:
+        return output
+    try:
+        from arch import arch_model
+
+        model = arch_model(
+            clean_returns,
+            mean="Zero",
+            vol="GARCH",
+            p=1,
+            q=1,
+            rescale=False,
+        )
+        fit = model.fit(disp="off", show_warning=False)
+        forecast = fit.forecast(horizon=1, reindex=True).variance.iloc[:, 0]
+        output.loc[forecast.index] = np.sqrt(forecast) / 100.0
+    except (ImportError, ValueError, ArithmeticError):
+        pass
+    return output
+
+
+def volume_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    volume_mean = data["volume"].rolling(20).mean()
+    output["volume_average_20"] = volume_mean
+    output["volume_zscore_20"] = rolling_zscore(data["volume"], 20)
+    output["relative_volume_20"] = data["volume"] / volume_mean.replace(0, np.nan)
+    output["obv"] = (
+        np.sign(data["close"].diff()).fillna(0.0) * data["volume"]
+    ).cumsum()
+    money_flow_multiplier = (
+        (data["close"] - data["low"]) - (data["high"] - data["close"])
+    ) / (data["high"] - data["low"]).replace(0, np.nan)
+    output["chaikin_money_flow_20"] = (
+        (money_flow_multiplier * data["volume"]).rolling(20).sum()
+        / data["volume"].rolling(20).sum().replace(0, np.nan)
+    )
+    typical = (data["high"] + data["low"] + data["close"]) / 3.0
+    output["vwap_20"] = (
+        (typical * data["volume"]).rolling(20).sum()
+        / data["volume"].rolling(20).sum().replace(0, np.nan)
+    )
+    output["anchored_vwap"] = anchored_vwap(data)
+    return output
+
+
+def anchored_vwap(
+    data: pd.DataFrame,
+    anchor: pd.Timestamp | str | None = None,
+) -> pd.Series:
+    """Causal VWAP from an explicit or first-observation anchor."""
+
+    if data.empty:
+        return pd.Series(dtype=float, index=data.index, name="anchored_vwap")
+    start = pd.Timestamp(anchor) if anchor is not None else data.index[0]
+    if start.tzinfo is None and data.index.tz is not None:
+        start = start.tz_localize(data.index.tz)
+    selected = data.index >= start
+    typical = (data["high"] + data["low"] + data["close"]) / 3.0
+    numerator = (typical.where(selected) * data["volume"].where(selected)).cumsum()
+    denominator = data["volume"].where(selected).cumsum()
+    return (numerator / denominator.replace(0, np.nan)).rename("anchored_vwap")
+
+
+def candle_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    candle_range = (data["high"] - data["low"]).replace(0, np.nan)
+    body = (data["close"] - data["open"]).abs()
+    upper = data["high"] - data[["open", "close"]].max(axis=1)
+    lower = data[["open", "close"]].min(axis=1) - data["low"]
+    bullish = data["close"] > data["open"]
+    bearish = data["close"] < data["open"]
+    output["candle_body_fraction"] = body / candle_range
+    output["upper_wick_fraction"] = upper / candle_range
+    output["lower_wick_fraction"] = lower / candle_range
+    output["doji"] = output["candle_body_fraction"] <= 0.10
+    output["spinning_top"] = (
+        output["candle_body_fraction"].between(0.10, 0.30)
+        & (upper >= body)
+        & (lower >= body)
+    )
+    output["high_wave"] = (
+        output["candle_body_fraction"] <= 0.30
+    ) & ((upper + lower) >= 0.70 * candle_range)
+    output["hammer"] = (lower >= 2.0 * body) & (upper <= body) & (body > 0)
+    output["inverted_hammer"] = (
+        bullish & (upper >= 2.0 * body) & (lower <= body) & (body > 0)
+    )
+    output["shooting_star"] = (upper >= 2.0 * body) & (lower <= body) & (body > 0)
+    output["hanging_man"] = (
+        bearish & (lower >= 2.0 * body) & (upper <= body) & (body > 0)
+    )
+    output["bullish_engulfing"] = (
+        bullish
+        & bearish.shift(1, fill_value=False)
+        & (data["open"] <= data["close"].shift(1))
+        & (data["close"] >= data["open"].shift(1))
+    )
+    output["bearish_engulfing"] = (
+        bearish
+        & bullish.shift(1, fill_value=False)
+        & (data["open"] >= data["close"].shift(1))
+        & (data["close"] <= data["open"].shift(1))
+    )
+    output["bullish_harami"] = (
+        bullish
+        & bearish.shift(1, fill_value=False)
+        & (data["open"] >= data["close"].shift(1))
+        & (data["close"] <= data["open"].shift(1))
+    )
+    output["bearish_harami"] = (
+        bearish
+        & bullish.shift(1, fill_value=False)
+        & (data["open"] <= data["close"].shift(1))
+        & (data["close"] >= data["open"].shift(1))
+    )
+    output["inside_bar"] = (
+        (data["high"] < data["high"].shift(1))
+        & (data["low"] > data["low"].shift(1))
+    )
+    output["outside_bar"] = (
+        (data["high"] > data["high"].shift(1))
+        & (data["low"] < data["low"].shift(1))
+    )
+    output["morning_star_proxy"] = (
+        bearish.shift(2, fill_value=False)
+        & (body.shift(1) < body.shift(2) * 0.5)
+        & bullish
+        & (data["close"] > (data["open"].shift(2) + data["close"].shift(2)) / 2.0)
+    )
+    output["evening_star_proxy"] = (
+        bullish.shift(2, fill_value=False)
+        & (body.shift(1) < body.shift(2) * 0.5)
+        & bearish
+        & (data["close"] < (data["open"].shift(2) + data["close"].shift(2)) / 2.0)
+    )
+    output["three_white_soldiers"] = (
+        bullish
+        & bullish.shift(1, fill_value=False)
+        & bullish.shift(2, fill_value=False)
+        & (data["close"] > data["close"].shift(1))
+        & (data["close"].shift(1) > data["close"].shift(2))
+    )
+    output["three_black_crows"] = (
+        bearish
+        & bearish.shift(1, fill_value=False)
+        & bearish.shift(2, fill_value=False)
+        & (data["close"] < data["close"].shift(1))
+        & (data["close"].shift(1) < data["close"].shift(2))
+    )
+    output["bullish_pin_bar"] = bullish & (lower >= 2.5 * body) & (upper <= body)
+    output["bearish_pin_bar"] = bearish & (upper >= 2.5 * body) & (lower <= body)
+    output["bullish_marubozu"] = bullish & (
+        output["candle_body_fraction"] >= 0.90
+    )
+    output["bearish_marubozu"] = bearish & (
+        output["candle_body_fraction"] >= 0.90
+    )
+    output["rising_three_methods_proxy"] = (
+        bullish
+        & bullish.shift(4, fill_value=False)
+        & (data["close"] > data["close"].shift(4))
+        & bearish.shift(1, fill_value=False)
+        & bearish.shift(2, fill_value=False)
+        & bearish.shift(3, fill_value=False)
+    )
+    output["falling_three_methods_proxy"] = (
+        bearish
+        & bearish.shift(4, fill_value=False)
+        & (data["close"] < data["close"].shift(4))
+        & bullish.shift(1, fill_value=False)
+        & bullish.shift(2, fill_value=False)
+        & bullish.shift(3, fill_value=False)
+    )
+    return output
+
+
+def confirmed_fractals(
+    data: pd.DataFrame,
+    *,
+    left: int = 2,
+    right: int = 2,
+) -> pd.DataFrame:
+    if left < 1 or right < 1:
+        raise ValueError("fractal left and right lags must be positive")
+    output = pd.DataFrame(index=data.index)
+    window = left + right + 1
+    raw_high = data["high"].rolling(window, center=True).apply(
+        lambda values: float(np.argmax(values) == left),
+        raw=True,
+    ).fillna(0).astype(bool)
+    raw_low = data["low"].rolling(window, center=True).apply(
+        lambda values: float(np.argmin(values) == left),
+        raw=True,
+    ).fillna(0).astype(bool)
+    # A pivot at t becomes knowable only at t + right.
+    confirmed_high = raw_high.shift(right, fill_value=False)
+    confirmed_low = raw_low.shift(right, fill_value=False)
+    output["confirmed_fractal_high"] = confirmed_high
+    output["confirmed_fractal_low"] = confirmed_low
+    output["confirmed_fractal_high_price"] = data["high"].where(raw_high).shift(right)
+    output["confirmed_fractal_low_price"] = data["low"].where(raw_low).shift(right)
+    timestamps = pd.Series(data.index, index=data.index)
+    pivot_timestamp = timestamps.shift(right)
+    output["fractal_high_pivot_timestamp"] = pivot_timestamp.where(confirmed_high)
+    output["fractal_low_pivot_timestamp"] = pivot_timestamp.where(confirmed_low)
+    output["fractal_high_confirmation_timestamp"] = timestamps.where(confirmed_high)
+    output["fractal_low_confirmation_timestamp"] = timestamps.where(confirmed_low)
+    return output
+
+
+def fractal_family_features(data: pd.DataFrame) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    for window in (3, 5, 7):
+        side = (window - 1) // 2
+        frame = confirmed_fractals(data, left=side, right=side)
+        for column in frame:
+            output[f"fractal_{window}_{column}"] = frame[column]
+    return output
+
+
+def market_structure_features(
+    data: pd.DataFrame,
+    *,
+    fractal_left: int = 2,
+    fractal_right: int = 2,
+) -> pd.DataFrame:
+    output = confirmed_fractals(
+        data,
+        left=fractal_left,
+        right=fractal_right,
+    )
+    last_high = output["confirmed_fractal_high_price"].ffill()
+    last_low = output["confirmed_fractal_low_price"].ffill()
+    previous_high = last_high.shift(1)
+    previous_low = last_low.shift(1)
+    confirmed_high = output["confirmed_fractal_high"]
+    confirmed_low = output["confirmed_fractal_low"]
+    event_high = output["confirmed_fractal_high_price"]
+    event_low = output["confirmed_fractal_low_price"]
+    output["higher_high"] = confirmed_high & (event_high > previous_high)
+    output["lower_high"] = confirmed_high & (event_high < previous_high)
+    output["higher_low"] = confirmed_low & (event_low > previous_low)
+    output["lower_low"] = confirmed_low & (event_low < previous_low)
+    close = data["close"]
+    output["bullish_bos"] = (close > previous_high) & (close.shift(1) <= previous_high)
+    output["bearish_bos"] = (close < previous_low) & (close.shift(1) >= previous_low)
+    state = np.zeros(len(data), dtype=np.int8)
+    bullish_choch = np.zeros(len(data), dtype=bool)
+    bearish_choch = np.zeros(len(data), dtype=bool)
+    for index in range(1, len(data)):
+        state[index] = state[index - 1]
+        if bool(output["bullish_bos"].iloc[index]):
+            bullish_choch[index] = state[index - 1] < 0
+            state[index] = 1
+        elif bool(output["bearish_bos"].iloc[index]):
+            bearish_choch[index] = state[index - 1] > 0
+            state[index] = -1
+    output["bullish_choch"] = bullish_choch
+    output["bearish_choch"] = bearish_choch
+    output["swing_trend"] = state
+    output["bullish_liquidity_sweep"] = (
+        (data["low"] < previous_low)
+        & (data["close"] > previous_low)
+        & (data["open"] >= previous_low)
+    )
+    output["bearish_liquidity_sweep"] = (
+        (data["high"] > previous_high)
+        & (data["close"] < previous_high)
+        & (data["open"] <= previous_high)
+    )
+    average_range = atr(data, 14)
+    output["distance_to_last_fractal_high_atr"] = (
+        last_high - close
+    ) / average_range.replace(0, np.nan)
+    output["distance_to_last_fractal_low_atr"] = (
+        close - last_low
+    ) / average_range.replace(0, np.nan)
+    output["distance_to_last_fractal_high_price"] = last_high - close
+    output["distance_to_last_fractal_low_price"] = close - last_low
+    output["distance_to_last_fractal_high_percent"] = (
+        last_high / close.replace(0, np.nan) - 1.0
+    )
+    output["distance_to_last_fractal_low_percent"] = (
+        close / last_low.replace(0, np.nan) - 1.0
+    )
+
+    def bars_since(events: pd.Series) -> pd.Series:
+        positions = np.arange(len(events), dtype=float)
+        latest = pd.Series(
+            np.where(events.to_numpy(dtype=bool), positions, np.nan),
+            index=events.index,
+        ).ffill()
+        return pd.Series(positions, index=events.index) - latest
+
+    output["bars_since_fractal_high"] = bars_since(confirmed_high)
+    output["bars_since_fractal_low"] = bars_since(confirmed_low)
+    output["fractal_density_50"] = (
+        confirmed_high.astype(int) + confirmed_low.astype(int)
+    ).rolling(50, min_periods=1).sum() / 50.0
+    opposite = last_low.where(confirmed_high, last_high.where(confirmed_low))
+    event_level = event_high.where(confirmed_high, event_low.where(confirmed_low))
+    output["fractal_amplitude_atr"] = (
+        (event_level - opposite).abs() / average_range.replace(0, np.nan)
+    ).ffill()
+    high_events = output["confirmed_fractal_high_price"].dropna()
+    low_events = output["confirmed_fractal_low_price"].dropna()
+    output["equal_highs"] = False
+    output["equal_lows"] = False
+    for events, name in ((high_events, "equal_highs"), (low_events, "equal_lows")):
+        previous: float | None = None
+        for timestamp, value in events.items():
+            if previous is not None:
+                tolerance = float(average_range.loc[timestamp]) * 0.10
+                output.loc[timestamp, name] = abs(float(value) - previous) <= tolerance
+            previous = float(value)
+    body = (data["close"] - data["open"]).abs()
+    output["bullish_displacement"] = (data["close"] > data["open"]) & (
+        body > 1.25 * average_range
+    )
+    output["bearish_displacement"] = (data["close"] < data["open"]) & (
+        body > 1.25 * average_range
+    )
+    output["bullish_fvg"] = data["low"] > data["high"].shift(2)
+    output["bearish_fvg"] = data["high"] < data["low"].shift(2)
+    output["bullish_fvg_lower"] = data["high"].shift(2).where(output["bullish_fvg"])
+    output["bullish_fvg_upper"] = data["low"].where(output["bullish_fvg"])
+    output["bearish_fvg_lower"] = data["high"].where(output["bearish_fvg"])
+    output["bearish_fvg_upper"] = data["low"].shift(2).where(output["bearish_fvg"])
+    output["bullish_order_block_proxy"] = (
+        output["bullish_bos"]
+        & output["bullish_displacement"]
+        & (data["close"].shift(1) < data["open"].shift(1))
+    )
+    output["bearish_order_block_proxy"] = (
+        output["bearish_bos"]
+        & output["bearish_displacement"]
+        & (data["close"].shift(1) > data["open"].shift(1))
+    )
+    range_high = data["high"].rolling(50).max()
+    range_low = data["low"].rolling(50).min()
+    output["range_position_50"] = (close - range_low) / (
+        range_high - range_low
+    ).replace(0, np.nan)
+    output["discount_zone"] = output["range_position_50"] < 0.5
+    output["premium_zone"] = output["range_position_50"] > 0.5
+    output["fractal_range_position"] = (
+        (close - last_low) / (last_high - last_low).replace(0, np.nan)
+    )
+    output["fractal_trend_score"] = (
+        output["higher_high"].astype(int)
+        + output["higher_low"].astype(int)
+        - output["lower_high"].astype(int)
+        - output["lower_low"].astype(int)
+    ).rolling(20, min_periods=1).sum()
+    output["fractal_high_breakout"] = output["bullish_bos"]
+    output["fractal_low_breakdown"] = output["bearish_bos"]
+    output["bullish_fractal_sweep"] = output["bullish_liquidity_sweep"]
+    output["bearish_fractal_sweep"] = output["bearish_liquidity_sweep"]
+    relative_volume = data["volume"] / data["volume"].rolling(20).mean().replace(0, np.nan)
+    output["fractal_breakout_volume_confirmation"] = (
+        output["fractal_high_breakout"] & (relative_volume > 1.0)
+    )
+    if "open_interest" in data:
+        oi_change = pd.to_numeric(data["open_interest"], errors="coerce").pct_change()
+        output["fractal_breakout_open_interest_confirmation"] = (
+            output["fractal_high_breakout"] & (oi_change > 0)
+        )
+    else:
+        output["fractal_breakout_open_interest_confirmation"] = np.nan
+    output["fractal_significance_score"] = (
+        output["fractal_amplitude_atr"].clip(lower=0, upper=5) / 5.0
+        + relative_volume.clip(lower=0, upper=3).fillna(0) / 3.0
+    ) / 2.0
+    return output
+
+
+def multi_timeframe_fractal_alignment(
+    base_index: pd.DatetimeIndex,
+    higher_timeframes: Mapping[str, pd.DataFrame] | None,
+) -> pd.DataFrame:
+    """Backward-only alignment of confirmed higher-timeframe fractal state."""
+
+    output = pd.DataFrame(index=base_index)
+    states: list[pd.Series] = []
+    for timeframe, source in sorted((higher_timeframes or {}).items()):
+        source.attrs.setdefault("timeframe", timeframe)
+        frame = validate_ohlcv(
+            source,
+            timeframe=timeframe,
+            closed_candles_only=True,
+        )
+        fractals = confirmed_fractals(frame, left=2, right=2)
+        state = pd.Series(np.nan, index=frame.index, dtype=float)
+        state.loc[fractals["confirmed_fractal_low"]] = 1.0
+        state.loc[fractals["confirmed_fractal_high"]] = -1.0
+        aligned = state.ffill().reindex(base_index, method="ffill")
+        output[f"fractal_alignment_{timeframe}"] = aligned
+        output[f"fractal_source_timestamp_{timeframe}"] = pd.Series(
+            frame.index,
+            index=frame.index,
+            dtype="datetime64[ns, UTC]",
+        ).reindex(base_index, method="ffill")
+        states.append(aligned)
+    output["multi_timeframe_fractal_alignment"] = (
+        pd.concat(states, axis=1).mean(axis=1) if states else np.nan
+    )
+    return output
+
+
+def _rolling_estimator(
+    series: pd.Series,
+    window: int,
+    estimator: Any,
+    *,
+    minimum: int | None = None,
+) -> pd.Series:
+    required = minimum or window
+    return series.rolling(window, min_periods=required).apply(
+        lambda values: (
+            float(estimator(values))
+            if np.isfinite(values).all() and np.isfinite(estimator(values))
+            else np.nan
+        ),
+        raw=True,
+    )
+
+
+def katz_fractal_dimension(values: np.ndarray) -> float:
+    distances = np.abs(np.diff(values))
+    length = float(distances.sum())
+    diameter = float(np.max(np.abs(values - values[0])))
+    if length <= 0 or diameter <= 0:
+        return np.nan
+    n = len(values) - 1
+    return math.log10(n) / (math.log10(n) + math.log10(diameter / length))
+
+
+def petrosian_fractal_dimension(values: np.ndarray) -> float:
+    differences = np.diff(values)
+    changes = int(np.sum(differences[1:] * differences[:-1] < 0))
+    n = len(values)
+    denominator = math.log10(n) + math.log10(n / (n + 0.4 * changes))
+    return math.log10(n) / denominator if denominator else np.nan
+
+
+def higuchi_fractal_dimension(values: np.ndarray, maximum_k: int = 8) -> float:
+    n = len(values)
+    if n < maximum_k * 2:
+        return np.nan
+    lengths: list[float] = []
+    scales: list[float] = []
+    for k in range(1, maximum_k + 1):
+        segments: list[float] = []
+        for start in range(k):
+            count = (n - start - 1) // k
+            if count < 2:
+                continue
+            distance = sum(
+                abs(values[start + index * k] - values[start + (index - 1) * k])
+                for index in range(1, count + 1)
+            )
+            segments.append(distance * (n - 1) / (count * k * k))
+        if segments and np.mean(segments) > 0:
+            lengths.append(math.log(float(np.mean(segments))))
+            scales.append(math.log(1.0 / k))
+    if len(lengths) < 2:
+        return np.nan
+    return float(np.polyfit(scales, lengths, 1)[0])
+
+
+def hurst_exponent(values: np.ndarray) -> float:
+    centered = values - np.mean(values)
+    cumulative = np.cumsum(centered)
+    rescaled_range = float(np.ptp(cumulative))
+    standard = float(np.std(values, ddof=1))
+    if standard <= 0 or rescaled_range <= 0:
+        return np.nan
+    return math.log(rescaled_range / standard) / math.log(len(values))
+
+
+def fractal_dimension_features(
+    close: pd.Series,
+    *,
+    window: int = 100,
+) -> pd.DataFrame:
+    if not isinstance(window, int):
+        raise TypeError("fractal-dimension window is integer-only")
+    if window < 32:
+        raise ValueError("fractal-dimension window must be at least 32")
+    output = pd.DataFrame(index=close.index)
+    output["katz_fractal_dimension"] = _rolling_estimator(
+        close, window, katz_fractal_dimension
+    )
+    output["petrosian_fractal_dimension"] = _rolling_estimator(
+        close, window, petrosian_fractal_dimension
+    )
+    output["higuchi_fractal_dimension"] = _rolling_estimator(
+        close, window, higuchi_fractal_dimension
+    )
+    output["fractal_dimension_index"] = output[
+        ["katz_fractal_dimension", "petrosian_fractal_dimension"]
+    ].mean(axis=1)
+    output["hurst_exponent"] = _rolling_estimator(close, window, hurst_exponent)
+    dimension = output["fractal_dimension_index"].clip(lower=1.0, upper=2.0)
+    alpha = np.exp(-4.6 * (dimension - 1.0)).clip(lower=0.01, upper=1.0)
+    values = close.to_numpy(dtype=float)
+    weights = alpha.to_numpy(dtype=float)
+    frama_values = np.full(len(close), np.nan)
+    for index in range(1, len(close)):
+        if not np.isfinite(weights[index]):
+            continue
+        previous = frama_values[index - 1]
+        if not np.isfinite(previous):
+            previous = values[index - 1]
+        frama_values[index] = weights[index] * values[index] + (1 - weights[index]) * previous
+    output["frama"] = frama_values
+    output["fractal_estimator_window"] = float(window)
+    return output
+
+
+def fractal_research_labels(
+    data: pd.DataFrame,
+    *,
+    horizon: int = 20,
+    left: int = 2,
+    right: int = 2,
+) -> pd.DataFrame:
+    """Forward outcomes kept outside the tradable FeaturePipeline."""
+
+    if not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("label horizon must be a positive integer")
+    fractals = confirmed_fractals(data, left=left, right=right)
+    future_high = data["high"].shift(-1).rolling(horizon).max().shift(-(horizon - 1))
+    future_low = data["low"].shift(-1).rolling(horizon).min().shift(-(horizon - 1))
+    labels = pd.DataFrame(index=data.index)
+    labels["post_fractal_mfe"] = (
+        future_high / data["close"] - 1.0
+    ).where(fractals["confirmed_fractal_low"])
+    labels["post_fractal_mae"] = (
+        future_low / data["close"] - 1.0
+    ).where(fractals["confirmed_fractal_low"])
+    labels["fractal_efficiency"] = (
+        labels["post_fractal_mfe"]
+        / labels["post_fractal_mae"].abs().replace(0, np.nan)
+    )
+    labels.attrs["research_labels_only"] = True
+    labels.attrs["available_after_bars"] = horizon
+    return labels
+
+
+def _causal_benchmark_close(
+    index: pd.DatetimeIndex,
+    benchmark: pd.DataFrame,
+    *,
+    maximum_age: timedelta,
+) -> tuple[pd.Series, pd.Series]:
+    benchmark_timeframe = benchmark.attrs.get("timeframe")
+    benchmark_frame = validate_ohlcv(
+        benchmark,
+        timeframe=str(benchmark_timeframe) if benchmark_timeframe else None,
+        closed_candles_only=bool(benchmark_timeframe),
+    )
+    close = benchmark_frame["close"].reindex(index, method="ffill")
+    source_timestamp = pd.Series(
+        benchmark_frame.index,
+        index=benchmark_frame.index,
+        dtype="datetime64[ns, UTC]",
+    ).reindex(index, method="ffill")
+    age = index.to_series(index=index) - source_timestamp
+    stale = age > pd.Timedelta(maximum_age)
+    return close.mask(stale), source_timestamp.mask(stale)
+
+
+def relative_strength_features(
+    data: pd.DataFrame,
+    benchmark: pd.DataFrame | None,
+    *,
+    maximum_benchmark_age: timedelta = timedelta(days=3),
+) -> pd.DataFrame:
+    output = pd.DataFrame(index=data.index)
+    if benchmark is None:
+        output["btc_relative_strength"] = np.nan
+        output["btc_relative_momentum_20"] = np.nan
+        return output
+    benchmark_close, source_timestamp = _causal_benchmark_close(
+        data.index,
+        benchmark,
+        maximum_age=maximum_benchmark_age,
+    )
+    ratio = data["close"] / benchmark_close
+    output["btc_relative_strength"] = ratio
+    output["btc_relative_momentum_20"] = ratio.pct_change(20)
+    output["btc_benchmark_source_timestamp"] = source_timestamp
+    return output
+
+
+def intelligence_features(
+    index: pd.DatetimeIndex,
+    records: Iterable[IntelligenceRecord] | None,
+    *,
+    market: str | None = None,
+    window: str = "24h",
+) -> pd.DataFrame:
+    columns = (
+        "intelligence_event_count",
+        "intelligence_relevance_weighted_sentiment",
+        "negative_risk_event_score",
+        "regulation_event_score",
+        "exchange_risk_score",
+        "hack_exploit_score",
+        "macro_liquidity_score",
+        "stablecoin_risk_score",
+        "intelligence_source_diversity",
+        "intelligence_freshness_hours",
+        "event_surprise",
+    )
+    output = pd.DataFrame(0.0, index=index, columns=columns)
+    selected_market = market.upper() if market else None
+    selected = [
+        record
+        for record in (records or [])
+        if not record.markets or selected_market is None or selected_market in record.markets
+    ]
+    if not selected:
+        output["intelligence_freshness_hours"] = np.nan
+        return output
+    event_rows: list[dict[str, Any]] = []
+    for record in selected:
+        categories = set(record.categories)
+        relevance = record.relevance_score
+        event_rows.append(
+            {
+                "timestamp": record.usable_at,
+                "event_count": 1.0,
+                "relevance": relevance,
+                "weighted_sentiment": relevance * record.sentiment_score,
+                "negative": relevance * record.impact_score * float(record.sentiment_score < 0),
+                "regulation": relevance * float("regulation" in categories),
+                "exchange": relevance * float("exchange_risk" in categories),
+                "hack": relevance * float("hack_exploit" in categories),
+                "macro": relevance * float("macro_liquidity" in categories),
+                "stablecoin": relevance * float("stablecoin_risk" in categories),
+                "source": record.source,
+            }
+        )
+    events = pd.DataFrame(event_rows).sort_values("timestamp").set_index("timestamp")
+    combined_index = index.union(events.index).sort_values()
+    numeric = events.drop(columns=["source"]).groupby(level=0).sum().reindex(combined_index, fill_value=0.0)
+    rolled = numeric.rolling(window, closed="both").sum().reindex(index)
+    output["intelligence_event_count"] = rolled["event_count"]
+    output["intelligence_relevance_weighted_sentiment"] = (
+        rolled["weighted_sentiment"] / rolled["relevance"].replace(0, np.nan)
+    ).fillna(0.0)
+    output["negative_risk_event_score"] = rolled["negative"]
+    output["regulation_event_score"] = rolled["regulation"]
+    output["exchange_risk_score"] = rolled["exchange"]
+    output["hack_exploit_score"] = rolled["hack"]
+    output["macro_liquidity_score"] = rolled["macro"]
+    output["stablecoin_risk_score"] = rolled["stablecoin"]
+    source_flags = pd.get_dummies(events["source"], dtype=float).groupby(level=0).max()
+    source_flags = source_flags.reindex(combined_index, fill_value=0.0)
+    output["intelligence_source_diversity"] = (
+        source_flags.rolling(window, closed="both").max().sum(axis=1).reindex(index)
+    )
+    marker = pd.Series(pd.NaT, index=combined_index, dtype="datetime64[ns, UTC]")
+    marker.loc[events.index.unique()] = events.index.unique()
+    last_seen = marker.ffill().reindex(index)
+    output["intelligence_freshness_hours"] = (
+        index.to_series(index=index) - last_seen
+    ).dt.total_seconds() / 3_600.0
+    output["event_surprise"] = 0.0
+    return output
+
+
+@dataclass(frozen=True)
+class FeaturePipeline:
+    include_optional_garch: bool = False
+    fractal_left: int = 2
+    fractal_right: int = 2
+    fractal_dimension_window: int = 100
+
+    def build(
+        self,
+        data: pd.DataFrame,
+        *,
+        market: str | None = None,
+        benchmark: pd.DataFrame | None = None,
+        intelligence: Iterable[IntelligenceRecord] | None = None,
+        macro_context: pd.DataFrame | Mapping[str, Any] | None = None,
+        higher_timeframes: Mapping[str, pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
+        timeframe = data.attrs.get("timeframe")
+        frame = validate_ohlcv(
+            data,
+            timeframe=str(timeframe) if timeframe else None,
+            closed_candles_only=True,
+        )
+        features = [
+            frame.loc[:, OHLCV_COLUMNS],
+            return_features(frame, benchmark),
+            trend_features(frame),
+            momentum_features(frame),
+            volatility_features(frame),
+            volume_features(frame),
+            candle_features(frame),
+            fractal_family_features(frame),
+            market_structure_features(
+                frame,
+                fractal_left=self.fractal_left,
+                fractal_right=self.fractal_right,
+            ),
+            fractal_dimension_features(
+                frame["close"], window=self.fractal_dimension_window
+            ),
+            multi_timeframe_fractal_alignment(frame.index, higher_timeframes),
+            relative_strength_features(frame, benchmark),
+            intelligence_features(frame.index, intelligence, market=market),
+        ]
+        result = pd.concat(features, axis=1)
+        if macro_context is not None:
+            if isinstance(macro_context, pd.DataFrame):
+                if not (
+                    macro_context.attrs.get("canonical_macro_context")
+                    and macro_context.attrs.get("point_in_time_aligned")
+                ):
+                    raise ValueError(
+                        "prebuilt macro context requires canonical point-in-time provenance"
+                    )
+                macro_features = macro_context.reindex(result.index)
+            else:
+                from research.macro_context import MacroContextEngine
+
+                macro_features = MacroContextEngine().build(
+                    result.index, **dict(macro_context)
+                )
+            duplicate = sorted(set(result.columns).intersection(macro_features.columns))
+            if duplicate:
+                raise ValueError(f"macro feature names collide with market features: {duplicate}")
+            result = pd.concat([result, macro_features], axis=1)
+        if self.include_optional_garch:
+            result["garch_forecast"] = optional_garch_forecast(frame["close"])
+        result["bull_regime"] = (
+            (result["ema_50"] > result["ema_200"])
+            & (result["ema_50_slope"] > 0)
+            & (result["adx_14"] >= 20)
+        )
+        result["bear_regime"] = (
+            (result["ema_50"] < result["ema_200"])
+            & (result["ema_50_slope"] < 0)
+            & (result["adx_14"] >= 20)
+        )
+        result.attrs.update(frame.attrs)
+        result.attrs["intelligence_timing_integrity"] = (
+            "PASSED" if intelligence is not None else "NOT_USED"
+        )
+        result.attrs["benchmark_staleness_integrity"] = (
+            "PASSED" if benchmark is not None else "NOT_USED"
+        )
+        result.attrs["higher_timeframe_integrity"] = (
+            "PASSED" if higher_timeframes else "NOT_USED"
+        )
+        result.attrs["feature_knowability"] = {
+            column: {
+                "available_at": "candle_close",
+                "lookahead_safe": True,
+                "repaint": False,
+            }
+            for column in result.columns
+        }
+        if macro_context is not None:
+            for column in macro_features.columns:
+                result.attrs["feature_knowability"][column] = {
+                    "available_at": "source_available_at",
+                    "lookahead_safe": True,
+                    "repaint": False,
+                }
+        result.attrs["feature_knowability"]["confirmed_fractal_high"][
+            "confirmation_lag_bars"
+        ] = self.fractal_right
+        result.attrs["feature_knowability"]["confirmed_fractal_low"][
+            "confirmation_lag_bars"
+        ] = self.fractal_right
+        result.attrs["research_labels_excluded"] = (
+            "post_fractal_mfe",
+            "post_fractal_mae",
+            "fractal_efficiency",
+        )
+        assert_causal_features(result)
+        return result
+
+
+def assert_causal_features(features: pd.DataFrame) -> None:
+    forbidden = [column for column in features if column.startswith("raw_fractal_")]
+    if forbidden:
+        raise ValueError(f"tradable feature output contains raw fractals: {forbidden}")
+    metadata = features.attrs.get("feature_knowability")
+    if not isinstance(metadata, dict):
+        raise ValueError("feature knowability metadata is missing")
+    unsafe = [
+        column
+        for column, details in metadata.items()
+        if not details.get("lookahead_safe") or details.get("repaint")
+    ]
+    if unsafe:
+        raise ValueError(f"unsafe or repainting features detected: {unsafe}")
+
+
+def feature_registry() -> dict[str, dict[str, Any]]:
+    families = {
+        "trend": {"source": "OHLCV", "causal": True},
+        "momentum": {"source": "OHLCV", "causal": True},
+        "volatility": {"source": "OHLCV", "causal": True},
+        "volume": {"source": "OHLCV", "causal": True},
+        "candles": {"source": "OHLCV", "causal": True},
+        "market_structure": {
+            "source": "OHLCV",
+            "causal": True,
+            "fractal_confirmation_required": True,
+        },
+        "relative_strength": {"source": "BTC benchmark", "causal": True},
+        "intelligence": {
+            "source": "canonical intelligence",
+            "causal": True,
+            "uses_usable_at": True,
+            "direct_trade_signal": False,
+        },
+    }
+    from research.indicator_registry import indicator_coverage_report
+
+    families["formal_indicator_registry"] = indicator_coverage_report()
+    return families
+
+
+__all__ = [
+    "FeaturePipeline",
+    "anchored_vwap",
+    "assert_causal_features",
+    "atr",
+    "candle_features",
+    "confirmed_fractals",
+    "dema",
+    "ema",
+    "fractal_dimension_features",
+    "fractal_family_features",
+    "fractal_research_labels",
+    "feature_registry",
+    "intelligence_features",
+    "hma",
+    "higuchi_fractal_dimension",
+    "hurst_exponent",
+    "kama",
+    "katz_fractal_dimension",
+    "market_structure_features",
+    "multi_timeframe_fractal_alignment",
+    "momentum_features",
+    "optional_garch_forecast",
+    "parameterized_feature_series",
+    "relative_strength_features",
+    "return_features",
+    "rolling_zscore",
+    "rsi",
+    "sma",
+    "supertrend",
+    "tema",
+    "trend_features",
+    "true_range",
+    "volatility_features",
+    "volume_features",
+    "vwma",
+    "wma",
+    "wilder",
+]

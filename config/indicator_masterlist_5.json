@@ -1,0 +1,1521 @@
+{
+  "version": 1,
+  "part": 5,
+  "items": [
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Federal Funds Rate",
+      "source_line": 1092
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Fed target range",
+      "source_line": 1093
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "ECB deposit rate",
+      "source_line": 1094
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Effective Federal Funds Rate",
+      "source_line": 1095
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "2-year Treasury yield",
+      "source_line": 1096
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "5-year Treasury yield",
+      "source_line": 1097
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "10-year Treasury yield",
+      "source_line": 1098
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "30-year Treasury yield",
+      "source_line": 1099
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "10-year real yield",
+      "source_line": 1100
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Yield curve",
+      "source_line": 1101
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "2s10s spread",
+      "source_line": 1102
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "3m10y spread",
+      "source_line": 1103
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "SOFR",
+      "source_line": 1104
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Interest-rate futures probabilities",
+      "source_line": 1105
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Term premium",
+      "source_line": 1106
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Credit spreads",
+      "source_line": 1107
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "High-yield spread",
+      "source_line": 1108
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Investment-grade spread",
+      "source_line": 1109
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "CPI",
+      "source_line": 1114
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Core CPI",
+      "source_line": 1115
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "PCE",
+      "source_line": 1116
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Core PCE",
+      "source_line": 1117
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "PPI",
+      "source_line": 1118
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Import prices",
+      "source_line": 1119
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Export prices",
+      "source_line": 1120
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Inflation expectations",
+      "source_line": 1121
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "5-year breakeven inflation",
+      "source_line": 1122
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "10-year breakeven inflation",
+      "source_line": 1123
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Wage inflation",
+      "source_line": 1124
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Commodity inflation",
+      "source_line": 1125
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Oil price",
+      "source_line": 1126
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Natural-gas price",
+      "source_line": 1127
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Non-Farm Payrolls",
+      "source_line": 1129
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Unemployment rate",
+      "source_line": 1130
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Initial jobless claims",
+      "source_line": 1131
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Continuing claims",
+      "source_line": 1132
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "JOLTS job openings",
+      "source_line": 1133
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Wage growth",
+      "source_line": 1134
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Labor-force participation",
+      "source_line": 1135
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "ADP employment",
+      "source_line": 1136
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Challenger job cuts",
+      "source_line": 1137
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "GDP",
+      "source_line": 1139
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "GDPNow",
+      "source_line": 1140
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Manufacturing PMI",
+      "source_line": 1141
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Services PMI",
+      "source_line": 1142
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Composite PMI",
+      "source_line": 1143
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "ISM Manufacturing",
+      "source_line": 1144
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "ISM Services",
+      "source_line": 1145
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Industrial production",
+      "source_line": 1146
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Retail sales",
+      "source_line": 1147
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Consumer spending",
+      "source_line": 1148
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Consumer confidence",
+      "source_line": 1149
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "University of Michigan sentiment",
+      "source_line": 1150
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Durable-goods orders",
+      "source_line": 1151
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Housing starts",
+      "source_line": 1152
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Building permits",
+      "source_line": 1153
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "M2 money supply",
+      "source_line": 1155
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Global M2",
+      "source_line": 1156
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Fed balance sheet",
+      "source_line": 1157
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "ECB balance sheet",
+      "source_line": 1158
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "PBoC balance sheet",
+      "source_line": 1159
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Bank of Japan balance sheet",
+      "source_line": 1160
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Quantitative easing",
+      "source_line": 1161
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Quantitative tightening",
+      "source_line": 1162
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Reverse Repo Facility",
+      "source_line": 1163
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Treasury General Account",
+      "source_line": 1164
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Net liquidity",
+      "source_line": 1165
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Bank reserves",
+      "source_line": 1166
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Dollar liquidity",
+      "source_line": 1167
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Global credit growth",
+      "source_line": 1168
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Fiscal deficit",
+      "source_line": 1169
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Treasury issuance",
+      "source_line": 1170
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "DXY",
+      "source_line": 1175
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "EUR/USD",
+      "source_line": 1176
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "USD/JPY",
+      "source_line": 1177
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "S&P 500",
+      "source_line": 1178
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Nasdaq 100",
+      "source_line": 1179
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Russell 2000",
+      "source_line": 1180
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "VIX",
+      "source_line": 1181
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "MOVE Index",
+      "source_line": 1182
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Gold",
+      "source_line": 1183
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Silver",
+      "source_line": 1184
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Oil",
+      "source_line": 1185
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Copper",
+      "source_line": 1186
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "High-yield bonds",
+      "source_line": 1187
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Emerging-market equities",
+      "source_line": 1188
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Emerging-market currencies",
+      "source_line": 1189
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Credit spreads",
+      "source_line": 1190
+    },
+    {
+      "family": "GLOBAL_MACRO",
+      "display_name": "Cross-asset correlation",
+      "source_line": 1191
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "FOMC meetings",
+      "source_line": 1196
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "FOMC minutes",
+      "source_line": 1197
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "CPI release",
+      "source_line": 1198
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "PCE release",
+      "source_line": 1199
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "NFP",
+      "source_line": 1200
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "GDP",
+      "source_line": 1201
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "PMI",
+      "source_line": 1202
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "ECB meetings",
+      "source_line": 1203
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Treasury auctions",
+      "source_line": 1204
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Options expiry",
+      "source_line": 1205
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Futures expiry",
+      "source_line": 1206
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Bitcoin halving",
+      "source_line": 1207
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Token unlocks",
+      "source_line": 1208
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Mainnet launches",
+      "source_line": 1209
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Hard forks",
+      "source_line": 1210
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Airdrops",
+      "source_line": 1211
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Exchange listings",
+      "source_line": 1212
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Exchange delistings",
+      "source_line": 1213
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "ETF decisions",
+      "source_line": 1214
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Regulation",
+      "source_line": 1215
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Court rulings",
+      "source_line": 1216
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Network upgrades",
+      "source_line": 1217
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Protocol governance votes",
+      "source_line": 1218
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Major hacks",
+      "source_line": 1219
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Stablecoin depegs",
+      "source_line": 1220
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Exchange insolvency",
+      "source_line": 1221
+    },
+    {
+      "family": "EVENTS",
+      "display_name": "Geopolitical escalations",
+      "source_line": 1222
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Mean",
+      "source_line": 1234
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Median",
+      "source_line": 1235
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Standard deviation",
+      "source_line": 1236
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Variance",
+      "source_line": 1237
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Z-score",
+      "source_line": 1238
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Rolling z-score",
+      "source_line": 1239
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Quantiles",
+      "source_line": 1240
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Percentiles",
+      "source_line": 1241
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Skewness",
+      "source_line": 1242
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Kurtosis",
+      "source_line": 1243
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Correlation",
+      "source_line": 1244
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Partial correlation",
+      "source_line": 1245
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Covariance",
+      "source_line": 1246
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Beta",
+      "source_line": 1247
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Alpha",
+      "source_line": 1248
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Linear regression",
+      "source_line": 1249
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Polynomial regression",
+      "source_line": 1250
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Robust regression",
+      "source_line": 1251
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "R-squared",
+      "source_line": 1252
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Regression residual",
+      "source_line": 1253
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Residual z-score",
+      "source_line": 1254
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Autocorrelation",
+      "source_line": 1255
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Partial autocorrelation",
+      "source_line": 1256
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Cross-correlation",
+      "source_line": 1257
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Cointegration",
+      "source_line": 1258
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Augmented Dickey-Fuller test",
+      "source_line": 1259
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "KPSS test",
+      "source_line": 1260
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Hurst exponent",
+      "source_line": 1261
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Half-life of mean reversion",
+      "source_line": 1262
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Entropy",
+      "source_line": 1263
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Approximate entropy",
+      "source_line": 1264
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Sample entropy",
+      "source_line": 1265
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Shannon entropy",
+      "source_line": 1266
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Fractal dimension",
+      "source_line": 1267
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Variance ratio",
+      "source_line": 1268
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Kalman filter",
+      "source_line": 1269
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Hidden Markov Model regime",
+      "source_line": 1270
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Change-point detection",
+      "source_line": 1271
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Bayesian regime probability",
+      "source_line": 1272
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Principal Component Analysis",
+      "source_line": 1273
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Clustering",
+      "source_line": 1274
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Cross-sectional rank",
+      "source_line": 1275
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Rolling percentile rank",
+      "source_line": 1276
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Cyclusindicatoren",
+      "source_line": 1277
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Hilbert Transform trend mode",
+      "source_line": 1278
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Dominant cycle period",
+      "source_line": 1279
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Dominant cycle phase",
+      "source_line": 1280
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Hilbert sine wave",
+      "source_line": 1281
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Mesa Sine Wave",
+      "source_line": 1282
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Fourier transform",
+      "source_line": 1283
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Spectral density",
+      "source_line": 1284
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Wavelet transform",
+      "source_line": 1285
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Detrended oscillator",
+      "source_line": 1286
+    },
+    {
+      "family": "STATISTICS_CYCLES",
+      "display_name": "Seasonal decomposition",
+      "source_line": 1287
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Total return",
+      "source_line": 1296
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Annualized return",
+      "source_line": 1297
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "CAGR",
+      "source_line": 1298
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Monthly return",
+      "source_line": 1299
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Rolling return",
+      "source_line": 1300
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Excess return",
+      "source_line": 1301
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Alpha",
+      "source_line": 1302
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Benchmark-relative return",
+      "source_line": 1303
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Risico",
+      "source_line": 1304
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Maximum Drawdown",
+      "source_line": 1305
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Average Drawdown",
+      "source_line": 1306
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Drawdown duration",
+      "source_line": 1307
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Time under water",
+      "source_line": 1308
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Ulcer Index",
+      "source_line": 1309
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Standard deviation",
+      "source_line": 1310
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Downside deviation",
+      "source_line": 1311
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "VaR",
+      "source_line": 1312
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Conditional VaR",
+      "source_line": 1313
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Expected Shortfall",
+      "source_line": 1314
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Tail ratio",
+      "source_line": 1315
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Skewness",
+      "source_line": 1316
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Kurtosis",
+      "source_line": 1317
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Worst day/week/month",
+      "source_line": 1318
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Probability of ruin",
+      "source_line": 1319
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Risk-adjusted prestaties",
+      "source_line": 1320
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Sharpe Ratio",
+      "source_line": 1321
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Sortino Ratio",
+      "source_line": 1322
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Calmar Ratio",
+      "source_line": 1323
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "MAR Ratio",
+      "source_line": 1324
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Sterling Ratio",
+      "source_line": 1325
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Omega Ratio",
+      "source_line": 1326
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Information Ratio",
+      "source_line": 1327
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Treynor Ratio",
+      "source_line": 1328
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Gain-to-Pain Ratio",
+      "source_line": 1329
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Trade-statistieken",
+      "source_line": 1330
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Profit Factor",
+      "source_line": 1331
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Gross Profit",
+      "source_line": 1332
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Gross Loss",
+      "source_line": 1333
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Win Rate",
+      "source_line": 1334
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Loss Rate",
+      "source_line": 1335
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Average Win",
+      "source_line": 1336
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Average Loss",
+      "source_line": 1337
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Payoff Ratio",
+      "source_line": 1338
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Expectancy",
+      "source_line": 1339
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Median Trade",
+      "source_line": 1340
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Average Trade",
+      "source_line": 1341
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Maximum Consecutive Losses",
+      "source_line": 1342
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Maximum Consecutive Wins",
+      "source_line": 1343
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Holding Time",
+      "source_line": 1344
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "MAE: Maximum Adverse Excursion",
+      "source_line": 1345
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "MFE: Maximum Favorable Excursion",
+      "source_line": 1346
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Exit efficiency",
+      "source_line": 1347
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Capture ratio",
+      "source_line": 1348
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Exposure",
+      "source_line": 1349
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Turnover",
+      "source_line": 1350
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Transaction costs",
+      "source_line": 1351
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Slippage",
+      "source_line": 1352
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Capacity",
+      "source_line": 1353
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Break-even fee",
+      "source_line": 1354
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Break-even slippage",
+      "source_line": 1355
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "In-sample performance",
+      "source_line": 1363
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Out-of-sample performance",
+      "source_line": 1364
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Walk-forward performance",
+      "source_line": 1365
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Fold consistency",
+      "source_line": 1366
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Monte Carlo probability of loss",
+      "source_line": 1367
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Monte Carlo drawdown",
+      "source_line": 1368
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Parameter stability",
+      "source_line": 1369
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Sensitivity analysis",
+      "source_line": 1370
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Deflated Sharpe Ratio",
+      "source_line": 1371
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Probability of Backtest Overfitting",
+      "source_line": 1372
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Effective number of trades",
+      "source_line": 1373
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Regime robustness",
+      "source_line": 1374
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Asset robustness",
+      "source_line": 1375
+    },
+    {
+      "family": "PERFORMANCE_RISK",
+      "display_name": "Fee sensitivity",
+      "source_line": 1376
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "3-candle confirmed fractal",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "5-candle confirmed fractal",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "7-candle confirmed fractal",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal pivot timestamp",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal confirmation timestamp",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bars since fractal high",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bars since fractal low",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal high price",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal high percent",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal high ATR",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal low price",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal low percent",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "distance to fractal low ATR",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal high breakout",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal low breakdown",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bullish fractal sweep",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bearish fractal sweep",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "higher fractal high",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "higher fractal low",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "lower fractal high",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "lower fractal low",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bullish fractal BOS",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bearish fractal BOS",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bullish fractal CHoCH",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "bearish fractal CHoCH",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal range position",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal density",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal amplitude ATR",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal trend score",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "multi-timeframe fractal alignment",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal breakout volume confirmation",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal breakout open-interest confirmation",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal efficiency",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "post-fractal MFE",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "post-fractal MAE",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal significance score",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "volatility-adaptive fractal window",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "higher-timeframe fractal significance",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal structure trailing stop",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "fractal retest entry",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "Higuchi Fractal Dimension",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "Katz Fractal Dimension",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "Petrosian Fractal Dimension",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "Fractal Dimension Index",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "rolling Hurst exponent",
+      "source_line": null
+    },
+    {
+      "family": "FRACTAL",
+      "display_name": "FRAMA",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "valuation subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "adoption subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "usage subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "tokenomics subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "dilution risk subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "liquidity subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "decentralization subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "security subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "holder concentration subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "economic sustainability subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "macro sensitivity subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "data quality subscore",
+      "source_line": null
+    },
+    {
+      "family": "INVESTING_SCORE",
+      "display_name": "investment confidence",
+      "source_line": null
+    }
+  ]
+}

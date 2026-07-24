@@ -1,0 +1,986 @@
+{
+  "version": 1,
+  "part": 1,
+  "items": [
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Open",
+      "source_line": 20
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "High",
+      "source_line": 21
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Low",
+      "source_line": 22
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Close",
+      "source_line": 23
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Adjusted close",
+      "source_line": 24
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Typical price: (High + Low + Close) / 3",
+      "source_line": 25
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Median price: (High + Low) / 2",
+      "source_line": 26
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Weighted close: (High + Low + 2 × Close) / 4",
+      "source_line": 27
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "OHLC average: (Open + High + Low + Close) / 4",
+      "source_line": 28
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Heikin-Ashi prijs",
+      "source_line": 29
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Renko-prijs",
+      "source_line": 30
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Point-and-Figure prijs",
+      "source_line": 31
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Rendementsmetingen",
+      "source_line": 32
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Absolute return",
+      "source_line": 33
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Percentage return",
+      "source_line": 34
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Log return",
+      "source_line": 35
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Cumulative return",
+      "source_line": 36
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Rolling return",
+      "source_line": 37
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Excess return",
+      "source_line": 38
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Risk-adjusted return",
+      "source_line": 39
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Relative return tegenover BTC",
+      "source_line": 40
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Relative return tegenover ETH",
+      "source_line": 41
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Relative return tegenover de totale cryptomarkt",
+      "source_line": 42
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Relative strength tegenover een benchmark",
+      "source_line": 43
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Rolling alpha",
+      "source_line": 44
+    },
+    {
+      "family": "PRICE_RETURNS",
+      "display_name": "Rolling beta",
+      "source_line": 45
+    },
+    {
+      "family": "TREND",
+      "display_name": "SMA: Simple Moving Average",
+      "source_line": 56
+    },
+    {
+      "family": "TREND",
+      "display_name": "EMA: Exponential Moving Average",
+      "source_line": 57
+    },
+    {
+      "family": "TREND",
+      "display_name": "WMA: Weighted Moving Average",
+      "source_line": 58
+    },
+    {
+      "family": "TREND",
+      "display_name": "VWMA: Volume Weighted Moving Average",
+      "source_line": 59
+    },
+    {
+      "family": "TREND",
+      "display_name": "HMA: Hull Moving Average",
+      "source_line": 60
+    },
+    {
+      "family": "TREND",
+      "display_name": "DEMA: Double Exponential Moving Average",
+      "source_line": 61
+    },
+    {
+      "family": "TREND",
+      "display_name": "TEMA: Triple Exponential Moving Average",
+      "source_line": 62
+    },
+    {
+      "family": "TREND",
+      "display_name": "T3 Moving Average",
+      "source_line": 63
+    },
+    {
+      "family": "TREND",
+      "display_name": "TRIMA: Triangular Moving Average",
+      "source_line": 64
+    },
+    {
+      "family": "TREND",
+      "display_name": "KAMA: Kaufman Adaptive Moving Average",
+      "source_line": 65
+    },
+    {
+      "family": "TREND",
+      "display_name": "ALMA: Arnaud Legoux Moving Average",
+      "source_line": 66
+    },
+    {
+      "family": "TREND",
+      "display_name": "ZLEMA: Zero Lag EMA",
+      "source_line": 67
+    },
+    {
+      "family": "TREND",
+      "display_name": "SMMA: Smoothed Moving Average",
+      "source_line": 68
+    },
+    {
+      "family": "TREND",
+      "display_name": "RMA: Wilder’s Moving Average",
+      "source_line": 69
+    },
+    {
+      "family": "TREND",
+      "display_name": "LSMA: Least Squares Moving Average",
+      "source_line": 70
+    },
+    {
+      "family": "TREND",
+      "display_name": "MAMA: MESA Adaptive Moving Average",
+      "source_line": 71
+    },
+    {
+      "family": "TREND",
+      "display_name": "FAMA: Following Adaptive Moving Average",
+      "source_line": 72
+    },
+    {
+      "family": "TREND",
+      "display_name": "FRAMA: Fractal Adaptive Moving Average",
+      "source_line": 73
+    },
+    {
+      "family": "TREND",
+      "display_name": "McGinley Dynamic",
+      "source_line": 74
+    },
+    {
+      "family": "TREND",
+      "display_name": "VIDYA: Variable Index Dynamic Average",
+      "source_line": 75
+    },
+    {
+      "family": "TREND",
+      "display_name": "Jurik Moving Average",
+      "source_line": 76
+    },
+    {
+      "family": "TREND",
+      "display_name": "Moving Median",
+      "source_line": 77
+    },
+    {
+      "family": "TREND",
+      "display_name": "Moving Average Ribbon",
+      "source_line": 78
+    },
+    {
+      "family": "TREND",
+      "display_name": "Guppy Multiple Moving Average",
+      "source_line": 79
+    },
+    {
+      "family": "TREND",
+      "display_name": "Belangrijke moving-averageconstructies",
+      "source_line": 80
+    },
+    {
+      "family": "TREND",
+      "display_name": "9/21 EMA crossover",
+      "source_line": 81
+    },
+    {
+      "family": "TREND",
+      "display_name": "20/50 EMA crossover",
+      "source_line": 82
+    },
+    {
+      "family": "TREND",
+      "display_name": "50/200 SMA crossover",
+      "source_line": 83
+    },
+    {
+      "family": "TREND",
+      "display_name": "Golden cross",
+      "source_line": 84
+    },
+    {
+      "family": "TREND",
+      "display_name": "Death cross",
+      "source_line": 85
+    },
+    {
+      "family": "TREND",
+      "display_name": "Price above/below 200-day SMA",
+      "source_line": 86
+    },
+    {
+      "family": "TREND",
+      "display_name": "MA slope",
+      "source_line": 87
+    },
+    {
+      "family": "TREND",
+      "display_name": "MA separation",
+      "source_line": 88
+    },
+    {
+      "family": "TREND",
+      "display_name": "Distance from moving average",
+      "source_line": 89
+    },
+    {
+      "family": "TREND",
+      "display_name": "Moving-average compression",
+      "source_line": 90
+    },
+    {
+      "family": "TREND",
+      "display_name": "Moving-average expansion",
+      "source_line": 91
+    },
+    {
+      "family": "TREND",
+      "display_name": "Multi-timeframe moving-average alignment",
+      "source_line": 92
+    },
+    {
+      "family": "TREND",
+      "display_name": "Andere trendindicatoren",
+      "source_line": 93
+    },
+    {
+      "family": "TREND",
+      "display_name": "ADX: Average Directional Index",
+      "source_line": 94
+    },
+    {
+      "family": "TREND",
+      "display_name": "ADXR",
+      "source_line": 95
+    },
+    {
+      "family": "TREND",
+      "display_name": "DMI",
+      "source_line": 96
+    },
+    {
+      "family": "TREND",
+      "display_name": "+DI",
+      "source_line": 97
+    },
+    {
+      "family": "TREND",
+      "display_name": "-DI",
+      "source_line": 98
+    },
+    {
+      "family": "TREND",
+      "display_name": "Aroon Up",
+      "source_line": 99
+    },
+    {
+      "family": "TREND",
+      "display_name": "Aroon Down",
+      "source_line": 100
+    },
+    {
+      "family": "TREND",
+      "display_name": "Aroon Oscillator",
+      "source_line": 101
+    },
+    {
+      "family": "TREND",
+      "display_name": "Supertrend",
+      "source_line": 102
+    },
+    {
+      "family": "TREND",
+      "display_name": "Parabolic SAR",
+      "source_line": 103
+    },
+    {
+      "family": "TREND",
+      "display_name": "Ichimoku Cloud",
+      "source_line": 104
+    },
+    {
+      "family": "TREND",
+      "display_name": "Vortex Indicator",
+      "source_line": 105
+    },
+    {
+      "family": "TREND",
+      "display_name": "Donchian Channels",
+      "source_line": 106
+    },
+    {
+      "family": "TREND",
+      "display_name": "Chande Forecast Oscillator",
+      "source_line": 107
+    },
+    {
+      "family": "TREND",
+      "display_name": "Linear Regression Line",
+      "source_line": 108
+    },
+    {
+      "family": "TREND",
+      "display_name": "Linear Regression Slope",
+      "source_line": 109
+    },
+    {
+      "family": "TREND",
+      "display_name": "Linear Regression Angle",
+      "source_line": 110
+    },
+    {
+      "family": "TREND",
+      "display_name": "Trend Intensity Index",
+      "source_line": 111
+    },
+    {
+      "family": "TREND",
+      "display_name": "Mass Index",
+      "source_line": 112
+    },
+    {
+      "family": "TREND",
+      "display_name": "Qstick",
+      "source_line": 113
+    },
+    {
+      "family": "TREND",
+      "display_name": "Schaff Trend Cycle",
+      "source_line": 114
+    },
+    {
+      "family": "TREND",
+      "display_name": "Chop Zone",
+      "source_line": 115
+    },
+    {
+      "family": "TREND",
+      "display_name": "Trend Magic",
+      "source_line": 116
+    },
+    {
+      "family": "TREND",
+      "display_name": "SSL Channel",
+      "source_line": 117
+    },
+    {
+      "family": "TREND",
+      "display_name": "PMax",
+      "source_line": 118
+    },
+    {
+      "family": "TREND",
+      "display_name": "Choppiness Index",
+      "source_line": 119
+    },
+    {
+      "family": "TREND",
+      "display_name": "Vertical Horizontal Filter",
+      "source_line": 120
+    },
+    {
+      "family": "TREND",
+      "display_name": "Random Walk Index",
+      "source_line": 121
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "RSI",
+      "source_line": 143
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Stochastic Oscillator",
+      "source_line": 144
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Stochastic RSI",
+      "source_line": 145
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "MACD",
+      "source_line": 146
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "MACD Histogram",
+      "source_line": 147
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "PPO: Percentage Price Oscillator",
+      "source_line": 148
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Momentum",
+      "source_line": 149
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Rate of Change",
+      "source_line": 150
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "ROC percentage",
+      "source_line": 151
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "CCI: Commodity Channel Index",
+      "source_line": 152
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Williams %R",
+      "source_line": 153
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Ultimate Oscillator",
+      "source_line": 154
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "TRIX",
+      "source_line": 155
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "TSI: True Strength Index",
+      "source_line": 156
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "KST: Know Sure Thing",
+      "source_line": 157
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Awesome Oscillator",
+      "source_line": 158
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Accelerator Oscillator",
+      "source_line": 159
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Balance of Power",
+      "source_line": 160
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Chande Momentum Oscillator",
+      "source_line": 161
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Relative Vigor Index",
+      "source_line": 162
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Intraday Momentum Index",
+      "source_line": 163
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Fisher Transform",
+      "source_line": 164
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Elder Ray Bull Power",
+      "source_line": 165
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Elder Ray Bear Power",
+      "source_line": 166
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "DeMarker",
+      "source_line": 167
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Detrended Price Oscillator",
+      "source_line": 168
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Connors RSI",
+      "source_line": 169
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Laguerre RSI",
+      "source_line": 170
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "RSX",
+      "source_line": 171
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Dynamic Momentum Index",
+      "source_line": 172
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Coppock Curve",
+      "source_line": 173
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "SMI: Stochastic Momentum Index",
+      "source_line": 174
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "QQE: Quantitative Qualitative Estimation",
+      "source_line": 175
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "PMO: Price Momentum Oscillator",
+      "source_line": 176
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Momentumafgeleiden",
+      "source_line": 177
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "RSI slope",
+      "source_line": 178
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "RSI divergence",
+      "source_line": 179
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Hidden RSI divergence",
+      "source_line": 180
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "MACD divergence",
+      "source_line": 181
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Momentum acceleration",
+      "source_line": 182
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Momentum deceleration",
+      "source_line": 183
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Percentage distance from RSI-neutral",
+      "source_line": 184
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Multi-timeframe RSI",
+      "source_line": 185
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Relative momentum tegenover BTC",
+      "source_line": 186
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Cross-sectional momentum",
+      "source_line": 187
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Time-series momentum",
+      "source_line": 188
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Residual momentum",
+      "source_line": 189
+    },
+    {
+      "family": "MOMENTUM",
+      "display_name": "Volatility-adjusted momentum",
+      "source_line": 190
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "True Range",
+      "source_line": 208
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "ATR",
+      "source_line": 209
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "NATR: Normalized ATR",
+      "source_line": 210
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Average Daily Range",
+      "source_line": 211
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Average Weekly Range",
+      "source_line": 212
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Candle range",
+      "source_line": 213
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Rolling high-low range",
+      "source_line": 214
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Donchian width",
+      "source_line": 215
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Keltner Channel width",
+      "source_line": 216
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bandindicatoren",
+      "source_line": 217
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bollinger Bands",
+      "source_line": 218
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bollinger Bandwidth",
+      "source_line": 219
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bollinger %B",
+      "source_line": 220
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Keltner Channels",
+      "source_line": 221
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "STARC Bands",
+      "source_line": 222
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Moving Average Envelopes",
+      "source_line": 223
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Acceleration Bands",
+      "source_line": 224
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Projection Bands",
+      "source_line": 225
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Relative Volatility Bands",
+      "source_line": 226
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Statistische volatiliteit",
+      "source_line": 227
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Standard deviation",
+      "source_line": 228
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Variance",
+      "source_line": 229
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Historical volatility",
+      "source_line": 230
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Realized volatility",
+      "source_line": 231
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "EWMA volatility",
+      "source_line": 232
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Parkinson volatility",
+      "source_line": 233
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Garman-Klass volatility",
+      "source_line": 234
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Rogers-Satchell volatility",
+      "source_line": 235
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Yang-Zhang volatility",
+      "source_line": 236
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility of volatility",
+      "source_line": 237
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Downside volatility",
+      "source_line": 238
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Upside volatility",
+      "source_line": 239
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Semivariance",
+      "source_line": 240
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Median absolute deviation",
+      "source_line": 241
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Average absolute deviation",
+      "source_line": 242
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatiliteitsregimes",
+      "source_line": 243
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bollinger Band squeeze",
+      "source_line": 244
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Bollinger-Keltner squeeze",
+      "source_line": 245
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "ATR percentile",
+      "source_line": 246
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility percentile",
+      "source_line": 247
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility z-score",
+      "source_line": 248
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility breakout",
+      "source_line": 249
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility contraction",
+      "source_line": 250
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility expansion",
+      "source_line": 251
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Realized versus implied volatility",
+      "source_line": 252
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Short-term versus long-term volatility",
+      "source_line": 253
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility term structure",
+      "source_line": 254
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Risico-indicatoren op basis van volatiliteit",
+      "source_line": 255
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Chandelier Exit",
+      "source_line": 256
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "ATR stop",
+      "source_line": 257
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "ATR trailing stop",
+      "source_line": 258
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility stop",
+      "source_line": 259
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Standard-deviation stop",
+      "source_line": 260
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Time-adjusted volatility stop",
+      "source_line": 261
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Position sizing op basis van ATR",
+      "source_line": 262
+    },
+    {
+      "family": "VOLATILITY",
+      "display_name": "Volatility targeting",
+      "source_line": 263
+    }
+  ]
+}

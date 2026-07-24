@@ -1,0 +1,26 @@
+[project]
+name = "crypto-spot-research"
+version = "1.0.0"
+description = "Fail-closed EUR crypto spot research, backtest and paper-trading system"
+requires-python = ">=3.11,<3.13"
+
+[tool.pytest.ini_options]
+addopts = "-ra -m 'not network'"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "network: opt-in tests that access public network services",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+  ".venv",
+  "data_store",
+  "legacy",
+  "output",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

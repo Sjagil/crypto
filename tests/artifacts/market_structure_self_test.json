@@ -1,0 +1,26 @@
+{
+  "rows_tested": 1600,
+  "columns_created": 99,
+  "trades_from_example_adapter": 1,
+  "runtime_check": "passed",
+  "event_counts": {
+    "confirmed_fractal_high": 224,
+    "confirmed_fractal_low": 207,
+    "bearish_engulfing": 106,
+    "bullish_engulfing": 87,
+    "bullish_liquidity_sweep": 79,
+    "bearish_liquidity_sweep": 70,
+    "bearish_bos": 40,
+    "bullish_choch": 33,
+    "bearish_choch": 32,
+    "bullish_bos": 25,
+    "equal_highs": 17,
+    "equal_lows": 13,
+    "bullish_fvg": 6,
+    "bearish_fvg": 6,
+    "bullish_order_block": 4,
+    "bullish_pin_bar": 3,
+    "bearish_pin_bar": 3,
+    "bearish_order_block": 1
+  }
+}
