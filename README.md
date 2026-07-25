@@ -698,6 +698,19 @@ White Reality Check, Hansen SPA, standard PBO, plateau-selection PBO or the
 untouched-forward requirement. The campaign is orderless, uses at most 20%
 total exposure and remains blocked whenever any formal gate fails.
 
+`python main.py lab campaign run --name volatility-contraction-v1 --yes`
+evaluates a separate 16-DNA classical alpha family. A long signal requires a
+20- or 40-day volatility estimate below its causal 20th/30th percentile over
+strictly older 252-day history, followed within five closed candles by a
+20/55-day prior-channel breakout. EMA200 asset and BTC regime filters, 10/20
+day exits, 10%/15% volatility targets, inverse-volatility allocation and
+next-open execution are fixed before the run. Exposure is capped at 40% total
+and 20% per asset with at least 60% cash. All trials are content-addressed and
+included in the cumulative multiple-testing denominator. The historical v1
+development winner fails confirmation, DSR, PBO and stochastic gates; it is
+therefore retained only as `FROZEN_FORWARD_RESEARCH`, with zero order or
+promotion authority.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

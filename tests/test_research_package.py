@@ -287,3 +287,46 @@ def test_acceptance_summary_includes_fail_closed_plateau_campaign() -> None:
     assert not plateau["primary_result"]["gates"]["research_pass"]
     assert plateau["orders_generated"] == 0
     assert plateau["live_ready"] is False
+
+
+def test_acceptance_summary_includes_rejected_contraction_family() -> None:
+    values = _inputs()
+    values["volatility_contraction"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "VOLATILITY_CONTRACTION_V1",
+        "engine_version": "1.0.0",
+        "generated_trial_count": 16,
+        "registered_unique_trials": 16,
+        "total_known_trials": 16_848,
+        "primary_strategy_id": "VCB_V20_Q20_E55_X20_T10",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.4714,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 16,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    contraction = summary["volatility_contraction"]
+    assert contraction["registered_unique_trials"] == 16
+    assert not contraction["primary_result"]["gates"][
+        "economic_pass"
+    ]
+    assert contraction["orders_generated"] == 0
+    assert contraction["live_ready"] is False

@@ -89,6 +89,7 @@ def build_acceptance_summary(
     portfolio_breakout: dict[str, Any] | None = None,
     absolute_momentum: dict[str, Any] | None = None,
     absolute_momentum_plateau: dict[str, Any] | None = None,
+    volatility_contraction: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -225,6 +226,54 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "absolute momentum plateau",
             [primary],
+            container="gates",
+        )
+    if volatility_contraction is not None:
+        if (
+            volatility_contraction.get("campaign")
+            != "VOLATILITY_CONTRACTION_V1"
+        ):
+            raise ValueError(
+                "volatility contraction campaign identity mismatch"
+            )
+        if int(
+            volatility_contraction.get("orders_generated") or 0
+        ) != 0:
+            raise ValueError(
+                "volatility contraction campaign contains orders"
+            )
+        if bool(volatility_contraction.get("live_ready", False)):
+            raise ValueError(
+                "volatility contraction campaign contains live permission"
+            )
+        contraction_registry = (
+            volatility_contraction.get("trial_registry") or {}
+        )
+        if contraction_registry.get("status") != "PASSED":
+            raise ValueError(
+                "volatility contraction registry audit failed"
+            )
+        if int(
+            contraction_registry.get("unique_trial_count") or 0
+        ) != int(
+            volatility_contraction.get(
+                "registered_unique_trials"
+            )
+            or 0
+        ):
+            raise ValueError(
+                "volatility contraction trial count mismatch"
+            )
+        contraction_primary = volatility_contraction.get(
+            "primary_result"
+        )
+        if not isinstance(contraction_primary, dict):
+            raise ValueError(
+                "volatility contraction primary result missing"
+            )
+        require_stochastic_validation(
+            "volatility contraction",
+            [contraction_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -531,6 +580,43 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if volatility_contraction is not None:
+        summary["volatility_contraction"] = {
+            "status": volatility_contraction["status"],
+            "campaign": volatility_contraction["campaign"],
+            "engine_version": volatility_contraction[
+                "engine_version"
+            ],
+            "generated_trial_count": volatility_contraction[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": (
+                volatility_contraction[
+                    "registered_unique_trials"
+                ]
+            ),
+            "total_known_trials": volatility_contraction[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": volatility_contraction[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": volatility_contraction[
+                "multiple_testing"
+            ],
+            "trial_registry": volatility_contraction[
+                "trial_registry"
+            ],
+            "primary_result": volatility_contraction[
+                "primary_result"
+            ],
+            "holdout_status": volatility_contraction[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -678,6 +764,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "absolute_momentum_plateau_plan_v1.json": (
             reports / "absolute_momentum_plateau_plan_v1.json"
         ),
+        "volatility_contraction_campaign_v1.json": (
+            reports / "volatility_contraction_campaign_v1.json"
+        ),
+        "volatility_contraction_campaign_v1.csv": (
+            reports / "volatility_contraction_campaign_v1.csv"
+        ),
+        "volatility_contraction_plan_v1.json": (
+            reports / "volatility_contraction_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -738,6 +833,31 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (plateau_registry_directory / "records").glob("*.json")
     ):
         paths[f"absolute_momentum_plateau_trial_{record.name}"] = record
+    contraction_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "volatility_contraction_v1"
+    )
+    for observer in sorted(
+        contraction_observer_directory.glob("*.json")
+    ):
+        paths[f"volatility_contraction_observer_{observer.name}"] = (
+            observer
+        )
+    contraction_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "volatility_contraction_v1"
+    )
+    paths["volatility_contraction_registry_index.json"] = (
+        contraction_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (contraction_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"volatility_contraction_trial_{record.name}"] = (
+            record
+        )
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -829,6 +949,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         absolute_momentum=payloads["absolute_momentum_campaign_v1.json"],
         absolute_momentum_plateau=payloads[
             "absolute_momentum_plateau_campaign_v1.json"
+        ],
+        volatility_contraction=payloads[
+            "volatility_contraction_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
