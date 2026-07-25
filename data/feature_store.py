@@ -1,8 +1,9 @@
-"""Causal, point-in-time tensor storage for portfolio research.
+"""Causal, point-in-time array storage for classical portfolio research.
 
 The store is intentionally research-only. Features are derived from completed
 daily candles, targets are physically separate, and listing gaps require an
-explicit mask. No global/full-sample normalization is applied.
+explicit mask. No global/full-sample normalization is applied. Building this
+store does not authorize AI or machine-learning development.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ FEATURE_NAMES = (
     "market_breadth_positive_momentum_90",
     "btc_ema200_distance",
 )
+TARGET_NAMES = ("gross_next_open_to_following_open_return_1d",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,10 +237,10 @@ def _aligned_feature_panels(
         market: frame["close"].reindex(timeline)
         for market, frame in validated.items()
     }
-    next_returns = {
-        market: np.log(frame["close"].shift(-1) / frame["close"]).reindex(
-            timeline
-        )
+    next_open_returns = {
+        market: np.log(
+            frame["open"].shift(-2) / frame["open"].shift(-1)
+        ).reindex(timeline)
         for market, frame in validated.items()
     }
     btc_20 = features["BTC-EUR"]["log_return_20"]
@@ -271,7 +273,7 @@ def _aligned_feature_panels(
         panel["market_breadth_positive_momentum_90"] = breadth
         panel["btc_ema200_distance"] = btc_ema
         features[market] = panel.loc[:, FEATURE_NAMES]
-    return timeline, features, closes, next_returns
+    return timeline, features, closes, next_open_returns
 
 
 def build_feature_tensors(
@@ -283,7 +285,7 @@ def build_feature_tensors(
     """Build deterministic causal tensors from strict daily OHLCV frames."""
 
     selected_policy = policy or FeatureStorePolicy()
-    timeline, panels, closes, next_returns = _aligned_feature_panels(
+    timeline, panels, closes, next_open_returns = _aligned_feature_panels(
         frames,
         policy=selected_policy,
     )
@@ -323,7 +325,7 @@ def build_feature_tensors(
         tensor[~valid, asset_index, :] = 0.0
         feature_mask[:, asset_index] = valid
 
-        raw_target = next_returns[market].to_numpy(dtype=float)
+        raw_target = next_open_returns[market].to_numpy(dtype=float)
         target_valid = valid & np.isfinite(raw_target)
         targets[:, asset_index] = np.nan_to_num(
             raw_target,
@@ -336,19 +338,21 @@ def build_feature_tensors(
         own_positions = np.flatnonzero(
             closes[market].notna().to_numpy()
         )
-        own_next_position = {
-            int(current): int(future)
-            for current, future in zip(
-                own_positions[:-1],
-                own_positions[1:],
+        own_target_available_position = {
+            int(current): int(available)
+            for current, available in zip(
+                own_positions[:-2],
+                own_positions[2:],
                 strict=True,
             )
         }
         for target_position in np.flatnonzero(target_valid):
-            next_position = own_next_position.get(int(target_position))
-            if next_position is not None:
+            available_position = own_target_available_position.get(
+                int(target_position)
+            )
+            if available_position is not None:
                 available_at[target_position, asset_index] = timestamps_ns[
-                    next_position
+                    available_position
                 ]
         per_asset[market] = {
             "source_rows": int(closes[market].notna().sum()),
@@ -382,6 +386,7 @@ def build_feature_tensors(
         "policy": asdict(selected_policy),
         "assets": list(selected_policy.markets),
         "feature_names": list(FEATURE_NAMES),
+        "target_names": list(TARGET_NAMES),
         "source_hashes": dict(sorted((source_hashes or {}).items())),
         "timeline_start": timeline[0].isoformat() if len(timeline) else None,
         "timeline_end": timeline[-1].isoformat() if len(timeline) else None,
@@ -425,10 +430,15 @@ def build_feature_tensors(
             "full_sample_normalization": False,
             "point_in_time_listing_mask": True,
             "targets_physically_separate": True,
-            "target_known_at": "NEXT_SOURCE_DAILY_CLOSE",
+            "target_definition": (
+                "OPEN_T_PLUS_1_TO_OPEN_T_PLUS_2_GROSS_RETURN"
+            ),
+            "target_known_at": "FOLLOWING_AVAILABLE_OPEN",
+            "target_matches_execution_timeline": True,
             "masked_tensor_fill_value": 0.0,
         },
         "research_only": True,
+        "ai_model_development_permitted": False,
         "orders_generated": 0,
         "orders_submitted": 0,
         "paper_candidate_permitted": False,
@@ -489,8 +499,9 @@ def persist_feature_store(
     root = Path(output_dir)
     snapshots = root / "snapshots"
     dataset_id = str(bundle.manifest["dataset_id"])
-    snapshot_npz = snapshots / f"{dataset_id}.npz"
-    snapshot_manifest = snapshots / f"{dataset_id}.manifest.json"
+    snapshot_directory = snapshots / dataset_id
+    snapshot_npz = snapshot_directory / "tensor.npz"
+    snapshot_manifest = snapshot_directory / "manifest.json"
     reused = snapshot_npz.is_file() and snapshot_manifest.is_file()
     if not reused:
         _write_npz(snapshot_npz, bundle)
@@ -511,6 +522,7 @@ def persist_feature_store(
 
     latest_npz = root / "latest.npz"
     latest_manifest = root / "latest.manifest.json"
+    latest_pointer = root / "latest.pointer.json"
     _write_npz(latest_npz, bundle)
     latest_payload = {
         **bundle.manifest,
@@ -521,6 +533,15 @@ def persist_feature_store(
         "reused_snapshot": reused,
     }
     atomic_write_json(latest_manifest, latest_payload)
+    atomic_write_json(
+        latest_pointer,
+        {
+            "dataset_id": dataset_id,
+            "snapshot_tensor_path": str(snapshot_npz),
+            "snapshot_manifest_path": str(snapshot_manifest),
+            "tensor_sha256": latest_payload["tensor_sha256"],
+        },
+    )
     return {
         "status": "REUSED" if reused else "CREATED",
         "dataset_id": dataset_id,
@@ -528,12 +549,14 @@ def persist_feature_store(
         "manifest": str(latest_manifest),
         "snapshot_tensor": str(snapshot_npz),
         "snapshot_manifest": str(snapshot_manifest),
+        "latest_pointer": str(latest_pointer),
         "tensor_sha256": latest_payload["tensor_sha256"],
         "shapes": bundle.manifest["shapes"],
         "per_asset": bundle.manifest["per_asset"],
         "orders_generated": 0,
         "paper_candidate_permitted": False,
         "live_ready": False,
+        "ai_model_development_permitted": False,
     }
 
 

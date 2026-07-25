@@ -615,35 +615,54 @@ epochs fingerprint daily data; signal epochs fingerprint 1h, 4h and 1d data.
 Repeated access to either unchanged fingerprint reuses its existing epoch; a
 genuinely new selection epoch conservatively adds all 5,000 trials to the
 cumulative DSR denominator. Epochs remain research-only.
-Every normal cycle also builds or reuses
-`output/lab/feature_store/portfolio_daily_v1/latest.npz`: a point-in-time
-`time × asset × feature` tensor with separate listing, feature and target
-masks. Its 22 dimensionless/log-scaled features include returns, realized
-volatility, shifted Donchian distances, EMA distances, volume state, BTC
-relative momentum, cross-sectional rank and breadth. Targets are physically
-separate and become available only at the next asset candle. No full-sample
-normalization is permitted. `--skip-feature-store` exists only for diagnostics.
+The general point-in-time research feature snapshot is disabled by default.
+`--build-feature-store` explicitly builds or reuses
+`output/lab/feature_store/portfolio_daily_v1/latest.npz`; this does not
+authorize AI or model development. Its 22 dimensionless/log-scaled features
+include returns, realized volatility, shifted Donchian distances, EMA
+distances, volume state, BTC-relative momentum, cross-sectional rank and
+breadth. The separate target is causally aligned from the next executable open
+to the following open. Immutable snapshots live below their dataset ID and an
+atomic pointer identifies the latest snapshot. No full-sample normalization is
+permitted.
 The observer stage then reconstructs append-only open-to-open forward returns
 for all eight frozen breakout DNA variants and all five capital-utilization
 policies. Every record hashes its source
 prices, weights, turnover, costs, regime and realized hypothetical return.
-Revised or truncated historical evidence fails closed. Performance gates remain
+The ordered observation hashes are also protected by a deterministic hash
+chain. Revised, deleted, reordered or truncated historical evidence fails
+closed. Performance gates remain
 disabled until 365 realized daily intervals, 30 rebalances and five decisions
 in every required trend/volatility/breadth state are all present; only then are
 normal/stressed return, PF, drawdown, ESS and block-bootstrap CI evaluated.
 `--mode task-install --yes` installs a least-privilege Windows task that runs
-the orderless refresh/research cycle daily at 00:15 local time, starts missed
+the orderless refresh/research cycle daily at 03:15 local time, starts missed
 runs when available, ignores overlapping instances and records all evidence in
-the same persistent state. Inspect installation first with `--dry-run`; status
-and removal use `task-status` and `task-remove --yes`.
+the same persistent state. A UTC data watermark requires all four assets to
+contain exactly the expected last closed daily candle; partial data produces
+`WAITING_FOR_COMPLETE_DAILY_SNAPSHOT` without research or observer updates.
+Inspect installation first with `--dry-run`; status and removal use
+`task-status` and `task-remove --yes`.
 
 Forward-degradation evidence may be supplied with `--degradation-input` as JSON
 containing `live_return`, `cv_mean`, `cv_std` and `observation_count`. Fewer
-than 30 observations remains `INSUFFICIENT_FORWARD_DATA`; an undefined metric,
-stage failure, order/promotion invariant violation, or z-score below -2.0
-activates a persistent `SYSTEM_DEGRADED` kill-switch. Reset requires
+than 30 observations remains `INSUFFICIENT_FORWARD_DATA`. Checkpoints at 30,
+90 and 180 days are diagnostic only and cannot change lifecycle state. From
+365 observations, an undefined metric or z-score below -2.0 may activate the
+persistent `SYSTEM_DEGRADED` kill-switch. Stage failures and order/promotion
+invariant violations remain immediate operational failures. Reset requires
 `--mode reset --yes --reason "..."`. The autopilot cannot set paper/live ready,
 cannot submit orders and cannot overwrite the frozen candidate.
+
+AI, neural-network and other machine-learning development is explicitly
+embargoed. `python main.py lab ai status` reports the fail-closed policy.
+Eligibility requires an economically and statistically passed immutable
+strategy, completed forward/shadow/paper validation, at least 180 profitable
+live calendar days after costs, 30 closed live trades, two live regimes,
+drawdown within mandate, no unresolved incident, hashed evidence and separate
+manual authorization. Until every check passes, only classical rule-based
+research, deterministic backtests, lifecycle hardening and forward observation
+are permitted.
 
 `campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
 next-open weights with zero generated or submitted orders. Forward promotion

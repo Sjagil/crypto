@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pandas as pd
 import pytest
 
 import core.cli as cli
@@ -142,7 +143,27 @@ def test_new_data_waits_for_research_interval_and_then_runs(tmp_path):
     assert calls["research"] == 2
 
 
-def test_degradation_breach_persists_and_blocks_later_cycles(tmp_path):
+def test_early_degradation_is_diagnostic_only(tmp_path):
+    orchestrator = AutopilotOrchestrator(tmp_path)
+    diagnostic = orchestrator.run_once(
+        data_stage=_data_stage,
+        observer_stage=_observer_stage,
+        degradation_observation=DegradationObservation(
+            live_return=-0.06,
+            cv_mean=0.01,
+            cv_std=0.02,
+            observation_count=30,
+        ),
+    )
+    assert diagnostic["status"] == "COMPLETED_ORDERLESS"
+    assert diagnostic["degradation"]["status"] == "DIAGNOSTIC_ONLY"
+    assert diagnostic["degradation"]["formal_action_permitted"] is False
+    assert orchestrator.kill_switch()["system_degraded"] is False
+
+
+def test_formal_degradation_breach_persists_and_blocks_later_cycles(
+    tmp_path,
+):
     orchestrator = AutopilotOrchestrator(tmp_path)
     degraded = orchestrator.run_once(
         data_stage=_data_stage,
@@ -151,7 +172,7 @@ def test_degradation_breach_persists_and_blocks_later_cycles(tmp_path):
             live_return=-0.06,
             cv_mean=0.01,
             cv_std=0.02,
-            observation_count=30,
+            observation_count=365,
         ),
     )
     assert degraded["status"] == "SYSTEM_DEGRADED"
@@ -289,6 +310,7 @@ def test_windows_autopilot_task_is_daily_orderless_and_dry_runnable():
     settings = get_settings()
     xml = cli._autopilot_task_xml(settings)
     assert "<DaysInterval>1</DaysInterval>" in xml
+    assert "T03:15:00" in xml
     assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
     assert "lab campaign autopilot --run-research --refresh-data" in xml
     assert "paper" not in xml.casefold()
@@ -304,3 +326,55 @@ def test_windows_autopilot_task_is_daily_orderless_and_dry_runnable():
     assert payload["status"] == "DRY_RUN"
     assert payload["orders_generated"] == 0
     assert payload["live_ready"] is False
+    assert payload["schedule"] == (
+        "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE"
+    )
+
+
+def test_incomplete_daily_watermark_waits_without_kill_switch(tmp_path):
+    orchestrator = AutopilotOrchestrator(tmp_path)
+    result = orchestrator.run_once(
+        data_stage=lambda: {
+            **_data_stage(),
+            "complete_daily_snapshot": False,
+        },
+        observer_stage=lambda: pytest.fail(
+            "observer must not run on partial daily data"
+        ),
+        research_stage=lambda: pytest.fail(
+            "research must not run on partial daily data"
+        ),
+    )
+
+    assert result["status"] == "WAITING_FOR_COMPLETE_DAILY_SNAPSHOT"
+    assert result["research_reason"] == "DATA_NOT_READY"
+    assert orchestrator.kill_switch()["system_degraded"] is False
+
+
+def test_daily_watermark_requires_exact_previous_utc_day(tmp_path):
+    expected = pd.Timestamp("2026-07-24", tz="UTC")
+    paths = {}
+    for market in ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"):
+        path = tmp_path / f"{market}.parquet"
+        pd.DataFrame(
+            {"close": [100.0, 101.0]},
+            index=pd.DatetimeIndex(
+                [expected - pd.offsets.Day(1), expected]
+            ),
+        ).to_parquet(path)
+        paths[market] = path
+
+    complete = cli._daily_snapshot_watermark(
+        paths,
+        now=datetime(2026, 7, 25, 1, 15, tzinfo=UTC),
+    )
+    assert complete["complete_daily_snapshot"] is True
+
+    lagging = pd.read_parquet(paths["LINK-EUR"]).iloc[:-1]
+    lagging.to_parquet(paths["LINK-EUR"])
+    waiting = cli._daily_snapshot_watermark(
+        paths,
+        now=datetime(2026, 7, 25, 1, 15, tzinfo=UTC),
+    )
+    assert waiting["complete_daily_snapshot"] is False
+    assert waiting["checks"]["LINK-EUR"] is False

@@ -13,6 +13,7 @@ from research.forward_observer import (
     ForwardHistoryRevisionError,
     ForwardPerformanceGatePolicy,
     build_breakout_forward_evidence,
+    build_forward_hash_chain,
     build_rotation_forward_evidence,
     merge_breakout_forward_manifest,
     merge_forward_observations,
@@ -182,6 +183,10 @@ def test_forward_merge_is_idempotent_and_rejects_revision():
     first = merge_forward_observations([], evidence.observations)
     second = merge_forward_observations(first, evidence.observations)
     assert second == first
+    chain = build_forward_hash_chain(first)
+    assert chain["record_count"] == len(first)
+    assert chain["entries"][0]["previous_record_hash"] == "0" * 64
+    assert chain["entries"][-1]["record_hash"] == chain["root_hash"]
 
     corrected_frames = {market: frame.copy() for market, frame in frames.items()}
     for market in corrected_frames:
@@ -243,6 +248,11 @@ def test_manifest_merge_preserves_identity_and_rejects_dna_mixing():
         forward_start=start,
     )
     assert len(merged["forward_observations"]) == 29
+    assert merged["forward_hash_chain"]["record_count"] == 29
+    assert (
+        merged["forward_hash_chain"]["entries"][-1]["record_hash"]
+        == merged["forward_hash_chain"]["root_hash"]
+    )
     assert merged["forward_observer_schema_version"] == (
         FORWARD_OBSERVER_SCHEMA_VERSION
     )

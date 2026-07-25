@@ -30,6 +30,7 @@ class AutopilotPolicy:
     research_interval_seconds: float = 604_800.0
     degradation_z_threshold: float = -2.0
     minimum_degradation_observations: int = 30
+    minimum_formal_degradation_observations: int = 365
     stale_lock_seconds: float = 14_400.0
 
     def __post_init__(self) -> None:
@@ -41,6 +42,14 @@ class AutopilotPolicy:
             raise ValueError("degradation_z_threshold must be negative")
         if self.minimum_degradation_observations < 2:
             raise ValueError("minimum_degradation_observations must be at least 2")
+        if (
+            self.minimum_formal_degradation_observations
+            < self.minimum_degradation_observations
+        ):
+            raise ValueError(
+                "minimum_formal_degradation_observations cannot be below "
+                "the diagnostic minimum"
+            )
         if self.stale_lock_seconds <= 0:
             raise ValueError("stale_lock_seconds must be positive")
 
@@ -290,6 +299,31 @@ class AutopilotOrchestrator:
             cv_mean=observation.cv_mean,
             cv_std=observation.cv_std,
         )
+        checkpoint = (
+            365
+            if observation.observation_count >= 365
+            else 180
+            if observation.observation_count >= 180
+            else 90
+            if observation.observation_count >= 90
+            else 30
+        )
+        if (
+            observation.observation_count
+            < self.policy.minimum_formal_degradation_observations
+        ):
+            return {
+                "status": "DIAGNOSTIC_ONLY",
+                "reason": "FORMAL_FORWARD_SAMPLE_NOT_REACHED",
+                "z_score": score,
+                "threshold": self.policy.degradation_z_threshold,
+                "checkpoint_days": checkpoint,
+                "formal_observations_required": (
+                    self.policy.minimum_formal_degradation_observations
+                ),
+                "formal_action_permitted": False,
+                "observation": payload,
+            }
         if score is None:
             switch = self._activate_kill_switch(
                 reason="DEGRADATION_METRIC_UNDEFINED",
@@ -459,6 +493,61 @@ class AutopilotOrchestrator:
             data_result = self._run_stage("DATA_AUDIT", data_stage)
             cycle["stages"].append(data_result)
             data_fingerprint = data_result["payload"].get("data_fingerprint")
+            if data_result["payload"].get("complete_daily_snapshot") is False:
+                cycle.update(
+                    {
+                        "status": "WAITING_FOR_COMPLETE_DAILY_SNAPSHOT",
+                        "reason": "DAILY_DATA_WATERMARK_NOT_REACHED",
+                        "research_ran": False,
+                        "research_reason": "DATA_NOT_READY",
+                        "completed_at": _timestamp(self._now()),
+                    }
+                )
+                cycle["stages"].extend(
+                    [
+                        {
+                            "stage": stage,
+                            "status": "SKIPPED",
+                            "reason": "DATA_NOT_READY",
+                        }
+                        for stage in (
+                            "FEATURE_STORE",
+                            "RESEARCH",
+                            "OBSERVER_AUDIT",
+                        )
+                    ]
+                )
+                atomic_write_json(cycle_path, cycle)
+                atomic_write_json(
+                    self.state_path,
+                    {
+                        "schema_version": self.schema_version,
+                        "status": cycle["status"],
+                        "cycle_count": (
+                            int(prior.get("cycle_count") or 0) + 1
+                        ),
+                        "last_cycle_id": cycle_id,
+                        "last_cycle_path": str(cycle_path),
+                        "last_started_at": cycle["started_at"],
+                        "last_completed_at": cycle["completed_at"],
+                        "last_data_fingerprint": data_fingerprint,
+                        "last_research_at": prior.get(
+                            "last_research_at"
+                        ),
+                        "last_research_data_fingerprint": prior.get(
+                            "last_research_data_fingerprint"
+                        ),
+                        "last_feature_store_dataset_id": prior.get(
+                            "last_feature_store_dataset_id"
+                        ),
+                        "research_ran": False,
+                        "research_reason": "DATA_NOT_READY",
+                        "orders_generated": 0,
+                        "paper_candidate_permitted": False,
+                        "live_ready": False,
+                    },
+                )
+                return cycle
 
             feature_store_dataset_id = prior.get(
                 "last_feature_store_dataset_id"

@@ -169,6 +169,49 @@ def _record_hash(record: Mapping[str, Any]) -> str:
     return stable_hash(payload, length=64)
 
 
+def build_forward_hash_chain(
+    observations: list[dict[str, Any]]
+    | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Build a deterministic chain without mutating immutable observations."""
+
+    previous_hash = "0" * 64
+    entries: list[dict[str, Any]] = []
+    for sequence_number, record in enumerate(observations, start=1):
+        observation_hash = str(record.get("observation_hash") or "")
+        if observation_hash != _record_hash(record):
+            raise ForwardHistoryRevisionError(
+                "FORWARD_HASH_CHAIN_OBSERVATION_CHECKSUM_INVALID:"
+                f"{record.get('observation_id')}"
+            )
+        chain_hash = stable_hash(
+            {
+                "sequence_number": sequence_number,
+                "previous_record_hash": previous_hash,
+                "observation_id": str(record["observation_id"]),
+                "observation_hash": observation_hash,
+            },
+            length=64,
+        )
+        entries.append(
+            {
+                "sequence_number": sequence_number,
+                "observation_id": str(record["observation_id"]),
+                "observation_hash": observation_hash,
+                "previous_record_hash": previous_hash,
+                "record_hash": chain_hash,
+            }
+        )
+        previous_hash = chain_hash
+    return {
+        "schema_version": "forward_hash_chain_v1",
+        "record_count": len(entries),
+        "genesis_hash": "0" * 64,
+        "root_hash": previous_hash,
+        "entries": entries,
+    }
+
+
 def _coverage(
     observations: list[dict[str, Any]],
     *,
@@ -761,10 +804,23 @@ def merge_portfolio_forward_manifest(
         execution_identity=execution_identity,
         forward_start=forward_start,
     )
+    existing_observations = list(
+        existing.get("forward_observations") or []
+    )
+    existing_chain = existing.get("forward_hash_chain")
+    if existing_chain is not None:
+        expected_existing_chain = build_forward_hash_chain(
+            existing_observations
+        )
+        if dict(existing_chain) != expected_existing_chain:
+            raise ForwardHistoryRevisionError(
+                "FORWARD_HASH_CHAIN_REVISION_DETECTED"
+            )
     merged = merge_forward_observations(
-        list(existing.get("forward_observations") or []),
+        existing_observations,
         evidence.observations,
     )
+    forward_hash_chain = build_forward_hash_chain(merged)
     merged_ids = {str(item["observation_id"]) for item in merged}
     decisions = [
         {
@@ -788,6 +844,7 @@ def merge_portfolio_forward_manifest(
             "status": "FROZEN_FORWARD_RESEARCH",
             "forward_observer_schema_version": evidence.schema_version,
             "forward_observations": merged,
+            "forward_hash_chain": forward_hash_chain,
             "forward_decisions": decisions,
             "forward_summary": {
                 **evidence.summary,
@@ -859,6 +916,7 @@ __all__ = [
     "ForwardPerformanceGatePolicy",
     "ForwardHistoryRevisionError",
     "build_breakout_forward_evidence",
+    "build_forward_hash_chain",
     "build_rotation_forward_evidence",
     "merge_breakout_forward_manifest",
     "merge_portfolio_forward_manifest",

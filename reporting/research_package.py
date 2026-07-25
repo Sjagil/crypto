@@ -92,6 +92,7 @@ def build_acceptance_summary(
     autopilot_state: dict[str, Any] | None = None,
     autopilot_degradation: dict[str, Any] | None = None,
     feature_store: dict[str, Any] | None = None,
+    ai_governance: dict[str, Any] | None = None,
     breakout_forward_observers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
@@ -162,6 +163,18 @@ def build_acceptance_summary(
             "last_feature_store_dataset_id"
         ) != feature_store.get("dataset_id"):
             raise ValueError("autopilot feature store identity mismatch")
+    if ai_governance is not None:
+        if ai_governance.get("status") != "AI_DEVELOPMENT_EMBARGOED":
+            raise ValueError("AI development must remain embargoed")
+        if bool(ai_governance.get("eligible", False)):
+            raise ValueError("research package cannot contain AI eligibility")
+        if bool(
+            ai_governance.get(
+                "automatic_promotion_permitted",
+                False,
+            )
+        ):
+            raise ValueError("AI governance permits automatic promotion")
     if breakout_forward_observers is not None:
         for name, observer_payload in breakout_forward_observers.items():
             if observer_payload.get("source_candidate_identity") != identity:
@@ -433,6 +446,8 @@ def build_acceptance_summary(
             "paper_candidate_permitted": False,
             "live_ready": False,
         }
+    if ai_governance is not None:
+        summary["ai_governance"] = ai_governance
     if breakout_forward_observers is not None:
         per_policy = {
             str(payload.get("policy_name") or name): {
@@ -539,6 +554,9 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     if feature_store_manifest.is_file() and feature_store_tensor.is_file():
         paths["feature_store_latest.manifest.json"] = feature_store_manifest
         paths["feature_store_latest.npz"] = feature_store_tensor
+    ai_governance_report = reports / "ai_governance_status_v1.json"
+    if ai_governance_report.is_file():
+        paths["ai_governance_status_v1.json"] = ai_governance_report
     storm_epoch_index = settings.paths.lab_dir / "storm_epochs" / "index.json"
     if storm_epoch_index.is_file():
         paths["portfolio_storm_epoch_index.json"] = storm_epoch_index
@@ -612,6 +630,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         autopilot_state=payloads.get("autopilot_state.json"),
         autopilot_degradation=payloads.get("autopilot_degradation_state.json"),
         feature_store=payloads.get("feature_store_latest.manifest.json"),
+        ai_governance=payloads.get("ai_governance_status_v1.json"),
         breakout_forward_observers={
             name: payload
             for name, payload in payloads.items()

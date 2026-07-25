@@ -9,6 +9,7 @@ import pytest
 from data.feature_store import (
     FEATURE_NAMES,
     STRICT_PORTFOLIO_MARKETS,
+    TARGET_NAMES,
     build_and_persist_feature_store,
     build_feature_tensors,
     persist_feature_store,
@@ -69,9 +70,15 @@ def test_feature_tensor_is_masked_stationary_and_strict():
     assert not bundle.feature_mask[:199, 0].any()
     assert not bundle.feature_mask[:259, 2].any()
     assert bundle.feature_mask[-1].all()
-    assert not bundle.target_mask[-1].any()
+    assert not bundle.target_mask[-2:].any()
+    assert bundle.manifest["target_names"] == list(TARGET_NAMES)
     assert bundle.manifest["causality"]["full_sample_normalization"] is False
     assert bundle.manifest["causality"]["targets_physically_separate"] is True
+    assert (
+        bundle.manifest["causality"]["target_matches_execution_timeline"]
+        is True
+    )
+    assert bundle.manifest["ai_model_development_permitted"] is False
     assert bundle.manifest["orders_generated"] == 0
     assert bundle.manifest["live_ready"] is False
 
@@ -98,8 +105,8 @@ def test_future_price_shock_cannot_change_prior_features():
         changed.feature_mask[:-1],
     )
     np.testing.assert_array_equal(
-        baseline.targets[:-2],
-        changed.targets[:-2],
+        baseline.targets[:-3],
+        changed.targets[:-3],
     )
 
 
@@ -108,7 +115,8 @@ def test_target_available_at_uses_next_own_candle_across_gap():
     market = "SOL-EUR"
     gap_at = frames[market].index[250]
     prior_at = frames[market].index[249]
-    next_at = frames[market].index[251]
+    entry_at = frames[market].index[251]
+    target_available_at = frames[market].index[252]
     frames[market] = frames[market].drop(index=gap_at)
     bundle = build_feature_tensors(frames)
     timeline = pd.to_datetime(bundle.timestamps_ns, utc=True)
@@ -118,7 +126,14 @@ def test_target_available_at_uses_next_own_candle_across_gap():
     assert bundle.target_mask[prior_position, asset_position]
     assert (
         bundle.target_available_at_ns[prior_position, asset_position]
-        == next_at.value
+        == target_available_at.value
+    )
+    expected = np.log(
+        frames[market].loc[target_available_at, "open"]
+        / frames[market].loc[entry_at, "open"]
+    )
+    assert bundle.targets[prior_position, asset_position] == pytest.approx(
+        expected
     )
 
 
@@ -147,6 +162,33 @@ def test_feature_store_is_content_addressed_and_checksum_verified(tmp_path):
             "feature_names",
         }
         assert archive["features"].shape == bundle.features.shape
+    pointer = read_json(Path(second["latest_pointer"]))
+    assert pointer["dataset_id"] == bundle.manifest["dataset_id"]
+    assert Path(second["snapshot_tensor"]).name == "tensor.npz"
+    assert Path(second["snapshot_manifest"]).name == "manifest.json"
+
+
+def test_truncation_cannot_change_prior_features_or_targets():
+    frames = _frames()
+    truncated = {
+        market: frame.iloc[:-20].copy()
+        for market, frame in frames.items()
+    }
+    complete = build_feature_tensors(frames)
+    partial = build_feature_tensors(truncated)
+
+    np.testing.assert_array_equal(
+        complete.features[: len(partial.timestamps_ns)],
+        partial.features,
+    )
+    np.testing.assert_array_equal(
+        complete.feature_mask[: len(partial.timestamps_ns)],
+        partial.feature_mask,
+    )
+    np.testing.assert_array_equal(
+        complete.targets[: len(partial.timestamps_ns) - 2],
+        partial.targets[:-2],
+    )
 
 
 def test_unknown_or_missing_assets_fail_closed():

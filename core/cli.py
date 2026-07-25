@@ -4139,6 +4139,51 @@ def _run_autopilot_signal_storm_epoch(
     }
 
 
+def _daily_snapshot_watermark(
+    paths: Mapping[str, Path],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Require one identical, fully closed UTC day across all markets."""
+
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None or current.utcoffset() is None:
+        current = current.replace(tzinfo=UTC)
+    current = current.astimezone(UTC)
+    expected = (
+        pd.Timestamp(current).floor("D") - pd.offsets.Day(1)
+    )
+    latest: dict[str, str | None] = {}
+    checks: dict[str, bool] = {}
+    for market, path in sorted(paths.items()):
+        frame = pd.read_parquet(path, columns=["close"])
+        index = pd.DatetimeIndex(frame.index)
+        if index.tz is None:
+            index = index.tz_localize("UTC")
+        else:
+            index = index.tz_convert("UTC")
+        latest_timestamp = index.max() if len(index) else pd.NaT
+        latest[market] = (
+            latest_timestamp.isoformat()
+            if not pd.isna(latest_timestamp)
+            else None
+        )
+        checks[market] = bool(latest_timestamp == expected)
+    complete = bool(checks) and all(checks.values())
+    return {
+        "status": (
+            "COMPLETE_DAILY_SNAPSHOT"
+            if complete
+            else "WAITING_FOR_COMPLETE_DAILY_SNAPSHOT"
+        ),
+        "complete_daily_snapshot": complete,
+        "expected_last_closed_utc_day": expected.isoformat(),
+        "latest_by_market": latest,
+        "checks": checks,
+        "partial_snapshot_use_permitted": False,
+    }
+
+
 def _autopilot_data_stage(
     settings: Settings,
     *,
@@ -4198,6 +4243,11 @@ def _autopilot_data_stage(
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"AUTOPILOT_STRICT_SIGNAL_DATA_MISSING:{missing}")
+    daily_source_paths = {
+        market: normalized / f"{market}_1d.parquet"
+        for market in strict_markets
+    }
+    daily_watermark = _daily_snapshot_watermark(daily_source_paths)
     daily_files = sorted(
         {
             path
@@ -4231,6 +4281,10 @@ def _autopilot_data_stage(
         "data_fingerprint": AutopilotOrchestrator.fingerprint_files(data_files),
         "daily_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(daily_files)),
         "signal_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(signal_files)),
+        "complete_daily_snapshot": daily_watermark[
+            "complete_daily_snapshot"
+        ],
+        "daily_watermark": daily_watermark,
         "refresh": refresh_result,
         "orders_generated": 0,
         "paper_candidate_permitted": False,
@@ -4396,7 +4450,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
 
 
 def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
-    """Build or reuse the strict causal daily AI tensor snapshot."""
+    """Build an optional classical-research feature snapshot."""
 
     from data.feature_store import (
         STRICT_PORTFOLIO_MARKETS,
@@ -4439,6 +4493,7 @@ def _preserved_breakout_forward_fields(
         for field in (
             "forward_observer_schema_version",
             "forward_observations",
+            "forward_hash_chain",
             "forward_decisions",
             "forward_summary",
             "degradation_observation",
@@ -4516,7 +4571,7 @@ def _autopilot_task_xml(settings: Settings) -> str:
     main = settings.paths.project_root / "main.py"
     local_now = datetime.now().astimezone()
     start = (local_now + timedelta(days=1)).replace(
-        hour=0,
+        hour=3,
         minute=15,
         second=0,
         microsecond=0,
@@ -4597,7 +4652,10 @@ def _autopilot_task_command(
                 "task_name": task_name,
                 "command": command,
                 "xml": xml,
-                "schedule": "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE",
+                "schedule": "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE",
+                "utc_daily_close_grace": (
+                    "AT_LEAST_01:15_AFTER_UTC_MIDNIGHT"
+                ),
                 "orders_generated": 0,
                 "paper_candidate_permitted": False,
                 "live_ready": False,
@@ -4633,7 +4691,9 @@ def _autopilot_task_command(
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "schedule": (
-                "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE" if mode == "task-install" else None
+                "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE"
+                if mode == "task-install"
+                else None
             ),
             "orders_generated": 0,
             "paper_candidate_permitted": False,
@@ -6824,6 +6884,25 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
     if section in {"generate", "enqueue"}:
         section = "combinations"
         action = "generate"
+    if section == "ai":
+        from core.ai_governance import evaluate_ai_governance
+
+        evidence = (
+            read_json(args.evidence)
+            if args.evidence is not None
+            else None
+        )
+        decision = evaluate_ai_governance(evidence)
+        if args.write_report:
+            report = (
+                settings.paths.lab_dir
+                / "reports"
+                / "ai_governance_status_v1.json"
+            )
+            atomic_write_json(report, decision)
+            decision = {**decision, "report": str(report)}
+        emit(decision)
+        return 0
     if section == "data":
         requested_markets = [
             market.upper().replace("/", "-")
@@ -7176,6 +7255,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 research_interval_seconds=args.research_interval_seconds,
                 degradation_z_threshold=args.degradation_z_threshold,
                 minimum_degradation_observations=(args.minimum_degradation_observations),
+                minimum_formal_degradation_observations=(
+                    args.minimum_formal_degradation_observations
+                ),
                 stale_lock_seconds=args.stale_lock_seconds,
             )
             orchestrator = AutopilotOrchestrator(
@@ -7216,7 +7298,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     ),
                     feature_store_stage=(
                         (lambda: _autopilot_feature_store_stage(settings))
-                        if not args.skip_feature_store
+                        if args.build_feature_store
                         else None
                     ),
                     research_stage=(
@@ -7350,9 +7432,13 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             return 0
         if campaign_action == "observe":
             if breakout_portfolio_campaign:
+                await asyncio.to_thread(
+                    _run_breakout_portfolio_campaign,
+                    settings,
+                )
                 emit(
                     await asyncio.to_thread(
-                        _run_breakout_portfolio_campaign,
+                        _autopilot_observer_stage,
                         settings,
                     )
                 )
@@ -9918,6 +10004,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="lab_section",
         required=True,
     )
+    lab_ai = lab.add_parser("ai").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    ai_status = lab_ai.add_parser("status")
+    ai_status.add_argument("--evidence", type=Path)
+    ai_status.add_argument("--write-report", action="store_true")
+
     universe = lab.add_parser("universe").add_subparsers(
         dest="lab_action",
         required=True,
@@ -10105,6 +10199,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
     )
     campaign_autopilot.add_argument(
+        "--minimum-formal-degradation-observations",
+        type=int,
+        default=365,
+    )
+    campaign_autopilot.add_argument(
         "--stale-lock-seconds",
         type=float,
         default=14_400.0,
@@ -10114,9 +10213,20 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_autopilot.add_argument("--force-research", action="store_true")
     campaign_autopilot.add_argument("--refresh-data", action="store_true")
     campaign_autopilot.add_argument(
-        "--skip-feature-store",
+        "--build-feature-store",
         action="store_true",
+        help=(
+            "opt in to the general causal research feature snapshot; "
+            "this does not authorize AI/model development"
+        ),
     )
+    campaign_autopilot.add_argument(
+        "--skip-feature-store",
+        dest="build_feature_store",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    campaign_autopilot.set_defaults(build_feature_store=False)
     campaign_autopilot.add_argument(
         "--refresh-timeout-seconds",
         type=float,
