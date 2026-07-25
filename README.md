@@ -469,6 +469,10 @@ python main.py lab campaign plan --name capital-utilization-v1
 python main.py lab campaign run --name capital-utilization-v1 --yes
 python main.py lab campaign report --name capital-utilization-v1
 python main.py lab campaign observe --name capital-utilization-v1
+python main.py lab campaign plan --name diversified-rotation-v1
+python main.py lab campaign run --name diversified-rotation-v1 --yes
+python main.py lab campaign report --name diversified-rotation-v1
+python main.py lab campaign observe --name diversified-rotation-v1
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -520,6 +524,16 @@ The report adds Sortino, Omega, CVaR, drawdown duration, exposure buckets,
 bootstrap differences. Every policy is counted as a known trial. Policies
 above configured operational exposure remain research-only; all observers
 generate and submit zero orders.
+
+`diversified-rotation-v1` is a separate six-trial continuation family. It keeps
+the frozen 20/90-day momentum horizons, weekly next-open timing, EMA50 asset
+filter, BTC/breadth regime and ALLOWED universe, while declaring new strategy
+DNA for top-3/top-4 selection and inverse-volatility or equal-risk-contribution
+weighting. A 60-day backward-only covariance matrix supplies ex-ante 15% or 20%
+annualized volatility targeting. ERC solver failures, risk-model cash, expected
+costs and decision reasons are fail-closed and audited. The family cannot
+overwrite or promote the original frozen lead and all six variants count toward
+DSR, White, SPA and PBO.
 
 `campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
 next-open weights with zero generated or submitted orders. Forward promotion

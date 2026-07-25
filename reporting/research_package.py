@@ -87,6 +87,7 @@ def build_acceptance_summary(
     observer: dict[str, Any],
     quality: dict[str, Any],
     capital_utilization: dict[str, Any] | None = None,
+    diversified_rotation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -110,6 +111,14 @@ def build_acceptance_summary(
             raise ValueError("capital utilization candidate identity mismatch")
         if capital_utilization.get("strategy_dna_hash") != dna_hash:
             raise ValueError("capital utilization strategy DNA mismatch")
+    if diversified_rotation is not None:
+        if diversified_rotation.get("source_candidate_identity") != identity:
+            raise ValueError("diversified rotation candidate identity mismatch")
+        if (
+            diversified_rotation.get("source_frozen_strategy_dna_hash")
+            != dna_hash
+        ):
+            raise ValueError("diversified rotation source DNA mismatch")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -260,6 +269,29 @@ def build_acceptance_summary(
             "live_orders": 0,
             "live_ready": False,
         }
+    if diversified_rotation is not None:
+        summary["diversified_rotation"] = {
+            "status": diversified_rotation["status"],
+            "campaign": diversified_rotation["campaign"],
+            "policies_tested": diversified_rotation["policies_tested"],
+            "prior_trials_accounted": diversified_rotation[
+                "prior_trials_accounted"
+            ],
+            "total_known_trials": diversified_rotation["total_known_trials"],
+            "multiple_testing": diversified_rotation["multiple_testing"],
+            "policy_results": [
+                {
+                    "policy_name": row["policy_name"],
+                    "strategy_dna_hash": row["strategy_dna_hash"],
+                    "metrics": row["normal"]["metrics"],
+                    "gates": row["gates"],
+                }
+                for row in diversified_rotation["policy_results"]
+            ],
+            "paper_candidates": 0,
+            "live_orders": 0,
+            "live_ready": False,
+        }
     return summary
 
 
@@ -303,12 +335,23 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "capital_utilization_campaign_v1.csv": (
             reports / "capital_utilization_campaign_v1.csv"
         ),
+        "diversified_rotation_campaign_v1.json": (
+            reports / "diversified_rotation_campaign_v1.json"
+        ),
+        "diversified_rotation_campaign_v1.csv": (
+            reports / "diversified_rotation_campaign_v1.csv"
+        ),
     }
     observer_directory = (
         settings.paths.lab_dir / "observers" / "capital_utilization_v1"
     )
     for observer in sorted(observer_directory.glob("*.json")):
         paths[f"capital_observer_{observer.name}"] = observer
+    diversified_observer_directory = (
+        settings.paths.lab_dir / "observers" / "diversified_rotation_v1"
+    )
+    for observer in sorted(diversified_observer_directory.glob("*.json")):
+        paths[f"diversified_observer_{observer.name}"] = observer
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -373,6 +416,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         observer=payloads["rotation_forward_observer_v2.json"],
         quality=quality,
         capital_utilization=payloads["capital_utilization_campaign_v1.json"],
+        diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
     )
     evidence_hash = stable_hash(
         {

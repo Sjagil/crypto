@@ -18,13 +18,14 @@ import pandas as pd
 
 from utils.common import stable_hash
 
-WeightingMode = Literal["equal", "inverse_volatility"]
+WeightingMode = Literal["equal", "inverse_volatility", "risk_parity"]
 ExposureMappingMode = Literal["frozen", "continuous", "piecewise"]
 
 ROTATION_ENGINE_VERSION = "1.0.0"
 ROTATION_POLICY_VERSION = "1.0.0"
 PORTFOLIO_METRICS_VERSION = "2.0.0"
 CAPITAL_UTILIZATION_METRICS_VERSION = "1.0.0"
+DIVERSIFICATION_ENGINE_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,122 @@ def capital_utilization_policy_set() -> tuple[CapitalUtilizationPolicy, ...]:
 
 
 @dataclass(frozen=True)
+class DiversificationPolicy:
+    """Pre-registered diversification and causal volatility-target policy."""
+
+    name: str
+    top_n: int
+    weighting: WeightingMode
+    base_exposure_budget: float
+    maximum_total_exposure: float
+    maximum_position_exposure: float
+    minimum_cash: float
+    target_annualized_volatility: float
+    covariance_lookback: int = 60
+    rebalance_buffer: float = 0.05
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("diversification policy name cannot be empty")
+        if self.top_n < 2:
+            raise ValueError("diversification policy requires at least two assets")
+        if self.weighting not in {"inverse_volatility", "risk_parity"}:
+            raise ValueError("diversification weighting must be risk-aware")
+        if not 0.0 < self.base_exposure_budget <= 1.0:
+            raise ValueError("base exposure budget must be in (0, 1]")
+        if not 0.0 < self.maximum_total_exposure <= 1.0:
+            raise ValueError("maximum total exposure must be in (0, 1]")
+        if not 0.0 < self.maximum_position_exposure <= self.maximum_total_exposure:
+            raise ValueError("maximum position exposure violates total exposure")
+        if self.maximum_total_exposure > 1.0 - self.minimum_cash + 1e-12:
+            raise ValueError("maximum total exposure violates minimum cash")
+        if not 0.0 < self.target_annualized_volatility <= 1.0:
+            raise ValueError("target annualized volatility must be in (0, 1]")
+        if self.covariance_lookback < 20:
+            raise ValueError("covariance lookback must be at least 20")
+        if not 0.0 <= self.rebalance_buffer < 1.0:
+            raise ValueError("rebalance buffer must be in [0, 1)")
+
+    @property
+    def policy_hash(self) -> str:
+        return stable_hash(
+            {
+                "policy": "DIVERSIFIED_ROTATION_POLICY",
+                "version": DIVERSIFICATION_ENGINE_VERSION,
+                "values": asdict(self),
+            },
+            length=64,
+        )
+
+
+def diversified_rotation_policy_set() -> tuple[DiversificationPolicy, ...]:
+    """Small, declared top-3/top-4 risk-aware continuation family."""
+
+    return (
+        DiversificationPolicy(
+            name="TOP3_INVERSE_VOL_TARGET_15",
+            top_n=3,
+            weighting="inverse_volatility",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.35,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.15,
+        ),
+        DiversificationPolicy(
+            name="TOP3_RISK_PARITY_TARGET_15",
+            top_n=3,
+            weighting="risk_parity",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.35,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.15,
+        ),
+        DiversificationPolicy(
+            name="TOP4_INVERSE_VOL_TARGET_15",
+            top_n=4,
+            weighting="inverse_volatility",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.30,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.15,
+        ),
+        DiversificationPolicy(
+            name="TOP4_RISK_PARITY_TARGET_15",
+            top_n=4,
+            weighting="risk_parity",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.30,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.15,
+        ),
+        DiversificationPolicy(
+            name="TOP3_RISK_PARITY_TARGET_20",
+            top_n=3,
+            weighting="risk_parity",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.35,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.20,
+        ),
+        DiversificationPolicy(
+            name="TOP4_RISK_PARITY_TARGET_20",
+            top_n=4,
+            weighting="risk_parity",
+            base_exposure_budget=0.80,
+            maximum_total_exposure=0.80,
+            maximum_position_exposure=0.30,
+            minimum_cash=0.20,
+            target_annualized_volatility=0.20,
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class RotationPortfolioPolicy:
     """Execution-universe and exposure policy, separate from signal DNA."""
 
@@ -210,7 +327,7 @@ class RotationParameters:
             raise ValueError("EMA periods must be at least 2")
         if self.volatility_lookback < 2:
             raise ValueError("volatility_lookback must be at least 2")
-        if self.weighting not in {"equal", "inverse_volatility"}:
+        if self.weighting not in {"equal", "inverse_volatility", "risk_parity"}:
             raise ValueError(f"unsupported weighting: {self.weighting}")
         if not 0.0 < self.gross_exposure <= 1.0:
             raise ValueError("gross_exposure must be in (0, 1]")
@@ -240,6 +357,7 @@ class RotationBacktestResult:
     parameters: RotationParameters
     portfolio_policy: RotationPortfolioPolicy
     capital_utilization_policy: CapitalUtilizationPolicy | None
+    diversification_policy: DiversificationPolicy | None
     metrics: dict[str, Any]
     integrity: dict[str, Any]
     cost_breakdown: dict[str, float]
@@ -257,6 +375,10 @@ class RotationBacktestResult:
         if self.capital_utilization_policy is not None:
             identity_payload["capital_utilization_policy_hash"] = (
                 self.capital_utilization_policy.policy_hash
+            )
+        if self.diversification_policy is not None:
+            identity_payload["diversification_policy_hash"] = (
+                self.diversification_policy.policy_hash
             )
         summary = {
             "strategy_family": "CROSS_SECTIONAL_MOMENTUM_ROTATION",
@@ -279,6 +401,13 @@ class RotationBacktestResult:
             )
             summary["capital_utilization_policy_hash"] = (
                 self.capital_utilization_policy.policy_hash
+            )
+        if self.diversification_policy is not None:
+            summary["diversification_policy"] = asdict(
+                self.diversification_policy
+            )
+            summary["diversification_policy_hash"] = (
+                self.diversification_policy.policy_hash
             )
         return summary
 
@@ -522,6 +651,71 @@ def _capped_allocations(
     return allocated
 
 
+def _causal_covariance(
+    closes: pd.DataFrame,
+    *,
+    decision_index: int,
+    markets: Sequence[str],
+    lookback: int,
+) -> pd.DataFrame:
+    """Annualized covariance using only returns known at the decision close."""
+
+    start = max(0, decision_index - lookback)
+    selected = (
+        closes.loc[:, list(markets)]
+        .iloc[start : decision_index + 1]
+        .pct_change(fill_method=None)
+        .dropna(how="any")
+    )
+    if len(selected) < max(20, len(markets) * 3):
+        raise ValueError("insufficient causal covariance observations")
+    covariance = selected.cov(ddof=0) * 365.25
+    diagonal = np.diag(covariance.to_numpy(dtype=float))
+    if not np.isfinite(covariance.to_numpy(dtype=float)).all() or np.any(
+        diagonal <= 0.0
+    ):
+        raise ValueError("invalid causal covariance matrix")
+    ridge = max(1e-12, float(np.median(diagonal)) * 1e-8)
+    covariance = covariance + np.eye(len(covariance)) * ridge
+    return covariance
+
+
+def _equal_risk_contribution_weights(covariance: pd.DataFrame) -> pd.Series:
+    """Long-only equal-risk-contribution weights via convex coordinate descent."""
+
+    matrix = covariance.to_numpy(dtype=float)
+    count = len(matrix)
+    if count == 1:
+        return pd.Series(1.0, index=covariance.index, dtype=float)
+    if count < 1:
+        raise ValueError("risk parity requires at least one asset")
+    budgets = np.full(count, 1.0 / count, dtype=float)
+    diagonal = np.diag(matrix)
+    x = 1.0 / np.sqrt(diagonal)
+    x /= x.sum()
+    for _ in range(1_000):
+        previous = x.copy()
+        for index in range(count):
+            cross = float(matrix[index] @ x - diagonal[index] * x[index])
+            discriminant = cross * cross + 4.0 * diagonal[index] * budgets[index]
+            x[index] = (
+                -cross + math.sqrt(max(0.0, discriminant))
+            ) / (2.0 * diagonal[index])
+        if float(np.max(np.abs(x - previous))) < 1e-12:
+            break
+    weights = x / x.sum()
+    portfolio_variance = float(weights @ matrix @ weights)
+    marginal = matrix @ weights
+    contributions = weights * marginal / max(1e-15, portfolio_variance)
+    if (
+        not np.isfinite(weights).all()
+        or np.any(weights <= 0.0)
+        or float(np.max(np.abs(contributions - budgets))) > 5e-3
+    ):
+        raise ValueError("risk-parity solver did not converge")
+    return pd.Series(weights, index=covariance.index, dtype=float)
+
+
 def _target_weights(
     *,
     decision_index: int,
@@ -533,6 +727,7 @@ def _target_weights(
     parameters: RotationParameters,
     portfolio_policy: RotationPortfolioPolicy,
     capital_utilization_policy: CapitalUtilizationPolicy | None,
+    diversification_policy: DiversificationPolicy | None,
     benchmark_market: str,
 ) -> tuple[pd.Series, dict[str, Any]]:
     zero = pd.Series(0.0, index=closes.columns, dtype=float)
@@ -638,14 +833,25 @@ def _target_weights(
 
     base_budget = (
         parameters.gross_exposure
-        if capital_utilization_policy is None
-        or capital_utilization_policy.base_exposure_budget is None
-        else capital_utilization_policy.base_exposure_budget
+        if (
+            capital_utilization_policy is None
+            or capital_utilization_policy.base_exposure_budget is None
+        )
+        and diversification_policy is None
+        else (
+            diversification_policy.base_exposure_budget
+            if diversification_policy is not None
+            else capital_utilization_policy.base_exposure_budget
+        )
     )
     mapping = (
-        "frozen"
-        if capital_utilization_policy is None
-        else capital_utilization_policy.regime_mapping
+        "continuous"
+        if diversification_policy is not None
+        else (
+            "frozen"
+            if capital_utilization_policy is None
+            else capital_utilization_policy.regime_mapping
+        )
     )
     if mapping == "piecewise":
         policy = capital_utilization_policy
@@ -673,6 +879,8 @@ def _target_weights(
         portfolio_policy.maximum_total_exposure,
         1.0 - portfolio_policy.minimum_cash,
     )
+    effective_target_budget = adjusted_budget
+    volatility_target_cash = 0.0
     audit_base = {
         "eligible_assets": eligible_assets,
         "excluded_assets": sorted(exclusion_reasons),
@@ -707,7 +915,9 @@ def _target_weights(
             )
             if low_regime > 1e-12:
                 attribution["CASH_LOW_REGIME_SCORE"] = low_regime
-            allocation_gap = max(0.0, adjusted_budget - allocated)
+            if volatility_target_cash > 1e-12:
+                attribution["CASH_VOLATILITY_TARGET"] = volatility_target_cash
+            allocation_gap = max(0.0, effective_target_budget - allocated)
             if allocation_gap > 1e-12:
                 attribution[
                     "CASH_SINGLE_ASSET_CAP"
@@ -767,6 +977,26 @@ def _target_weights(
 
     target_exposure = adjusted_budget
 
+    covariance: pd.DataFrame | None = None
+    if diversification_policy is not None:
+        try:
+            covariance = _causal_covariance(
+                closes,
+                decision_index=decision_index,
+                markets=selected,
+                lookback=diversification_policy.covariance_lookback,
+            )
+        except ValueError:
+            return zero, {
+                "risk_on": True,
+                "selected_assets": [],
+                "reason": "NO_FINITE_COVARIANCE",
+                "pre_cap_weights": {},
+                "weights_after_caps": {},
+                **cash_audit(0.0, primary_reason="CASH_NO_ELIGIBLE_ASSET"),
+                **audit_base,
+            }
+
     if parameters.weighting == "inverse_volatility":
         selected_volatility = volatility.iloc[decision_index].reindex(selected)
         selected_volatility = selected_volatility.where(selected_volatility > 0).dropna()
@@ -782,27 +1012,64 @@ def _target_weights(
                 **audit_base,
             }
         raw = 1.0 / selected_volatility
-        pre_cap = raw / raw.sum() * target_exposure
-        allocations = _capped_allocations(
-            raw,
-            total_exposure=target_exposure,
-            maximum_position_exposure=portfolio_policy.maximum_position_exposure,
-        )
+    elif parameters.weighting == "risk_parity":
+        if covariance is None:
+            return zero, {
+                "risk_on": True,
+                "selected_assets": [],
+                "reason": "NO_FINITE_COVARIANCE",
+                "pre_cap_weights": {},
+                "weights_after_caps": {},
+                **cash_audit(0.0, primary_reason="CASH_NO_ELIGIBLE_ASSET"),
+                **audit_base,
+            }
+        try:
+            raw = _equal_risk_contribution_weights(covariance)
+        except ValueError:
+            return zero, {
+                "risk_on": True,
+                "selected_assets": [],
+                "reason": "RISK_PARITY_NON_CONVERGENCE",
+                "pre_cap_weights": {},
+                "weights_after_caps": {},
+                **cash_audit(0.0, primary_reason="CASH_NO_ELIGIBLE_ASSET"),
+                **audit_base,
+            }
     else:
-        pre_cap = pd.Series(
-            target_exposure / len(selected),
-            index=selected,
-            dtype=float,
+        raw = pd.Series(1.0, index=selected, dtype=float)
+
+    normalized_raw = raw / raw.sum()
+    full_exposure_forecast_volatility: float | None = None
+    volatility_target_scale = 1.0
+    if diversification_policy is not None and covariance is not None:
+        aligned = normalized_raw.reindex(covariance.index).to_numpy(dtype=float)
+        full_exposure_forecast_volatility = math.sqrt(
+            max(
+                0.0,
+                float(
+                    aligned
+                    @ covariance.to_numpy(dtype=float)
+                    @ aligned
+                ),
+            )
         )
-        allocations = _capped_allocations(
-            pd.Series(
+        volatility_target_scale = float(
+            np.clip(
+                diversification_policy.target_annualized_volatility
+                / max(1e-12, full_exposure_forecast_volatility),
+                0.0,
                 1.0,
-                index=selected,
-                dtype=float,
-            ),
-            total_exposure=target_exposure,
-            maximum_position_exposure=portfolio_policy.maximum_position_exposure,
+            )
         )
+        target_exposure = min(target_exposure, volatility_target_scale)
+        effective_target_budget = target_exposure
+        volatility_target_cash = max(0.0, adjusted_budget - target_exposure)
+    pre_cap = normalized_raw * target_exposure
+    allocations = _capped_allocations(
+        normalized_raw,
+        total_exposure=target_exposure,
+        maximum_position_exposure=portfolio_policy.maximum_position_exposure,
+    )
     target = zero.copy()
     target.loc[selected] = allocations
     allocated = float(target.sum())
@@ -818,6 +1085,15 @@ def _target_weights(
         },
         "target_total_exposure": allocated,
         "target_cash_fraction": float(1.0 - allocated),
+        "full_exposure_forecast_annualized_volatility": (
+            full_exposure_forecast_volatility
+        ),
+        "volatility_target_scale": volatility_target_scale,
+        "target_annualized_volatility": (
+            diversification_policy.target_annualized_volatility
+            if diversification_policy is not None
+            else None
+        ),
         **cash_audit(allocated, selected_count=len(selected)),
         **audit_base,
     }
@@ -833,6 +1109,7 @@ def backtest_rotation(
     benchmark_market: str = "BTC-EUR",
     portfolio_policy: RotationPortfolioPolicy | None = None,
     capital_utilization_policy: CapitalUtilizationPolicy | None = None,
+    diversification_policy: DiversificationPolicy | None = None,
 ) -> RotationBacktestResult:
     """Run a causal next-open, long-only, cash-enabled portfolio backtest."""
 
@@ -861,6 +1138,34 @@ def backtest_rotation(
         ):
             raise ValueError(
                 "capital utilization policy limits must match portfolio policy"
+            )
+    if capital_utilization_policy is not None and diversification_policy is not None:
+        raise ValueError("capital and diversification policies are mutually exclusive")
+    if diversification_policy is not None:
+        expected_limits = (
+            diversification_policy.maximum_total_exposure,
+            diversification_policy.maximum_position_exposure,
+            diversification_policy.minimum_cash,
+        )
+        actual_limits = (
+            selected_policy.maximum_total_exposure,
+            selected_policy.maximum_position_exposure,
+            selected_policy.minimum_cash,
+        )
+        if any(
+            abs(expected - actual) > 1e-12
+            for expected, actual in zip(expected_limits, actual_limits, strict=True)
+        ):
+            raise ValueError(
+                "diversification policy limits must match portfolio policy"
+            )
+        if (
+            parameters.top_n != diversification_policy.top_n
+            or parameters.maximum_positions < diversification_policy.top_n
+            or parameters.weighting != diversification_policy.weighting
+        ):
+            raise ValueError(
+                "diversification policy must match strategy top_n and weighting DNA"
             )
     opens, closes = _validated_panel(
         frames,
@@ -940,6 +1245,7 @@ def backtest_rotation(
                 parameters=parameters,
                 portfolio_policy=selected_policy,
                 capital_utilization_policy=capital_utilization_policy,
+                diversification_policy=diversification_policy,
                 benchmark_market=benchmark,
             )
             executable = opens.iloc[execution_index].notna()
@@ -966,9 +1272,13 @@ def backtest_rotation(
                     decision["reason"] = "SELECTED_ASSETS_NOT_EXECUTABLE"
             prior = current.copy()
             rebalance_buffer = (
-                capital_utilization_policy.rebalance_buffer
-                if capital_utilization_policy is not None
-                else 0.0
+                diversification_policy.rebalance_buffer
+                if diversification_policy is not None
+                else (
+                    capital_utilization_policy.rebalance_buffer
+                    if capital_utilization_policy is not None
+                    else 0.0
+                )
             )
             buffered = False
             if (
@@ -1318,6 +1628,10 @@ def backtest_rotation(
         "buy_fills": buy_fills,
         "sell_fills": sell_fills,
         "selection_changes": selection_changes,
+        "decision_reason_counts": {
+            str(reason): int(count)
+            for reason, count in decisions["reason"].value_counts().items()
+        },
         "positive_years": int((yearly > 0).sum()),
         "negative_years": int((yearly < 0).sum()),
         "average_exposure": average_exposure,
@@ -1418,6 +1732,7 @@ def backtest_rotation(
         parameters=parameters,
         portfolio_policy=selected_policy,
         capital_utilization_policy=capital_utilization_policy,
+        diversification_policy=diversification_policy,
         metrics=metrics,
         integrity=integrity,
         cost_breakdown=cost_breakdown,
@@ -1692,6 +2007,7 @@ def rotation_decision_snapshot(
     benchmark_market: str = "BTC-EUR",
     portfolio_policy: RotationPortfolioPolicy | None = None,
     capital_utilization_policy: CapitalUtilizationPolicy | None = None,
+    diversification_policy: DiversificationPolicy | None = None,
 ) -> dict[str, Any]:
     """Calculate today's frozen research decision without creating an order."""
 
@@ -1718,6 +2034,26 @@ def rotation_decision_snapshot(
         ):
             raise ValueError(
                 "capital utilization policy limits must match portfolio policy"
+            )
+    if capital_utilization_policy is not None and diversification_policy is not None:
+        raise ValueError("capital and diversification policies are mutually exclusive")
+    if diversification_policy is not None:
+        expected = (
+            diversification_policy.maximum_total_exposure,
+            diversification_policy.maximum_position_exposure,
+            diversification_policy.minimum_cash,
+        )
+        actual = (
+            selected_policy.maximum_total_exposure,
+            selected_policy.maximum_position_exposure,
+            selected_policy.minimum_cash,
+        )
+        if any(
+            abs(left - right) > 1e-12
+            for left, right in zip(expected, actual, strict=True)
+        ):
+            raise ValueError(
+                "diversification policy limits must match portfolio policy"
             )
     _, closes = _validated_panel(
         frames,
@@ -1761,6 +2097,7 @@ def rotation_decision_snapshot(
         parameters=parameters,
         portfolio_policy=selected_policy,
         capital_utilization_policy=capital_utilization_policy,
+        diversification_policy=diversification_policy,
         benchmark_market=benchmark,
     )
     scores = momentum.iloc[-1].replace([np.inf, -np.inf], np.nan).dropna()
@@ -1773,6 +2110,11 @@ def rotation_decision_snapshot(
         "capital_utilization_policy_hash": (
             capital_utilization_policy.policy_hash
             if capital_utilization_policy is not None
+            else None
+        ),
+        "diversification_policy_hash": (
+            diversification_policy.policy_hash
+            if diversification_policy is not None
             else None
         ),
         "rank_scores": {
@@ -2034,6 +2376,8 @@ def rotation_period_metrics(
 __all__ = [
     "CAPITAL_UTILIZATION_METRICS_VERSION",
     "CapitalUtilizationPolicy",
+    "DIVERSIFICATION_ENGINE_VERSION",
+    "DiversificationPolicy",
     "PORTFOLIO_METRICS_VERSION",
     "ROTATION_ENGINE_VERSION",
     "ROTATION_POLICY_VERSION",
@@ -2043,6 +2387,7 @@ __all__ = [
     "backtest_rotation",
     "capital_utilization_benchmark_suite",
     "capital_utilization_policy_set",
+    "diversified_rotation_policy_set",
     "ensemble_rotation_parameter_grid",
     "portfolio_sample_metrics",
     "paired_block_bootstrap_difference",

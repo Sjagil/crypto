@@ -54,6 +54,7 @@ def test_required_command_families_are_registered() -> None:
         ["lab", "campaign", "plan", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "plan", "--name", "institutional-rotation-v2"],
         ["lab", "campaign", "plan", "--name", "capital-utilization-v1"],
+        ["lab", "campaign", "plan", "--name", "diversified-rotation-v1"],
         ["lab", "campaign", "forward", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "external", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "audit", "--name", "cross-sectional-ensemble"],

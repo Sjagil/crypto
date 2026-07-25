@@ -6,10 +6,13 @@ import pytest
 
 from research.portfolio_selection import (
     CapitalUtilizationPolicy,
+    DiversificationPolicy,
     RotationParameters,
     RotationPortfolioPolicy,
+    _equal_risk_contribution_weights,
     backtest_rotation,
     capital_utilization_policy_set,
+    diversified_rotation_policy_set,
     ensemble_rotation_parameter_grid,
     paired_block_bootstrap_difference,
     rotation_benchmark_suite,
@@ -525,3 +528,93 @@ def test_capital_policy_limit_mismatch_fails_closed_and_bootstrap_is_paired() ->
     )
     assert comparison["mean_daily_return_difference"] == pytest.approx(0.001)
     assert comparison["ci_lower_95"] > 0
+
+
+def test_equal_risk_contribution_solver_equalizes_variance_contributions() -> None:
+    covariance = pd.DataFrame(
+        [
+            [0.09, 0.012, 0.006],
+            [0.012, 0.16, 0.010],
+            [0.006, 0.010, 0.25],
+        ],
+        index=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+        columns=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+    )
+    weights = _equal_risk_contribution_weights(covariance)
+    matrix = covariance.to_numpy(dtype=float)
+    vector = weights.to_numpy(dtype=float)
+    contributions = vector * (matrix @ vector) / float(vector @ matrix @ vector)
+    assert weights.sum() == pytest.approx(1.0)
+    assert (weights > 0).all()
+    assert np.max(np.abs(contributions - 1.0 / 3.0)) < 5e-3
+
+
+def test_diversification_policy_is_separate_dna_and_volatility_targeted() -> None:
+    policies = diversified_rotation_policy_set()
+    assert len(policies) == 6
+    assert len({policy.policy_hash for policy in policies}) == len(policies)
+    allocation = policies[0]
+    parameters = _parameters(
+        additional_momentum_lookbacks=(60,),
+        require_btc_uptrend=False,
+        continuous_regime=True,
+        top_n=allocation.top_n,
+        maximum_positions=4,
+        weighting=allocation.weighting,
+    )
+    portfolio_policy = RotationPortfolioPolicy(
+        allowed_markets=tuple(_rotation_frames()),
+        maximum_total_exposure=allocation.maximum_total_exposure,
+        maximum_position_exposure=allocation.maximum_position_exposure,
+        minimum_cash=allocation.minimum_cash,
+        minimum_history_observations=20,
+    )
+    result = backtest_rotation(
+        _rotation_frames(360),
+        parameters,
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+        portfolio_policy=portfolio_policy,
+        diversification_policy=allocation,
+    )
+    ranked = result.decisions[result.decisions["reason"] == "RANKED_MOMENTUM"]
+    assert not ranked.empty
+    assert ranked[
+        "full_exposure_forecast_annualized_volatility"
+    ].dropna().gt(0).all()
+    assert ranked["volatility_target_scale"].between(0.0, 1.0).all()
+    assert (
+        result.metrics["maximum_exposure_observed"]
+        <= allocation.maximum_total_exposure + 1e-12
+    )
+    assert result.summary()["diversification_policy_hash"] == allocation.policy_hash
+
+
+def test_diversification_policy_must_match_strategy_dna() -> None:
+    allocation = DiversificationPolicy(
+        name="TOP3_TEST",
+        top_n=3,
+        weighting="inverse_volatility",
+        base_exposure_budget=0.80,
+        maximum_total_exposure=0.80,
+        maximum_position_exposure=0.35,
+        minimum_cash=0.20,
+        target_annualized_volatility=0.15,
+    )
+    policy = RotationPortfolioPolicy(
+        allowed_markets=tuple(_rotation_frames()),
+        maximum_total_exposure=0.80,
+        maximum_position_exposure=0.35,
+        minimum_cash=0.20,
+    )
+    with pytest.raises(ValueError, match="must match strategy"):
+        backtest_rotation(
+            _rotation_frames(),
+            _parameters(require_btc_uptrend=False),
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            spread_bps=0.0,
+            portfolio_policy=policy,
+            diversification_policy=allocation,
+        )

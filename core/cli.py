@@ -3337,6 +3337,14 @@ def _capital_utilization_campaign_path(settings: Settings) -> Path:
     )
 
 
+def _diversified_rotation_campaign_path(settings: Settings) -> Path:
+    return (
+        settings.paths.lab_dir
+        / "reports"
+        / "diversified_rotation_campaign_v1.json"
+    )
+
+
 def _rotation_return_ci_lower(
     returns: pd.Series,
     *,
@@ -4879,6 +4887,386 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
+    """Run a pre-registered top-3/top-4 volatility-targeted continuation."""
+
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        DIVERSIFICATION_ENGINE_VERSION,
+        RotationPortfolioPolicy,
+        backtest_rotation,
+        capital_utilization_benchmark_suite,
+        diversified_rotation_policy_set,
+        paired_block_bootstrap_difference,
+        rotation_decision_snapshot,
+        rotation_period_metrics,
+    )
+
+    frozen_path = (
+        settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    )
+    frozen_sha_before = sha256_file(frozen_path)
+    frozen, frozen_parameters, markets, paths, frames = _frozen_rotation_inputs(
+        settings
+    )
+    policies = diversified_rotation_policy_set()
+    capital_path = _capital_utilization_campaign_path(settings)
+    if not capital_path.is_file():
+        raise FileNotFoundError(
+            "capital-utilization-v1 must complete before diversified-rotation-v1"
+        )
+    capital_campaign = read_json(capital_path)
+    prior_trials = int(capital_campaign["total_known_trials"])
+    periods = dict(capital_campaign["periods"])
+    control_policy = _strict_rotation_portfolio_policy(
+        settings,
+        markets=markets,
+    )
+    control = backtest_rotation(
+        frames,
+        frozen_parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=control_policy,
+    )
+    control_returns = control.equity_curve.pct_change(
+        fill_method=None
+    ).dropna()
+    results: dict[str, Any] = {}
+    daily_returns: dict[str, pd.Series] = {}
+    rows: list[dict[str, Any]] = []
+    observer_paths: dict[str, str] = {}
+    forward_start = pd.Timestamp(frozen["forward_validation_start"])
+    forward_start = (
+        forward_start.tz_localize("UTC")
+        if forward_start.tzinfo is None
+        else forward_start.tz_convert("UTC")
+    )
+
+    for policy_index, diversification in enumerate(policies):
+        parameters = replace(
+            frozen_parameters,
+            top_n=diversification.top_n,
+            maximum_positions=4,
+            weighting=diversification.weighting,
+        )
+        portfolio_policy = RotationPortfolioPolicy(
+            allowed_markets=markets,
+            maximum_total_exposure=diversification.maximum_total_exposure,
+            maximum_position_exposure=(
+                diversification.maximum_position_exposure
+            ),
+            minimum_cash=diversification.minimum_cash,
+            minimum_history_observations=90,
+        )
+        normal = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=portfolio_policy,
+            diversification_policy=diversification,
+        )
+        stressed = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=(
+                settings.costs.default_fee
+                * settings.costs.stressed_cost_multiplier
+            ),
+            slippage_bps=(
+                settings.costs.slippage_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            spread_bps=(
+                settings.costs.spread_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            portfolio_policy=portfolio_policy,
+            diversification_policy=diversification,
+        )
+        period_metrics: dict[str, Any] = {}
+        stressed_period_metrics: dict[str, Any] = {}
+        for period, bounds in periods.items():
+            period_metrics[period], _ = rotation_period_metrics(
+                normal.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+            stressed_period_metrics[period], _ = rotation_period_metrics(
+                stressed.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+        results[diversification.name] = normal
+        policy_returns = normal.equity_curve.pct_change(
+            fill_method=None
+        ).dropna()
+        daily_returns[diversification.name] = policy_returns[
+            ~policy_returns.index.duplicated(keep="last")
+        ]
+        snapshot = rotation_decision_snapshot(
+            frames,
+            parameters,
+            portfolio_policy=portfolio_policy,
+            diversification_policy=diversification,
+        )
+        observer_payload = {
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "family": "DIVERSIFIED_ROTATION_V1",
+            "source_candidate_identity": frozen["immutable_identity"],
+            "source_frozen_strategy_dna_hash": frozen["strategy_dna_hash"],
+            "strategy_dna_hash": parameters.dna_hash,
+            "diversification_policy": asdict(diversification),
+            "diversification_policy_hash": diversification.policy_hash,
+            "execution_identity": normal.summary()["execution_identity"],
+            "forward_start": forward_start.isoformat(),
+            "minimum_forward_closed_daily_observations": 365,
+            "minimum_forward_rebalances": 30,
+            "regime_coverage_required": True,
+            "latest_historical_snapshot": snapshot,
+            "forward_observations": [],
+            "current_operational_limits_compatible": False,
+            "orders_generated": 0,
+            "orders_submitted": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+        observer_path = (
+            settings.paths.lab_dir
+            / "observers"
+            / "diversified_rotation_v1"
+            / f"{diversification.name.lower()}.json"
+        )
+        atomic_write_json(observer_path, _json_ready(observer_payload))
+        observer_paths[diversification.name] = str(observer_path)
+        paired = paired_block_bootstrap_difference(
+            daily_returns[diversification.name],
+            control_returns,
+            samples=2_000,
+            block_size=10,
+            seed=settings.app.random_seed + policy_index,
+        )
+        rows.append(
+            {
+                "policy_name": diversification.name,
+                "diversification_policy": asdict(diversification),
+                "diversification_policy_hash": diversification.policy_hash,
+                "strategy_dna_hash": parameters.dna_hash,
+                "parameters": asdict(parameters),
+                "signal_horizons_and_filters_preserved": (
+                    parameters.momentum_lookbacks
+                    == frozen_parameters.momentum_lookbacks
+                    and parameters.rebalance_days
+                    == frozen_parameters.rebalance_days
+                    and parameters.asset_ema_period
+                    == frozen_parameters.asset_ema_period
+                    and parameters.btc_ema_period
+                    == frozen_parameters.btc_ema_period
+                    and parameters.continuous_regime
+                    == frozen_parameters.continuous_regime
+                ),
+                "normal": normal.summary(),
+                "stressed": stressed.summary(),
+                "periods": period_metrics,
+                "stressed_periods": stressed_period_metrics,
+                "paired_block_bootstrap_vs_frozen_control": paired,
+                "observer_manifest": str(observer_path),
+            }
+        )
+
+    return_matrix = pd.concat(daily_returns, axis=1).dropna(how="any")
+    multiple = multiple_testing_bootstrap(
+        return_matrix,
+        bootstrap_samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=prior_trials + len(policies),
+    )
+    for row in rows:
+        name = str(row["policy_name"])
+        result = results[name]
+        paired = row["paired_block_bootstrap_vs_frozen_control"]
+        economic_checks = {
+            "all_periods_positive": all(
+                float(row["periods"][period]["net_return"]) > 0
+                for period in periods
+            ),
+            "all_stressed_periods_positive": all(
+                float(row["stressed_periods"][period]["net_return"]) > 0
+                for period in periods
+            ),
+            "minimum_effective_sample": (
+                int(result.metrics["portfolio_period_effective_sample_size"])
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "minimum_rebalances": (
+                int(result.metrics["rebalance_count"])
+                >= settings.research.minimum_trades
+            ),
+            "profit_factor": (
+                float(result.metrics["portfolio_period_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "maximum_drawdown": (
+                abs(float(result.metrics["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+            "paired_incremental_ci_positive": (
+                float(paired["ci_lower_95"]) > 0.0
+            ),
+            "exposure_limits_respected": bool(
+                result.integrity["maximum_exposure_respected"]
+                and result.integrity["maximum_position_exposure_respected"]
+                and result.integrity["minimum_cash_respected"]
+            ),
+        }
+        statistical_checks = {
+            "source_historical_statistical_gates": bool(
+                frozen["robustness"]["statistical_gates_passed"]
+            ),
+            "deflated_sharpe": (
+                float(
+                    multiple.deflated_sharpe_probabilities.get(name, 0.0)
+                )
+                >= settings.research.minimum_deflated_sharpe_probability
+            ),
+            "white_reality_check": (
+                multiple.white_reality_check_pvalue
+                <= settings.research.maximum_white_reality_check_pvalue
+            ),
+            "hansen_spa": (
+                multiple.hansen_spa_pvalue
+                <= settings.research.maximum_hansen_spa_pvalue
+            ),
+            "pbo": (
+                multiple.probability_of_backtest_overfitting is not None
+                and multiple.probability_of_backtest_overfitting
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+        }
+        row["gates"] = {
+            "economic_checks": economic_checks,
+            "statistical_checks": statistical_checks,
+            "deflated_sharpe_probability": float(
+                multiple.deflated_sharpe_probabilities.get(name, 0.0)
+            ),
+            "economic_pass": all(economic_checks.values()),
+            "statistical_pass": all(statistical_checks.values()),
+            "research_pass": False,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+
+    benchmarks = capital_utilization_benchmark_suite(
+        frames,
+        start=control.equity_curve.index[0],
+        minimum_history_observations=90,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        allowed_markets=markets,
+        exposure_matches={
+            name: float(result.metrics["average_exposure"])
+            for name, result in results.items()
+        },
+    )
+    rows.sort(
+        key=lambda row: float(row["normal"]["metrics"]["net_return"]),
+        reverse=True,
+    )
+    payload = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "DIVERSIFIED_ROTATION_V1",
+        "result_type": "PRE_REGISTERED_DIVERSIFICATION_CONTINUATION",
+        "diversification_engine_version": DIVERSIFICATION_ENGINE_VERSION,
+        "source_candidate_identity": frozen["immutable_identity"],
+        "source_frozen_strategy_dna_hash": frozen["strategy_dna_hash"],
+        "source_historical_robustness": frozen["robustness"],
+        "frozen_signal_horizons_and_filters_changed": False,
+        "declared_new_dna_dimensions": [
+            "top_n",
+            "maximum_positions",
+            "weighting",
+            "volatility_target",
+            "covariance_lookback",
+            "rebalance_buffer",
+        ],
+        "markets": list(markets),
+        "timeframe": "1d",
+        "policies_tested": len(policies),
+        "prior_trials_accounted": prior_trials,
+        "total_known_trials": prior_trials + len(policies),
+        "periods": periods,
+        "multiple_testing": asdict(multiple),
+        "frozen_control": control.summary(),
+        "benchmarks": benchmarks,
+        "policy_results": rows,
+        "observer_manifests": observer_paths,
+        "frozen_candidate_sha256_before": frozen_sha_before,
+        "frozen_candidate_sha256_after": sha256_file(frozen_path),
+        "frozen_candidate_unchanged": (
+            frozen_sha_before == sha256_file(frozen_path)
+        ),
+        "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
+        "paper_candidates": 0,
+        "live_orders": 0,
+        "live_ready": False,
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+    }
+    report_path = _diversified_rotation_campaign_path(settings)
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "policy": row["policy_name"],
+                "top_n": row["parameters"]["top_n"],
+                "weighting": row["parameters"]["weighting"],
+                "target_volatility": row["diversification_policy"][
+                    "target_annualized_volatility"
+                ],
+                "net_return": row["normal"]["metrics"]["net_return"],
+                "cagr": row["normal"]["metrics"]["annualized_return"],
+                "sharpe": row["normal"]["metrics"]["sharpe"],
+                "sortino": row["normal"]["metrics"]["sortino"],
+                "maximum_drawdown": row["normal"]["metrics"][
+                    "maximum_drawdown"
+                ],
+                "daily_cvar_95": row["normal"]["metrics"]["daily_cvar_95"],
+                "average_exposure": row["normal"]["metrics"][
+                    "average_exposure"
+                ],
+                "average_cash": row["normal"]["metrics"][
+                    "cash_fraction_average"
+                ],
+                "economic_pass": row["gates"]["economic_pass"],
+                "statistical_pass": row["gates"]["statistical_pass"],
+                "paper_candidate": False,
+                "live_ready": False,
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "policies_tested": len(policies),
+        "total_known_trials": payload["total_known_trials"],
+        "frozen_candidate_unchanged": payload["frozen_candidate_unchanged"],
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": observer_paths,
+        "paper_candidates": 0,
+        "live_orders": 0,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -5261,6 +5649,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         ensemble_campaign = campaign_name == "cross-sectional-ensemble"
         institutional_campaign = campaign_name == "institutional-rotation-v2"
         capital_utilization_campaign = campaign_name == "capital-utilization-v1"
+        diversified_rotation_campaign = campaign_name == "diversified-rotation-v1"
         rotation_campaign = campaign_name in {
             "cross-sectional-rotation",
             "cross-sectional-ensemble",
@@ -5268,7 +5657,11 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         }
         campaign_timeframes = (
             ("1d",)
-            if rotation_campaign or capital_utilization_campaign
+            if (
+                rotation_campaign
+                or capital_utilization_campaign
+                or diversified_rotation_campaign
+            )
             else (("1h",) if formal_campaign else ("5m", "15m"))
         )
         campaign_label = (
@@ -5283,8 +5676,12 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             if rotation_campaign
             else (
-                "CAPITAL_UTILIZATION_V1"
-                if capital_utilization_campaign
+                (
+                    "DIVERSIFIED_ROTATION_V1"
+                    if diversified_rotation_campaign
+                    else "CAPITAL_UTILIZATION_V1"
+                )
+                if capital_utilization_campaign or diversified_rotation_campaign
                 else (
                     "FORMAL_CAUSAL_FIVE_FAMILY_V1"
                     if formal_campaign
@@ -5318,6 +5715,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(await asyncio.to_thread(_run_rotation_institutional_audit, settings))
             return 0
         if campaign_action == "observe":
+            if diversified_rotation_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_diversified_rotation_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if capital_utilization_campaign:
                 emit(
                     await asyncio.to_thread(
@@ -5347,6 +5752,41 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action in {"plan", "estimate"}:
+            if diversified_rotation_campaign:
+                from research.portfolio_selection import (
+                    diversified_rotation_policy_set,
+                )
+
+                policies = diversified_rotation_policy_set()
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"
+                        ),
+                        "source_frozen_lead_mutated": False,
+                        "policies": [asdict(policy) for policy in policies],
+                        "diversification_policy_trials": len(policies),
+                        "prior_trials_accounted": 1_298,
+                        "total_known_trials": 1_298 + len(policies),
+                        "markets": [
+                            "BTC-EUR",
+                            "ETH-EUR",
+                            "SOL-EUR",
+                            "LINK-EUR",
+                        ],
+                        "timeframes": ["1d"],
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             if capital_utilization_campaign:
                 from research.portfolio_selection import (
                     capital_utilization_policy_set,
@@ -5515,6 +5955,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "run":
+            if diversified_rotation_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "diversification_policy_trials": 6,
+                            "reason_code": (
+                                "PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_diversified_rotation_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if capital_utilization_campaign:
                 if not args.yes:
                     emit(
@@ -5624,6 +6084,18 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
+            if diversified_rotation_campaign:
+                report_path = _diversified_rotation_campaign_path(settings)
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if capital_utilization_campaign:
                 report_path = _capital_utilization_campaign_path(settings)
                 emit(
@@ -5664,6 +6136,19 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "status":
+            if diversified_rotation_campaign:
+                report_path = _diversified_rotation_campaign_path(settings)
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            "COMPLETED" if report_path.is_file() else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             if capital_utilization_campaign:
                 report_path = _capital_utilization_campaign_path(settings)
                 emit(
@@ -7689,6 +8174,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cross-sectional-ensemble",
         "institutional-rotation-v2",
         "capital-utilization-v1",
+        "diversified-rotation-v1",
     )
     campaign_plan = campaign.add_parser("plan")
     campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])
@@ -7729,7 +8215,11 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_observe = campaign.add_parser("observe")
     campaign_observe.add_argument(
         "--name",
-        choices=("cross-sectional-ensemble", "capital-utilization-v1"),
+        choices=(
+            "cross-sectional-ensemble",
+            "capital-utilization-v1",
+            "diversified-rotation-v1",
+        ),
         default="cross-sectional-ensemble",
     )
     campaign_package = campaign.add_parser("package")
