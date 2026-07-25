@@ -3447,9 +3447,20 @@ def _autopilot_data_stage(
 
 
 def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
-    """Verify every breakout observer remains frozen and orderless."""
+    """Append causal forward evidence and verify every observer is orderless."""
 
     from core.autopilot import assert_orderless_research_payload
+    from research.forward_observer import (
+        FORWARD_OBSERVER_SCHEMA_VERSION,
+        ForwardPerformanceGatePolicy,
+        build_breakout_forward_evidence,
+        merge_breakout_forward_manifest,
+    )
+    from research.portfolio_breakout import (
+        backtest_breakout_portfolio,
+        breakout_observer_snapshot,
+        breakout_portfolio_parameter_set,
+    )
 
     report_path = _breakout_portfolio_campaign_path(settings)
     if not report_path.is_file():
@@ -3461,7 +3472,31 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
     manifests = dict(report.get("observer_manifests") or {})
     if not manifests:
         raise RuntimeError("AUTOPILOT_OBSERVER_MANIFESTS_MISSING")
+    frozen, _, markets, source_paths, frames = _frozen_rotation_inputs(
+        settings
+    )
+    policy = _strict_rotation_portfolio_policy(
+        settings,
+        markets=markets,
+    )
+    forward_start = pd.Timestamp(frozen["forward_validation_start"])
+    forward_start = (
+        forward_start.tz_localize("UTC")
+        if forward_start.tzinfo is None
+        else forward_start.tz_convert("UTC")
+    )
+    parameters_by_name = {
+        (
+            f"TURTLE_{parameters.entry_lookback}_"
+            f"{parameters.exit_lookback}_"
+            f"EMA{parameters.trend_ema_period}_"
+            f"{parameters.weighting.upper()}"
+        ): parameters
+        for parameters in breakout_portfolio_parameter_set()
+    }
     identities: dict[str, str] = {}
+    summaries: dict[str, Any] = {}
+    degradation_observations: dict[str, Any] = {}
     for policy_name, raw_path in sorted(manifests.items()):
         path = Path(raw_path)
         if not path.is_file():
@@ -3476,14 +3511,108 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             raise RuntimeError(
                 f"AUTOPILOT_OBSERVER_PROMOTION_IMPLIED:{policy_name}"
             )
+        parameters = parameters_by_name.get(str(policy_name))
+        if parameters is None:
+            raise RuntimeError(
+                f"AUTOPILOT_UNKNOWN_BREAKOUT_POLICY:{policy_name}"
+            )
+        result = backtest_breakout_portfolio(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=policy,
+        )
+        evidence = build_breakout_forward_evidence(
+            result,
+            frames,
+            forward_start=forward_start,
+            minimum_observations=int(
+                observer[
+                    "minimum_forward_closed_daily_observations"
+                ]
+            ),
+            minimum_rebalances=int(
+                observer["minimum_forward_rebalances"]
+            ),
+            performance_policy=ForwardPerformanceGatePolicy(
+                minimum_profit_factor=(
+                    settings.research.minimum_profit_factor
+                ),
+                minimum_stressed_profit_factor=(
+                    settings.research.minimum_stressed_profit_factor
+                ),
+                maximum_drawdown=(
+                    settings.research.maximum_drawdown
+                ),
+                minimum_effective_sample_size=(
+                    settings.research.minimum_effective_sample_size
+                ),
+                stressed_cost_multiplier=(
+                    settings.costs.stressed_cost_multiplier
+                ),
+                bootstrap_samples=(
+                    settings.research.multiple_testing_bootstrap_samples
+                ),
+                bootstrap_block_size=(
+                    settings.research.multiple_testing_block_size
+                ),
+                bootstrap_seed=settings.app.random_seed,
+            ),
+        )
+        current_snapshot = breakout_observer_snapshot(result)
+        observer = merge_breakout_forward_manifest(
+            {**observer, **current_snapshot},
+            evidence,
+            source_candidate_identity=frozen["immutable_identity"],
+            strategy_dna_hash=parameters.dna_hash,
+            execution_identity=current_snapshot[
+                "execution_identity"
+            ],
+            forward_start=forward_start,
+        )
+        observer["data_hashes"] = {
+            market: sha256_file(source_path)
+            for market, source_path in source_paths.items()
+        }
+        atomic_write_json(path, _json_ready(observer))
+        assert_orderless_research_payload(observer)
         identities[str(policy_name)] = str(
             observer.get("strategy_dna_hash") or ""
         )
-    return {
+        summaries[str(policy_name)] = observer["forward_summary"]
+        if observer.get("degradation_observation") is not None:
+            degradation_observations[str(policy_name)] = observer[
+                "degradation_observation"
+            ]
+    total_forward_observations = sum(
+        int(summary["closed_daily_observations"])
+        for summary in summaries.values()
+    )
+    all_sample_requirements_met = bool(summaries) and all(
+        all(bool(value) for value in summary["checks"].values())
+        for summary in summaries.values()
+    )
+    all_forward_performance_pass = bool(summaries) and all(
+        bool(summary.get("forward_performance_pass", False))
+        for summary in summaries.values()
+    )
+    aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
+        "forward_observer_schema_version": (
+            FORWARD_OBSERVER_SCHEMA_VERSION
+        ),
         "observer_count": len(manifests),
         "observer_dna_hashes": identities,
+        "forward_summaries": summaries,
+        "degradation_observations": degradation_observations,
+        "total_forward_observations": total_forward_observations,
+        "all_sample_requirements_met": all_sample_requirements_met,
+        "all_forward_performance_pass": (
+            all_forward_performance_pass
+        ),
         "source_candidate_identity": report.get(
             "source_candidate_identity"
         ),
@@ -3495,6 +3624,13 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         "paper_candidate_permitted": False,
         "live_ready": False,
     }
+    forward_report = (
+        settings.paths.lab_dir
+        / "reports"
+        / "portfolio_breakout_forward_observer_v1.json"
+    )
+    atomic_write_json(forward_report, _json_ready(aggregate))
+    return {**aggregate, "report": str(forward_report)}
 
 
 def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
@@ -3516,6 +3652,40 @@ def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
         / "feature_store"
         / "portfolio_daily_v1",
     )
+
+
+def _preserved_breakout_forward_fields(
+    existing: Mapping[str, Any],
+    *,
+    source_candidate_identity: str,
+    strategy_dna_hash: str,
+    execution_identity: str,
+    forward_start: Any,
+) -> dict[str, Any]:
+    """Validate observer identity and retain only append-only forward fields."""
+
+    from research.forward_observer import (
+        validate_forward_manifest_identity,
+    )
+
+    validate_forward_manifest_identity(
+        existing,
+        source_candidate_identity=source_candidate_identity,
+        strategy_dna_hash=strategy_dna_hash,
+        execution_identity=execution_identity,
+        forward_start=forward_start,
+    )
+    return {
+        field: existing[field]
+        for field in (
+            "forward_observer_schema_version",
+            "forward_observations",
+            "forward_decisions",
+            "forward_summary",
+            "degradation_observation",
+        )
+        if field in existing
+    }
 
 
 def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
@@ -5357,8 +5527,27 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         daily_returns[policy_name] = returns[
             ~returns.index.duplicated(keep="last")
         ]
+        observer_path = (
+            settings.paths.lab_dir
+            / "observers"
+            / "portfolio_breakout_v1"
+            / f"{policy_name.lower()}.json"
+        )
+        existing_observer = (
+            read_json(observer_path)
+            if observer_path.is_file()
+            else {}
+        )
+        snapshot = breakout_observer_snapshot(normal)
+        preserved_forward = _preserved_breakout_forward_fields(
+            existing_observer,
+            source_candidate_identity=frozen["immutable_identity"],
+            strategy_dna_hash=parameters.dna_hash,
+            execution_identity=snapshot["execution_identity"],
+            forward_start=forward_start,
+        )
         observer = {
-            **breakout_observer_snapshot(normal),
+            **snapshot,
             "family": "PORTFOLIO_BREAKOUT_V1",
             "policy_name": policy_name,
             "parameters": asdict(parameters),
@@ -5367,15 +5556,14 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
             "minimum_forward_closed_daily_observations": 365,
             "minimum_forward_rebalances": 30,
             "forward_observations": [],
+            "data_hashes": {
+                market: sha256_file(path)
+                for market, path in paths.items()
+            },
+            **preserved_forward,
             "paper_candidate_permitted": False,
             "live_ready": False,
         }
-        observer_path = (
-            settings.paths.lab_dir
-            / "observers"
-            / "portfolio_breakout_v1"
-            / f"{policy_name.lower()}.json"
-        )
         atomic_write_json(observer_path, _json_ready(observer))
         observer_paths[policy_name] = str(observer_path)
         paired = paired_block_bootstrap_difference(

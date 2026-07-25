@@ -155,6 +155,23 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
         "paper_candidate_permitted": False,
         "live_ready": False,
     }
+    values["breakout_forward_observers"] = {
+        "observer.json": {
+            "source_candidate_identity": "frozen-identity",
+            "policy_name": "TURTLE_TEST",
+            "strategy_dna_hash": "breakout-dna",
+            "forward_observer_schema_version": "forward-v1",
+            "forward_summary": {
+                "status": "COLLECTING_FORWARD_DATA",
+                "closed_daily_observations": 0,
+                "forward_performance_pass": False,
+            },
+            "degradation_observation": None,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+    }
 
     summary = build_acceptance_summary(**values)
 
@@ -170,6 +187,10 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
     )
     assert summary["feature_store"]["dataset_id"] == "tensor-id"
     assert summary["feature_store"]["research_only"] is True
+    assert summary["breakout_forward_observers"]["policy_count"] == 1
+    assert not summary["breakout_forward_observers"][
+        "all_formal_performance_pass"
+    ]
 
 
 def test_acceptance_summary_rejects_autopilot_live_permission() -> None:

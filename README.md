@@ -570,6 +570,13 @@ volatility, shifted Donchian distances, EMA distances, volume state, BTC
 relative momentum, cross-sectional rank and breadth. Targets are physically
 separate and become available only at the next asset candle. No full-sample
 normalization is permitted. `--skip-feature-store` exists only for diagnostics.
+The observer stage then reconstructs append-only open-to-open forward returns
+for all eight frozen breakout DNA variants. Every record hashes its source
+prices, weights, turnover, costs, regime and realized hypothetical return.
+Revised or truncated historical evidence fails closed. Performance gates remain
+disabled until 365 realized daily intervals, 30 rebalances and five decisions
+in every required trend/volatility/breadth state are all present; only then are
+normal/stressed return, PF, drawdown, ESS and block-bootstrap CI evaluated.
 `--mode task-install --yes` installs a least-privilege Windows task that runs
 the orderless refresh/research cycle daily at 00:15 local time, starts missed
 runs when available, ignores overlapping instances and records all evidence in

@@ -92,6 +92,7 @@ def build_acceptance_summary(
     autopilot_state: dict[str, Any] | None = None,
     autopilot_degradation: dict[str, Any] | None = None,
     feature_store: dict[str, Any] | None = None,
+    breakout_forward_observers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -148,6 +149,28 @@ def build_acceptance_summary(
             != feature_store.get("dataset_id")
         ):
             raise ValueError("autopilot feature store identity mismatch")
+    if breakout_forward_observers is not None:
+        for name, observer_payload in breakout_forward_observers.items():
+            if (
+                observer_payload.get("source_candidate_identity")
+                != identity
+            ):
+                raise ValueError(
+                    f"breakout forward observer identity mismatch: {name}"
+                )
+            if int(observer_payload.get("orders_generated") or 0) != 0:
+                raise ValueError(
+                    f"breakout forward observer contains orders: {name}"
+                )
+            if bool(
+                observer_payload.get(
+                    "paper_candidate_permitted",
+                    False,
+                )
+            ) or bool(observer_payload.get("live_ready", False)):
+                raise ValueError(
+                    f"breakout forward observer contains permission: {name}"
+                )
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -393,6 +416,42 @@ def build_acceptance_summary(
             "paper_candidate_permitted": False,
             "live_ready": False,
         }
+    if breakout_forward_observers is not None:
+        per_policy = {
+            str(payload.get("policy_name") or name): {
+                "strategy_dna_hash": payload["strategy_dna_hash"],
+                "forward_observer_schema_version": payload.get(
+                    "forward_observer_schema_version"
+                ),
+                "forward_summary": payload.get("forward_summary"),
+                "degradation_observation": payload.get(
+                    "degradation_observation"
+                ),
+                "orders_generated": 0,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+            for name, payload in sorted(
+                breakout_forward_observers.items()
+            )
+        }
+        summary["breakout_forward_observers"] = {
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "policy_count": len(per_policy),
+            "per_policy": per_policy,
+            "all_formal_performance_pass": bool(per_policy)
+            and all(
+                bool(
+                    (row.get("forward_summary") or {}).get(
+                        "forward_performance_pass",
+                        False,
+                    )
+                )
+                for row in per_policy.values()
+            ),
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
     return summary
 
 
@@ -447,6 +506,9 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         ),
         "portfolio_breakout_campaign_v1.csv": (
             reports / "portfolio_breakout_campaign_v1.csv"
+        ),
+        "portfolio_breakout_forward_observer_v1.json": (
+            reports / "portfolio_breakout_forward_observer_v1.json"
         ),
     }
     observer_directory = (
@@ -562,6 +624,11 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         feature_store=payloads.get(
             "feature_store_latest.manifest.json"
         ),
+        breakout_forward_observers={
+            name: payload
+            for name, payload in payloads.items()
+            if name.startswith("breakout_observer_")
+        },
     )
     evidence_hash = stable_hash(
         {
