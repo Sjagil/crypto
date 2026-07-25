@@ -86,6 +86,7 @@ def build_acceptance_summary(
     continuation: dict[str, Any],
     observer: dict[str, Any],
     quality: dict[str, Any],
+    capital_utilization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -104,6 +105,11 @@ def build_acceptance_summary(
         raise ValueError("institutional audit candidate identity mismatch")
     if observer.get("source_candidate_identity") != identity:
         raise ValueError("forward observer candidate identity mismatch")
+    if capital_utilization is not None:
+        if capital_utilization.get("source_candidate_identity") != identity:
+            raise ValueError("capital utilization candidate identity mismatch")
+        if capital_utilization.get("strategy_dna_hash") != dna_hash:
+            raise ValueError("capital utilization strategy DNA mismatch")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -140,7 +146,7 @@ def build_acceptance_summary(
         )
     )
     forward_pass = forward["status"] == "FORWARD_PASS"
-    return {
+    summary = {
         "generated_at": utc_iso(),
         "source_commit": source_commit,
         "status": (
@@ -226,6 +232,35 @@ def build_acceptance_summary(
         "quality": quality,
         "live_orders": 0,
     }
+    if capital_utilization is not None:
+        summary["capital_utilization"] = {
+            "status": capital_utilization["status"],
+            "campaign": capital_utilization["campaign"],
+            "policies_tested": capital_utilization["policies_tested"],
+            "prior_trials_accounted": capital_utilization[
+                "prior_trials_accounted"
+            ],
+            "total_known_trials": capital_utilization["total_known_trials"],
+            "multiple_testing": capital_utilization["multiple_testing"],
+            "paired_block_bootstrap_vs_frozen_control": capital_utilization[
+                "paired_block_bootstrap_vs_frozen_control"
+            ],
+            "policy_results": [
+                {
+                    "policy_name": row["policy_name"],
+                    "current_operational_limits_compatible": row[
+                        "current_operational_limits_compatible"
+                    ],
+                    "metrics": row["normal"]["metrics"],
+                    "gates": row["gates"],
+                }
+                for row in capital_utilization["policy_results"]
+            ],
+            "paper_candidates": 0,
+            "live_orders": 0,
+            "live_ready": False,
+        }
+    return summary
 
 
 def _artifact_paths(settings: Settings) -> dict[str, Path]:
@@ -262,7 +297,18 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "rotation_forward_observer_v2.json": (
             reports / "rotation_forward_observer_v2.json"
         ),
+        "capital_utilization_campaign_v1.json": (
+            reports / "capital_utilization_campaign_v1.json"
+        ),
+        "capital_utilization_campaign_v1.csv": (
+            reports / "capital_utilization_campaign_v1.csv"
+        ),
     }
+    observer_directory = (
+        settings.paths.lab_dir / "observers" / "capital_utilization_v1"
+    )
+    for observer in sorted(observer_directory.glob("*.json")):
+        paths[f"capital_observer_{observer.name}"] = observer
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -326,6 +372,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         continuation=payloads["cross_sectional_institutional_v2.json"],
         observer=payloads["rotation_forward_observer_v2.json"],
         quality=quality,
+        capital_utilization=payloads["capital_utilization_campaign_v1.json"],
     )
     evidence_hash = stable_hash(
         {

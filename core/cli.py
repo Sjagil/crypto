@@ -3329,6 +3329,14 @@ def _rotation_campaign_path(
     return settings.paths.lab_dir / "reports" / name
 
 
+def _capital_utilization_campaign_path(settings: Settings) -> Path:
+    return (
+        settings.paths.lab_dir
+        / "reports"
+        / "capital_utilization_campaign_v1.json"
+    )
+
+
 def _rotation_return_ci_lower(
     returns: pd.Series,
     *,
@@ -4477,6 +4485,400 @@ def _run_rotation_forward_observer(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
+    """Compare pre-registered allocation policies on one frozen signal DNA."""
+
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        CAPITAL_UTILIZATION_METRICS_VERSION,
+        RotationPortfolioPolicy,
+        backtest_rotation,
+        capital_utilization_benchmark_suite,
+        capital_utilization_policy_set,
+        paired_block_bootstrap_difference,
+        rotation_decision_snapshot,
+        rotation_period_metrics,
+    )
+
+    frozen_path = (
+        settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    )
+    frozen_sha_before = sha256_file(frozen_path)
+    frozen, parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
+    policies = capital_utilization_policy_set()
+    continuation_path = _rotation_campaign_path(settings, institutional=True)
+    prior_trials = 1_293
+    if continuation_path.is_file():
+        prior_trials = int(
+            read_json(continuation_path).get(
+                "total_known_family_trials",
+                prior_trials,
+            )
+        )
+    periods = {
+        "development": ("2021-08-05", "2023-12-31"),
+        "validation": ("2024-01-01", "2025-06-30"),
+        "confirmation": ("2025-07-01", "2026-07-23"),
+    }
+    normal_results: dict[str, Any] = {}
+    daily_returns: dict[str, pd.Series] = {}
+    rows: list[dict[str, Any]] = []
+    observer_paths: dict[str, str] = {}
+    forward_start = pd.Timestamp(frozen["forward_validation_start"])
+    forward_start = (
+        forward_start.tz_localize("UTC")
+        if forward_start.tzinfo is None
+        else forward_start.tz_convert("UTC")
+    )
+
+    for allocation in policies:
+        portfolio_policy = RotationPortfolioPolicy(
+            allowed_markets=markets,
+            maximum_total_exposure=allocation.maximum_total_exposure,
+            maximum_position_exposure=allocation.maximum_position_exposure,
+            minimum_cash=allocation.minimum_cash,
+            minimum_history_observations=90,
+        )
+        normal = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=portfolio_policy,
+            capital_utilization_policy=allocation,
+        )
+        stressed = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=(
+                settings.costs.default_fee
+                * settings.costs.stressed_cost_multiplier
+            ),
+            slippage_bps=(
+                settings.costs.slippage_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            spread_bps=(
+                settings.costs.spread_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            portfolio_policy=portfolio_policy,
+            capital_utilization_policy=allocation,
+        )
+        period_metrics: dict[str, Any] = {}
+        stressed_period_metrics: dict[str, Any] = {}
+        for period, bounds in periods.items():
+            period_metrics[period], _ = rotation_period_metrics(
+                normal.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+            stressed_period_metrics[period], _ = rotation_period_metrics(
+                stressed.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+        normal_results[allocation.name] = normal
+        daily_returns[allocation.name] = normal.equity_curve.pct_change(
+            fill_method=None
+        ).dropna()
+        current_operational_compatible = (
+            allocation.maximum_total_exposure
+            <= settings.operational.maximum_portfolio_exposure + 1e-12
+            and allocation.maximum_position_exposure
+            <= settings.operational.maximum_position_fraction + 1e-12
+            and allocation.minimum_cash
+            >= settings.operational.reserve_cash_fraction - 1e-12
+        )
+        snapshot = rotation_decision_snapshot(
+            frames,
+            parameters,
+            portfolio_policy=portfolio_policy,
+            capital_utilization_policy=allocation,
+        )
+        observer_payload = {
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "source_candidate_identity": frozen["immutable_identity"],
+            "strategy_dna_hash": parameters.dna_hash,
+            "allocation_policy": asdict(allocation),
+            "allocation_policy_hash": allocation.policy_hash,
+            "execution_identity": normal.summary()["execution_identity"],
+            "forward_start": forward_start.isoformat(),
+            "minimum_forward_closed_daily_observations": 365,
+            "minimum_forward_rebalances": 30,
+            "regime_coverage_required": True,
+            "latest_historical_snapshot": snapshot,
+            "forward_observations": [],
+            "current_operational_limits_compatible": (
+                current_operational_compatible
+            ),
+            "orders_generated": 0,
+            "orders_submitted": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+        observer_path = (
+            settings.paths.lab_dir
+            / "observers"
+            / "capital_utilization_v1"
+            / f"{allocation.name.lower()}.json"
+        )
+        atomic_write_json(observer_path, _json_ready(observer_payload))
+        observer_paths[allocation.name] = str(observer_path)
+        rows.append(
+            {
+                "policy_name": allocation.name,
+                "allocation_policy": asdict(allocation),
+                "allocation_policy_hash": allocation.policy_hash,
+                "portfolio_policy": asdict(portfolio_policy),
+                "execution_identity": normal.summary()["execution_identity"],
+                "same_frozen_signal_dna": (
+                    normal.parameters.dna_hash == frozen["strategy_dna_hash"]
+                ),
+                "current_operational_limits_compatible": (
+                    current_operational_compatible
+                ),
+                "normal": normal.summary(),
+                "stressed": stressed.summary(),
+                "periods": period_metrics,
+                "stressed_periods": stressed_period_metrics,
+                "cash_reason_attribution": normal.metrics[
+                    "cash_reason_attribution_average"
+                ],
+                "observer_manifest": str(observer_path),
+            }
+        )
+
+    return_matrix = pd.concat(daily_returns, axis=1).dropna(how="any")
+    multiple = multiple_testing_bootstrap(
+        return_matrix,
+        bootstrap_samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=prior_trials + len(policies),
+    )
+    control = normal_results["FROZEN_CONTROL"]
+    control_returns = daily_returns["FROZEN_CONTROL"]
+    paired: dict[str, Any] = {}
+    for index, allocation in enumerate(policies):
+        if allocation.name == "FROZEN_CONTROL":
+            continue
+        candidate = normal_results[allocation.name]
+        paired[allocation.name] = paired_block_bootstrap_difference(
+            daily_returns[allocation.name],
+            control_returns,
+            samples=2_000,
+            block_size=10,
+            seed=settings.app.random_seed + index,
+        )
+        incremental_exposure = float(
+            candidate.metrics["average_exposure"]
+            - control.metrics["average_exposure"]
+        )
+        incremental_return = float(
+            candidate.metrics["net_return"] - control.metrics["net_return"]
+        )
+        paired[allocation.name]["incremental_net_return"] = incremental_return
+        paired[allocation.name]["incremental_average_exposure"] = (
+            incremental_exposure
+        )
+        paired[allocation.name]["incremental_return_per_incremental_exposure"] = (
+            incremental_return / incremental_exposure
+            if abs(incremental_exposure) > 1e-12
+            else 0.0
+        )
+        paired[allocation.name]["incremental_maximum_drawdown_depth"] = float(
+            abs(candidate.metrics["maximum_drawdown"])
+            - abs(control.metrics["maximum_drawdown"])
+        )
+        paired[allocation.name]["incremental_daily_cvar_95_depth"] = float(
+            abs(candidate.metrics["daily_cvar_95"])
+            - abs(control.metrics["daily_cvar_95"])
+        )
+
+    for row in rows:
+        name = str(row["policy_name"])
+        normal = normal_results[name]
+        dsr = float(
+            multiple.deflated_sharpe_probabilities.get(name, 0.0)
+        )
+        economic_checks = {
+            "all_periods_positive": all(
+                float(row["periods"][period]["net_return"]) > 0
+                for period in periods
+            ),
+            "all_stressed_periods_positive": all(
+                float(row["stressed_periods"][period]["net_return"]) > 0
+                for period in periods
+            ),
+            "minimum_effective_sample": (
+                int(normal.metrics["portfolio_period_effective_sample_size"])
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "minimum_rebalances": (
+                int(normal.metrics["rebalance_count"])
+                >= settings.research.minimum_trades
+            ),
+            "profit_factor": (
+                float(normal.metrics["portfolio_period_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "maximum_drawdown": (
+                abs(float(normal.metrics["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+            "exposure_limits_respected": bool(
+                normal.integrity["maximum_exposure_respected"]
+                and normal.integrity["maximum_position_exposure_respected"]
+                and normal.integrity["minimum_cash_respected"]
+            ),
+        }
+        statistical_checks = {
+            "source_historical_statistical_gates": bool(
+                frozen["robustness"]["statistical_gates_passed"]
+            ),
+            "deflated_sharpe": (
+                dsr >= settings.research.minimum_deflated_sharpe_probability
+            ),
+            "white_reality_check": (
+                multiple.white_reality_check_pvalue
+                <= settings.research.maximum_white_reality_check_pvalue
+            ),
+            "hansen_spa": (
+                multiple.hansen_spa_pvalue
+                <= settings.research.maximum_hansen_spa_pvalue
+            ),
+            "pbo": (
+                multiple.probability_of_backtest_overfitting is not None
+                and multiple.probability_of_backtest_overfitting
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+        }
+        row["gates"] = {
+            "economic_checks": economic_checks,
+            "statistical_checks": statistical_checks,
+            "deflated_sharpe_probability": dsr,
+            "economic_pass": all(economic_checks.values()),
+            "statistical_pass": all(statistical_checks.values()),
+            "research_pass": False,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+
+    benchmarks = capital_utilization_benchmark_suite(
+        frames,
+        start=control.equity_curve.index[0],
+        minimum_history_observations=90,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        allowed_markets=markets,
+        exposure_matches={
+            name: float(result.metrics["average_exposure"])
+            for name, result in normal_results.items()
+        },
+    )
+    rows.sort(
+        key=lambda row: float(row["normal"]["metrics"]["net_return"]),
+        reverse=True,
+    )
+    payload = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "CAPITAL_UTILIZATION_V1",
+        "result_type": "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON",
+        "capital_utilization_metrics_version": (
+            CAPITAL_UTILIZATION_METRICS_VERSION
+        ),
+        "source_candidate_identity": frozen["immutable_identity"],
+        "strategy_dna_hash": parameters.dna_hash,
+        "signal_dna_frozen": True,
+        "signal_parameters_changed": False,
+        "markets": list(markets),
+        "timeframe": "1d",
+        "policies_tested": len(policies),
+        "prior_trials_accounted": prior_trials,
+        "total_known_trials": prior_trials + len(policies),
+        "periods": periods,
+        "multiple_testing": asdict(multiple),
+        "source_historical_robustness": frozen["robustness"],
+        "paired_block_bootstrap_vs_frozen_control": paired,
+        "benchmarks": benchmarks,
+        "policy_results": rows,
+        "observer_manifests": observer_paths,
+        "frozen_candidate_sha256_before": frozen_sha_before,
+        "frozen_candidate_sha256_after": sha256_file(frozen_path),
+        "frozen_candidate_unchanged": (
+            frozen_sha_before == sha256_file(frozen_path)
+        ),
+        "selection_note": (
+            "This campaign compares a pre-registered allocation layer only. "
+            "It does not reselect momentum horizons, assets, ranks, filters, "
+            "execution timing or cost assumptions."
+        ),
+        "operational_note": (
+            "Policies above configured 40% total or 20% per-position exposure "
+            "are research-only and cannot be promoted without a separate manual "
+            "risk-policy decision plus all forward and statistical gates."
+        ),
+        "paper_candidates": 0,
+        "live_orders": 0,
+        "live_ready": False,
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+    }
+    report_path = _capital_utilization_campaign_path(settings)
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "policy": row["policy_name"],
+                "net_return": row["normal"]["metrics"]["net_return"],
+                "cagr": row["normal"]["metrics"]["annualized_return"],
+                "sharpe": row["normal"]["metrics"]["sharpe"],
+                "sortino": row["normal"]["metrics"]["sortino"],
+                "omega": row["normal"]["metrics"]["omega"],
+                "maximum_drawdown": row["normal"]["metrics"][
+                    "maximum_drawdown"
+                ],
+                "daily_cvar_95": row["normal"]["metrics"]["daily_cvar_95"],
+                "average_exposure": row["normal"]["metrics"][
+                    "average_exposure"
+                ],
+                "average_cash": row["normal"]["metrics"][
+                    "cash_fraction_average"
+                ],
+                "return_per_average_exposure": row["normal"]["metrics"][
+                    "return_per_average_exposure"
+                ],
+                "economic_pass": row["gates"]["economic_pass"],
+                "statistical_pass": row["gates"]["statistical_pass"],
+                "operational_compatible": row[
+                    "current_operational_limits_compatible"
+                ],
+                "paper_candidate": False,
+                "live_ready": False,
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "policies_tested": len(policies),
+        "total_known_trials": payload["total_known_trials"],
+        "frozen_candidate_unchanged": payload["frozen_candidate_unchanged"],
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": observer_paths,
+        "paper_candidates": 0,
+        "live_orders": 0,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -4858,6 +5260,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         formal_campaign = campaign_name == "formal-five-family"
         ensemble_campaign = campaign_name == "cross-sectional-ensemble"
         institutional_campaign = campaign_name == "institutional-rotation-v2"
+        capital_utilization_campaign = campaign_name == "capital-utilization-v1"
         rotation_campaign = campaign_name in {
             "cross-sectional-rotation",
             "cross-sectional-ensemble",
@@ -4865,7 +5268,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         }
         campaign_timeframes = (
             ("1d",)
-            if rotation_campaign
+            if rotation_campaign or capital_utilization_campaign
             else (("1h",) if formal_campaign else ("5m", "15m"))
         )
         campaign_label = (
@@ -4880,9 +5283,13 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             if rotation_campaign
             else (
-                "FORMAL_CAUSAL_FIVE_FAMILY_V1"
-                if formal_campaign
-                else "ALLOWED_5M_15M_FULL_HISTORY_V2"
+                "CAPITAL_UTILIZATION_V1"
+                if capital_utilization_campaign
+                else (
+                    "FORMAL_CAUSAL_FIVE_FAMILY_V1"
+                    if formal_campaign
+                    else "ALLOWED_5M_15M_FULL_HISTORY_V2"
+                )
             )
         )
         campaign_sizes = _lab_sizes(
@@ -4911,6 +5318,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(await asyncio.to_thread(_run_rotation_institutional_audit, settings))
             return 0
         if campaign_action == "observe":
+            if capital_utilization_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_capital_utilization_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if not ensemble_campaign:
                 raise ValueError(
                     "forward observer is available only for cross-sectional-ensemble"
@@ -4932,6 +5347,42 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action in {"plan", "estimate"}:
+            if capital_utilization_campaign:
+                from research.portfolio_selection import (
+                    capital_utilization_policy_set,
+                )
+
+                policies = capital_utilization_policy_set()
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"
+                        ),
+                        "signal_dna_frozen": True,
+                        "signal_parameters_changed": False,
+                        "policies": [asdict(policy) for policy in policies],
+                        "allocation_policy_trials": len(policies),
+                        "prior_trials_accounted": 1_293,
+                        "total_known_trials": 1_293 + len(policies),
+                        "markets": [
+                            "BTC-EUR",
+                            "ETH-EUR",
+                            "SOL-EUR",
+                            "LINK-EUR",
+                        ],
+                        "timeframes": ["1d"],
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             if rotation_campaign:
                 from research.portfolio_selection import (
                     ensemble_rotation_parameter_grid,
@@ -5064,6 +5515,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "run":
+            if capital_utilization_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "allocation_policy_trials": 5,
+                            "reason_code": (
+                                "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_capital_utilization_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if rotation_campaign:
                 if not args.yes:
                     emit(
@@ -5153,6 +5624,18 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
+            if capital_utilization_campaign:
+                report_path = _capital_utilization_campaign_path(settings)
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if rotation_campaign:
                 report_path = _rotation_campaign_path(
                     settings,
@@ -5181,6 +5664,19 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "status":
+            if capital_utilization_campaign:
+                report_path = _capital_utilization_campaign_path(settings)
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            "COMPLETED" if report_path.is_file() else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             if rotation_campaign:
                 report_path = _rotation_campaign_path(
                     settings,
@@ -7192,6 +7688,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cross-sectional-rotation",
         "cross-sectional-ensemble",
         "institutional-rotation-v2",
+        "capital-utilization-v1",
     )
     campaign_plan = campaign.add_parser("plan")
     campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])
@@ -7232,7 +7729,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_observe = campaign.add_parser("observe")
     campaign_observe.add_argument(
         "--name",
-        choices=("cross-sectional-ensemble",),
+        choices=("cross-sectional-ensemble", "capital-utilization-v1"),
         default="cross-sectional-ensemble",
     )
     campaign_package = campaign.add_parser("package")

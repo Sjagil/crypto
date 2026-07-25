@@ -5,10 +5,13 @@ import pandas as pd
 import pytest
 
 from research.portfolio_selection import (
+    CapitalUtilizationPolicy,
     RotationParameters,
     RotationPortfolioPolicy,
     backtest_rotation,
+    capital_utilization_policy_set,
     ensemble_rotation_parameter_grid,
+    paired_block_bootstrap_difference,
     rotation_benchmark_suite,
     rotation_decision_snapshot,
     rotation_parameter_grid,
@@ -430,3 +433,95 @@ def test_frozen_decision_snapshot_and_regime_coverage_never_create_orders() -> N
     coverage = rotation_regime_coverage(result.decisions, minimum_per_state=1)
     assert coverage["decision_observations"] > 0
     assert set(coverage["counts"]) == {"btc_trend", "volatility", "breadth"}
+
+
+def test_capital_utilization_policies_preserve_dna_and_raise_exposure_by_policy() -> None:
+    frames = _rotation_frames(360)
+    parameters = _parameters(
+        additional_momentum_lookbacks=(60,),
+        require_btc_uptrend=False,
+        continuous_regime=True,
+        top_n=2,
+    )
+    results = {}
+    for allocation in capital_utilization_policy_set():
+        execution_policy = RotationPortfolioPolicy(
+            allowed_markets=tuple(frames),
+            maximum_total_exposure=allocation.maximum_total_exposure,
+            maximum_position_exposure=allocation.maximum_position_exposure,
+            minimum_cash=allocation.minimum_cash,
+            minimum_history_observations=20,
+        )
+        results[allocation.name] = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=0.0025,
+            slippage_bps=8.0,
+            spread_bps=5.0,
+            portfolio_policy=execution_policy,
+            capital_utilization_policy=allocation,
+        )
+
+    assert len({result.parameters.dna_hash for result in results.values()}) == 1
+    assert (
+        results["BALANCED_60"].metrics["average_exposure"]
+        > results["FROZEN_CONTROL"].metrics["average_exposure"]
+    )
+    assert (
+        results["SEMI_AGGRESSIVE_80"].metrics["average_exposure"]
+        > results["BALANCED_60"].metrics["average_exposure"]
+    )
+    for result in results.values():
+        allocation = result.capital_utilization_policy
+        assert allocation is not None
+        assert (
+            result.metrics["maximum_exposure_observed"]
+            <= allocation.maximum_total_exposure + 1e-12
+        )
+        ranked = result.decisions[
+            result.decisions["reason"] == "RANKED_MOMENTUM"
+        ]
+        assert not ranked.empty
+        assert ranked["cash_reason_codes"].map(lambda value: isinstance(value, list)).all()
+        assert ranked["cash_attribution"].map(lambda value: isinstance(value, dict)).all()
+        assert ranked["eligible_assets"].map(lambda value: isinstance(value, list)).all()
+        assert ranked["momentum_scores"].map(lambda value: isinstance(value, dict)).all()
+
+
+def test_capital_policy_limit_mismatch_fails_closed_and_bootstrap_is_paired() -> None:
+    allocation = CapitalUtilizationPolicy(
+        name="TEST_60",
+        base_exposure_budget=0.60,
+        maximum_total_exposure=0.60,
+        maximum_position_exposure=0.30,
+        minimum_cash=0.40,
+    )
+    incompatible = RotationPortfolioPolicy(
+        allowed_markets=tuple(_rotation_frames()),
+        maximum_total_exposure=0.40,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.60,
+    )
+    with pytest.raises(ValueError, match="limits must match"):
+        backtest_rotation(
+            _rotation_frames(),
+            _parameters(require_btc_uptrend=False),
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            spread_bps=0.0,
+            portfolio_policy=incompatible,
+            capital_utilization_policy=allocation,
+        )
+
+    index = pd.date_range("2025-01-01", periods=80, freq="1D", tz="UTC")
+    control = pd.Series(np.zeros(len(index)), index=index)
+    candidate = pd.Series(np.full(len(index), 0.001), index=index)
+    comparison = paired_block_bootstrap_difference(
+        candidate,
+        control,
+        samples=500,
+        block_size=5,
+        seed=7,
+    )
+    assert comparison["mean_daily_return_difference"] == pytest.approx(0.001)
+    assert comparison["ci_lower_95"] > 0

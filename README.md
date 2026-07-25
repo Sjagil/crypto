@@ -465,6 +465,10 @@ python main.py lab campaign package --name cross-sectional-ensemble
 python main.py lab campaign plan --name institutional-rotation-v2
 python main.py lab campaign run --name institutional-rotation-v2 --yes
 python main.py lab campaign report --name institutional-rotation-v2
+python main.py lab campaign plan --name capital-utilization-v1
+python main.py lab campaign run --name capital-utilization-v1 --yes
+python main.py lab campaign report --name capital-utilization-v1
+python main.py lab campaign observe --name capital-utilization-v1
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -504,6 +508,18 @@ known trials. Benchmark evidence includes cash, BTC buy-and-hold, point-in-time
 equal-weight weekly portfolios, a volatility-matched BTC view, and predeclared
 regime/momentum ablations. These are diagnostics, not retroactive promotion
 evidence.
+
+`capital-utilization-v1` keeps the frozen momentum, ranking, universe,
+weekly timing, filters and next-open execution unchanged. It compares an exact
+frozen control with defensive 40%, balanced 60%, semi-aggressive 80% and
+piecewise semi-aggressive 80% allocation policies. Each decision records
+eligible/excluded assets, exclusion reasons, ranks, regime components, budgets
+before and after caps, cash reason attribution, turnover and expected costs.
+The report adds Sortino, Omega, CVaR, drawdown duration, exposure buckets,
+40/60/80% equal-weight and exposure-matched benchmarks, plus paired block
+bootstrap differences. Every policy is counted as a known trial. Policies
+above configured operational exposure remain research-only; all observers
+generate and submit zero orders.
 
 `campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
 next-open weights with zero generated or submitted orders. Forward promotion
