@@ -3343,6 +3343,16 @@ def _absolute_momentum_campaign_path(settings: Settings) -> Path:
     return settings.paths.lab_dir / "reports" / "absolute_momentum_campaign_v1.json"
 
 
+def _absolute_momentum_plateau_campaign_path(
+    settings: Settings,
+) -> Path:
+    return (
+        settings.paths.lab_dir
+        / "reports"
+        / "absolute_momentum_plateau_campaign_v1.json"
+    )
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4417,6 +4427,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in absolute_forward_summaries.values()
     )
+    plateau_result = _run_absolute_momentum_plateau_campaign(
+        settings
+    )
+    assert_orderless_research_payload(plateau_result)
+    plateau_report = read_json(
+        _absolute_momentum_plateau_campaign_path(settings)
+    )
+    assert_orderless_research_payload(plateau_report)
+    plateau_forward_summaries = dict(
+        plateau_report.get("forward_summaries") or {}
+    )
+    plateau_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in plateau_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4448,10 +4473,23 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_absolute_momentum_plateau_observers": {
+            "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+            "status": plateau_result["status"],
+            "observer_count": len(plateau_forward_summaries),
+            "forward_summaries": plateau_forward_summaries,
+            "total_forward_observations": (
+                plateau_forward_observations
+            ),
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
             + absolute_forward_observations
+            + plateau_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4465,6 +4503,35 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
     )
     atomic_write_json(forward_report, _json_ready(aggregate))
     return {**aggregate, "report": str(forward_report)}
+
+
+def _autopilot_ledger_preflight_stage(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Verify every active append-only ledger before data or research runs."""
+
+    from research.ledger_guard import audit_forward_ledgers
+
+    observer_root = settings.paths.lab_dir / "observers"
+    active_directories = (
+        observer_root / "portfolio_breakout_v1",
+        observer_root / "capital_utilization_v1",
+        observer_root / "absolute_momentum_v1",
+        observer_root / "absolute_momentum_plateau_v1",
+    )
+    paths = [
+        path
+        for directory in active_directories
+        for path in sorted(directory.glob("*.json"))
+    ]
+    payload = audit_forward_ledgers(paths)
+    report_path = (
+        settings.paths.lab_dir
+        / "reports"
+        / "forward_ledger_preflight_v1.json"
+    )
+    atomic_write_json(report_path, _json_ready(payload))
+    return {**payload, "report": str(report_path)}
 
 
 def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
@@ -4525,6 +4592,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
 
     result = _run_breakout_portfolio_campaign(settings)
     absolute_momentum = _run_absolute_momentum_campaign(settings)
+    absolute_momentum_plateau = (
+        _run_absolute_momentum_plateau_campaign(settings)
+    )
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -4569,6 +4639,40 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             ],
             "pbo": absolute_momentum["pbo"],
             "observer_manifests": absolute_momentum[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_absolute_momentum_plateau_campaign": {
+            "campaign": absolute_momentum_plateau["campaign"],
+            "status": absolute_momentum_plateau["status"],
+            "generated_trial_count": absolute_momentum_plateau[
+                "generated_trial_count"
+            ],
+            "registered_unique_plateau_trials": (
+                absolute_momentum_plateau[
+                    "registered_unique_plateau_trials"
+                ]
+            ),
+            "total_known_trials": absolute_momentum_plateau[
+                "total_known_trials"
+            ],
+            "plateau_eligible_count": (
+                absolute_momentum_plateau[
+                    "plateau_eligible_count"
+                ]
+            ),
+            "standard_pbo": absolute_momentum_plateau[
+                "standard_pbo"
+            ],
+            "plateau_selection_pbo": (
+                absolute_momentum_plateau[
+                    "plateau_selection_pbo"
+                ]
+            ),
+            "observer_manifests": absolute_momentum_plateau[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -7401,6 +7505,637 @@ def _run_absolute_momentum_campaign(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _run_absolute_momentum_plateau_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Generate, register and evaluate the preregistered N±2 plateau."""
+
+    from research.absolute_momentum import (
+        ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION,
+        ABSOLUTE_MOMENTUM_PLATEAU_FAMILY,
+        absolute_momentum_plateau_parameter_set,
+        backtest_absolute_momentum,
+    )
+    from research.forward_observer import (
+        ForwardPerformanceGatePolicy,
+        build_rotation_forward_evidence,
+        merge_portfolio_forward_manifest,
+    )
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        RotationPortfolioPolicy,
+        rotation_period_metrics,
+    )
+    from research.strategy_registry import (
+        ContentAddressedTrialRegistry,
+        gaussian_plateau_table,
+        plateau_selection_pbo,
+    )
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir
+        / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"missing plateau campaign datasets: {missing}"
+        )
+    data_hashes = {
+        market: sha256_file(path) for market, path in paths.items()
+    }
+    data_fingerprint = stable_hash(data_hashes, length=64)
+    frames = {
+        market: pd.read_parquet(path)
+        for market, path in paths.items()
+    }
+    policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.20,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.80,
+        minimum_history_observations=90,
+    )
+    periods = {
+        "development": ("2019-12-01", "2023-12-31"),
+        "validation": ("2024-01-01", "2025-06-30"),
+        "confirmation": ("2025-07-01", "2026-07-23"),
+    }
+    candidates = absolute_momentum_plateau_parameter_set()
+    report_path = _absolute_momentum_plateau_campaign_path(settings)
+    plan_path = report_path.with_name(
+        "absolute_momentum_plateau_plan_v1.json"
+    )
+    search_space_hash = stable_hash(
+        [row.dna_hash for row in candidates],
+        length=64,
+    )
+    expected_plan = {
+        "schema_version": "absolute_momentum_plateau_plan_v1",
+        "status": "PREREGISTERED_NOT_RUN",
+        "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+        "strategy_family": ABSOLUTE_MOMENTUM_PLATEAU_FAMILY,
+        "engine_version": ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION,
+        "trial_count": len(candidates),
+        "strategy_dna_hashes": [
+            row.dna_hash for row in candidates
+        ],
+        "strategy_dna": [asdict(row) for row in candidates],
+        "search_space_hash": search_space_hash,
+        "selection_basis": "DEVELOPMENT_GAUSSIAN_N_PLUS_MINUS_2",
+        "kernel": [0.05, 0.25, 0.40, 0.25, 0.05],
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    if plan_path.is_file():
+        stored_plan = read_json(plan_path)
+        for field in (
+            "campaign",
+            "engine_version",
+            "trial_count",
+            "strategy_dna_hashes",
+            "search_space_hash",
+        ):
+            if stored_plan.get(field) != expected_plan.get(field):
+                raise RuntimeError(
+                    f"ABSOLUTE_MOMENTUM_PLATEAU_PLAN_DRIFT:{field}"
+                )
+    else:
+        atomic_write_json(plan_path, _json_ready(expected_plan))
+
+    def candidate_name(row: Any) -> str:
+        shift = (
+            f"P{row.horizon_shift:02d}"
+            if row.horizon_shift >= 0
+            else f"M{abs(row.horizon_shift):02d}"
+        )
+        return (
+            f"AMPS_{shift}_V{row.volatility_lookback}_"
+            f"T{int(row.target_annualized_volatility * 100):02d}"
+        )
+
+    results: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    development_returns: dict[str, pd.Series] = {}
+    by_name: dict[str, Any] = {}
+    for candidate in candidates:
+        name = candidate_name(candidate)
+        by_name[name] = candidate
+        result = backtest_absolute_momentum(
+            frames,
+            candidate.parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=policy,
+        )
+        results[name] = result
+        period_metrics: dict[str, Any] = {}
+        for period, bounds in periods.items():
+            metrics, returns = rotation_period_metrics(
+                result.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+            period_metrics[period] = metrics
+            if period == "development":
+                development_returns[name] = returns
+        rows.append(
+            {
+                "strategy_id": name,
+                "strategy_trial_dna_hash": candidate.dna_hash,
+                "execution_dna_hash": result.parameters.dna_hash,
+                "parameters": asdict(candidate),
+                "derived_execution_parameters": asdict(
+                    candidate.parameters
+                ),
+                "normal": result.summary(),
+                "periods": period_metrics,
+            }
+        )
+    matrix = pd.concat(
+        development_returns,
+        axis=1,
+    ).dropna(how="any")
+    coordinates = {
+        name: int(candidate.horizon_shift)
+        for name, candidate in by_name.items()
+    }
+    groups = {
+        name: candidate.nuisance_group
+        for name, candidate in by_name.items()
+    }
+    plateau = gaussian_plateau_table(
+        matrix,
+        coordinates=coordinates,
+        groups=groups,
+    )
+    registry = ContentAddressedTrialRegistry(
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "absolute_momentum_plateau_v1",
+        campaign_id="ABSOLUTE_MOMENTUM_PLATEAU_V1",
+    )
+    for row in rows:
+        name = str(row["strategy_id"])
+        plateau_row = plateau.loc[name].to_dict()
+        row["plateau"] = plateau_row
+        development = development_returns[name]
+        registration = registry.register(
+            data_fingerprint=data_fingerprint,
+            strategy_family=ABSOLUTE_MOMENTUM_PLATEAU_FAMILY,
+            strategy_dna_hash=str(
+                row["strategy_trial_dna_hash"]
+            ),
+            parameters=row["parameters"],
+            metrics_at_birth={
+                **row["periods"]["development"],
+                "full_sample_metrics": row["normal"]["metrics"],
+            },
+            return_path_hash=stable_hash(
+                [
+                    round(float(value), 15)
+                    for value in development.to_numpy(dtype=float)
+                ],
+                length=64,
+            ),
+            selection_metadata=_json_ready(plateau_row),
+        )
+        row["registration"] = registration
+    registry_audit = registry.audit()
+    absolute_report_path = _absolute_momentum_campaign_path(settings)
+    base_known_trials = (
+        int(
+            read_json(absolute_report_path).get(
+                "total_known_trials",
+                16_715,
+            )
+        )
+        if absolute_report_path.is_file()
+        else 16_715
+    )
+    total_known_trials = (
+        base_known_trials
+        + int(registry_audit["unique_trial_count"])
+    )
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=(
+            settings.research.multiple_testing_bootstrap_samples
+        ),
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=total_known_trials,
+    )
+    plateau_pbo, plateau_logits = plateau_selection_pbo(
+        matrix,
+        coordinates=coordinates,
+        groups=groups,
+    )
+    eligible = plateau[
+        plateau["plateau_eligible"].astype(bool)
+    ].sort_values(
+        "gaussian_smoothed_sharpe",
+        ascending=False,
+    )
+    primary_name = (
+        str(eligible.index[0]) if not eligible.empty else None
+    )
+    primary_result: dict[str, Any] | None = None
+    observer_paths: dict[str, str] = {}
+    forward_summaries: dict[str, Any] = {}
+    if primary_name is not None:
+        selected_candidate = by_name[primary_name]
+        normal = results[primary_name]
+        stressed = backtest_absolute_momentum(
+            frames,
+            selected_candidate.parameters,
+            fee_rate=(
+                settings.costs.default_fee
+                * settings.costs.stressed_cost_multiplier
+            ),
+            slippage_bps=(
+                settings.costs.slippage_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            spread_bps=(
+                settings.costs.spread_bps
+                * settings.costs.stressed_cost_multiplier
+            ),
+            portfolio_policy=policy,
+        )
+        stressed_periods = {
+            period: rotation_period_metrics(
+                stressed.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )[0]
+            for period, bounds in periods.items()
+        }
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=normal.equity_curve,
+            stressed_equity=stressed.equity_curve,
+            seed_offset=50_000,
+        )
+        selected_row = next(
+            row
+            for row in rows
+            if row["strategy_id"] == primary_name
+        )
+        economic_checks = {
+            "complete_profitable_parameter_plateau": bool(
+                selected_row["plateau"][
+                    "all_neighbors_net_positive"
+                ]
+            ),
+            "positive_minimum_neighbor_sharpe": float(
+                selected_row["plateau"][
+                    "minimum_neighbor_sharpe"
+                ]
+            )
+            > 0.0,
+            "all_periods_positive": all(
+                float(
+                    selected_row["periods"][period]["net_return"]
+                )
+                > 0.0
+                for period in periods
+            ),
+            "all_stressed_periods_positive": all(
+                float(stressed_periods[period]["net_return"]) > 0.0
+                for period in periods
+            ),
+            "minimum_rebalances": (
+                int(normal.metrics["rebalance_count"])
+                >= settings.research.minimum_trades
+            ),
+            "minimum_effective_sample": (
+                int(
+                    normal.metrics[
+                        "portfolio_period_effective_sample_size"
+                    ]
+                )
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "profit_factor": (
+                float(
+                    normal.metrics[
+                        "portfolio_period_profit_factor"
+                    ]
+                )
+                >= settings.research.minimum_profit_factor
+            ),
+            "validation_profit_factor": (
+                float(
+                    selected_row["periods"]["validation"][
+                        "portfolio_period_profit_factor"
+                    ]
+                )
+                >= settings.research.minimum_profit_factor
+            ),
+            "stressed_validation_profit_factor": (
+                float(
+                    stressed_periods["validation"][
+                        "portfolio_period_profit_factor"
+                    ]
+                )
+                >= settings.research.minimum_stressed_profit_factor
+            ),
+            "maximum_drawdown": (
+                abs(float(normal.metrics["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+            "exposure_limits_respected": all(
+                bool(normal.integrity[field])
+                for field in (
+                    "maximum_exposure_respected",
+                    "maximum_position_exposure_respected",
+                    "minimum_cash_respected",
+                )
+            ),
+        }
+        standard_pbo = (
+            multiple.probability_of_backtest_overfitting
+        )
+        statistical_checks = {
+            "deflated_sharpe": (
+                float(
+                    multiple.deflated_sharpe_probabilities.get(
+                        primary_name,
+                        0.0,
+                    )
+                )
+                >= settings.research.minimum_deflated_sharpe_probability
+            ),
+            "white_reality_check": (
+                multiple.white_reality_check_pvalue
+                <= settings.research.maximum_white_reality_check_pvalue
+            ),
+            "hansen_spa": (
+                multiple.hansen_spa_pvalue
+                <= settings.research.maximum_hansen_spa_pvalue
+            ),
+            "standard_pbo": (
+                standard_pbo is not None
+                and standard_pbo
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+            "plateau_selection_pbo": (
+                plateau_pbo is not None
+                and plateau_pbo
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+            "monte_carlo": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
+            "untouched_holdout": False,
+        }
+        primary_result = {
+            **selected_row,
+            "stressed": stressed.summary(),
+            "stressed_periods": stressed_periods,
+            "gates": {
+                "economic_checks": economic_checks,
+                "statistical_checks": statistical_checks,
+                "deflated_sharpe_probability": float(
+                    multiple.deflated_sharpe_probabilities.get(
+                        primary_name,
+                        0.0,
+                    )
+                ),
+                "stochastic_validation": stochastic,
+                "economic_pass": all(economic_checks.values()),
+                "statistical_pass": all(
+                    statistical_checks.values()
+                ),
+                "research_pass": False,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            },
+        }
+        forward_start = pd.Timestamp(
+            "2026-07-26T00:00:00+00:00"
+        )
+        execution_identity = normal.summary()[
+            "execution_identity"
+        ]
+        source_candidate_identity = stable_hash(
+            {
+                "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+                "strategy_trial_dna_hash": (
+                    selected_candidate.dna_hash
+                ),
+                "execution_dna_hash": normal.parameters.dna_hash,
+                "portfolio_policy_hash": policy.policy_hash,
+                "forward_start": forward_start.isoformat(),
+            },
+            length=64,
+        )
+        observer_path = (
+            settings.paths.lab_dir
+            / "observers"
+            / "absolute_momentum_plateau_v1"
+            / f"{primary_name.lower()}.json"
+        )
+        observer = {
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "family": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+            "policy_name": primary_name,
+            "source_candidate_identity": source_candidate_identity,
+            "strategy_trial_dna_hash": selected_candidate.dna_hash,
+            "strategy_dna_hash": normal.parameters.dna_hash,
+            "execution_identity": execution_identity,
+            "parameters": asdict(selected_candidate),
+            "portfolio_policy": asdict(policy),
+            "portfolio_policy_hash": policy.policy_hash,
+            "forward_start": forward_start.isoformat(),
+            "minimum_forward_closed_daily_observations": 365,
+            "minimum_forward_rebalances": 30,
+            "orders_generated": 0,
+            "orders_submitted": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+        if observer_path.is_file():
+            observer.update(
+                _preserved_breakout_forward_fields(
+                    read_json(observer_path),
+                    source_candidate_identity=(
+                        source_candidate_identity
+                    ),
+                    strategy_dna_hash=normal.parameters.dna_hash,
+                    execution_identity=execution_identity,
+                    forward_start=forward_start,
+                )
+            )
+        evidence = build_rotation_forward_evidence(
+            normal,
+            frames,
+            forward_start=forward_start,
+            minimum_observations=365,
+            minimum_rebalances=30,
+            performance_policy=ForwardPerformanceGatePolicy(
+                minimum_profit_factor=(
+                    settings.research.minimum_profit_factor
+                ),
+                minimum_stressed_profit_factor=(
+                    settings.research.minimum_stressed_profit_factor
+                ),
+                maximum_drawdown=(
+                    settings.research.maximum_drawdown
+                ),
+                minimum_effective_sample_size=(
+                    settings.research.minimum_effective_sample_size
+                ),
+                stressed_cost_multiplier=(
+                    settings.costs.stressed_cost_multiplier
+                ),
+                bootstrap_samples=(
+                    settings.research.multiple_testing_bootstrap_samples
+                ),
+                bootstrap_block_size=(
+                    settings.research.multiple_testing_block_size
+                ),
+                bootstrap_seed=settings.app.random_seed,
+            ),
+        )
+        observer = merge_portfolio_forward_manifest(
+            observer,
+            evidence,
+            source_candidate_identity=source_candidate_identity,
+            strategy_dna_hash=normal.parameters.dna_hash,
+            execution_identity=execution_identity,
+            forward_start=forward_start,
+        )
+        observer["data_hashes"] = data_hashes
+        atomic_write_json(observer_path, _json_ready(observer))
+        observer_paths[primary_name] = str(observer_path)
+        forward_summaries[primary_name] = observer[
+            "forward_summary"
+        ]
+
+    payload = {
+        "schema_version": "absolute_momentum_plateau_report_v1",
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+        "strategy_family": ABSOLUTE_MOMENTUM_PLATEAU_FAMILY,
+        "engine_version": ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION,
+        "plan": str(plan_path),
+        "plan_sha256": sha256_file(plan_path),
+        "search_space_hash": search_space_hash,
+        "selection_basis": "DEVELOPMENT_GAUSSIAN_N_PLUS_MINUS_2",
+        "selection_integrity": {
+            "development_only": True,
+            "validation_used_for_selection": False,
+            "confirmation_used_for_selection": False,
+            "complete_neighborhood_required": True,
+            "all_neighbors_net_positive_required": True,
+            "kernel": [0.05, 0.25, 0.40, 0.25, 0.05],
+        },
+        "generated_trial_count": len(candidates),
+        "base_known_trials": base_known_trials,
+        "registered_unique_plateau_trials": int(
+            registry_audit["unique_trial_count"]
+        ),
+        "total_known_trials": total_known_trials,
+        "plateau_eligible_count": int(
+            plateau["plateau_eligible"].sum()
+        ),
+        "primary_strategy_id": primary_name,
+        "primary_result": primary_result,
+        "candidate_results": rows,
+        "multiple_testing": {
+            **asdict(multiple),
+            "plateau_selection_pbo": plateau_pbo,
+            "plateau_selection_pbo_logits": list(plateau_logits),
+        },
+        "trial_registry": registry_audit,
+        "data_fingerprint": data_fingerprint,
+        "data_hashes": data_hashes,
+        "periods": periods,
+        "portfolio_policy": asdict(policy),
+        "holdout_status": "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS",
+        "observer_manifests": observer_paths,
+        "forward_summaries": forward_summaries,
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "strategy_id": row["strategy_id"],
+                "horizon_shift": row["parameters"][
+                    "horizon_shift"
+                ],
+                "volatility_lookback": row["parameters"][
+                    "volatility_lookback"
+                ],
+                "target_annualized_volatility": row["parameters"][
+                    "target_annualized_volatility"
+                ],
+                "development_net_return": row["periods"][
+                    "development"
+                ]["net_return"],
+                "validation_net_return": row["periods"][
+                    "validation"
+                ]["net_return"],
+                "confirmation_net_return": row["periods"][
+                    "confirmation"
+                ]["net_return"],
+                "gaussian_smoothed_sharpe": row["plateau"][
+                    "gaussian_smoothed_sharpe"
+                ],
+                "minimum_neighbor_sharpe": row["plateau"][
+                    "minimum_neighbor_sharpe"
+                ],
+                "plateau_eligible": row["plateau"][
+                    "plateau_eligible"
+                ],
+                "selected_primary": (
+                    row["strategy_id"] == primary_name
+                ),
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "generated_trial_count": len(candidates),
+        "registered_unique_plateau_trials": payload[
+            "registered_unique_plateau_trials"
+        ],
+        "total_known_trials": total_known_trials,
+        "plateau_eligible_count": payload[
+            "plateau_eligible_count"
+        ],
+        "primary_strategy_id": primary_name,
+        "standard_pbo": (
+            multiple.probability_of_backtest_overfitting
+        ),
+        "plateau_selection_pbo": plateau_pbo,
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": observer_paths,
+        "forward_summaries": forward_summaries,
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -7845,6 +8580,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
 
             def cycle() -> dict[str, Any]:
                 return orchestrator.run_once(
+                    preflight_stage=lambda: (
+                        _autopilot_ledger_preflight_stage(settings)
+                    ),
                     data_stage=lambda: _autopilot_data_stage(
                         settings,
                         refresh=args.refresh_data,
@@ -7894,6 +8632,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         diversified_rotation_campaign = campaign_name == "diversified-rotation-v1"
         breakout_portfolio_campaign = campaign_name == "portfolio-breakout-v1"
         absolute_momentum_campaign = campaign_name == "absolute-momentum-v1"
+        absolute_momentum_plateau_campaign = (
+            campaign_name == "absolute-momentum-plateau-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -7912,6 +8653,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     or diversified_rotation_campaign
                     or breakout_portfolio_campaign
                     or absolute_momentum_campaign
+                    or absolute_momentum_plateau_campaign
                     or portfolio_storm_campaign
                 )
                 else (("1h",) if formal_campaign else ("5m", "15m"))
@@ -7975,6 +8717,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "SIGNAL_SYNTHESIS_STORM_V1"
         if absolute_momentum_campaign:
             campaign_label = "ABSOLUTE_MOMENTUM_V1"
+        if absolute_momentum_plateau_campaign:
+            campaign_label = "ABSOLUTE_MOMENTUM_PLATEAU_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -8017,6 +8761,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_absolute_momentum_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if absolute_momentum_plateau_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_absolute_momentum_plateau_campaign,
                         settings,
                     )
                 )
@@ -8164,6 +8916,53 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         "next_open_execution": True,
                         "paper_candidates": 0,
                         "live_orders": 0,
+                    }
+                )
+                return 0
+            if absolute_momentum_plateau_campaign:
+                from research.absolute_momentum import (
+                    absolute_momentum_plateau_parameter_set,
+                )
+
+                parameters = (
+                    absolute_momentum_plateau_parameter_set()
+                )
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_GAUSSIAN_PARAMETER_PLATEAU"
+                        ),
+                        "economic_hypothesis": (
+                            "ABSOLUTE_MOMENTUM_PARAMETER_INSENSITIVITY"
+                        ),
+                        "selection_basis": (
+                            "DEVELOPMENT_GAUSSIAN_N_PLUS_MINUS_2"
+                        ),
+                        "kernel": [
+                            0.05,
+                            0.25,
+                            0.40,
+                            0.25,
+                            0.05,
+                        ],
+                        "generated_trial_count": len(parameters),
+                        "base_known_trials": 16_715,
+                        "projected_total_known_trials": (
+                            16_715 + len(parameters)
+                        ),
+                        "maximum_total_exposure": 0.20,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.80,
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
                     }
                 )
                 return 0
@@ -8441,6 +9240,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if absolute_momentum_plateau_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 117,
+                            "reason_code": (
+                                "PREREGISTERED_GAUSSIAN_PLATEAU_SEARCH"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_absolute_momentum_plateau_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -8622,6 +9441,22 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if absolute_momentum_plateau_campaign:
+                report_path = (
+                    _absolute_momentum_plateau_campaign_path(
+                        settings
+                    )
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -8725,6 +9560,25 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             if absolute_momentum_campaign:
                 report_path = _absolute_momentum_campaign_path(settings)
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if absolute_momentum_plateau_campaign:
+                report_path = (
+                    _absolute_momentum_plateau_campaign_path(
+                        settings
+                    )
+                )
                 emit(
                     {
                         "campaign": campaign_label,
@@ -10764,6 +11618,7 @@ def build_parser() -> argparse.ArgumentParser:
         "diversified-rotation-v1",
         "portfolio-breakout-v1",
         "absolute-momentum-v1",
+        "absolute-momentum-plateau-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -10815,6 +11670,7 @@ def build_parser() -> argparse.ArgumentParser:
             "diversified-rotation-v1",
             "portfolio-breakout-v1",
             "absolute-momentum-v1",
+            "absolute-momentum-plateau-v1",
         ),
         default="cross-sectional-ensemble",
     )

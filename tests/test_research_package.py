@@ -243,3 +243,47 @@ def test_acceptance_summary_rejects_feature_store_identity_mismatch() -> None:
 
     with pytest.raises(ValueError, match="identity mismatch"):
         build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_includes_fail_closed_plateau_campaign() -> None:
+    values = _inputs()
+    values["absolute_momentum_plateau"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+        "engine_version": "1.0.0",
+        "generated_trial_count": 117,
+        "registered_unique_plateau_trials": 117,
+        "total_known_trials": 16_832,
+        "plateau_eligible_count": 81,
+        "primary_strategy_id": "AMPS_P01_V90_T04",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.4857,
+            "plateau_selection_pbo": 0.5143,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 117,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {
+                    "passed": True,
+                },
+                "research_pass": False,
+            },
+        },
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    plateau = summary["absolute_momentum_plateau"]
+    assert plateau["registered_unique_plateau_trials"] == 117
+    assert plateau["trial_registry"]["status"] == "PASSED"
+    assert not plateau["primary_result"]["gates"]["research_pass"]
+    assert plateau["orders_generated"] == 0
+    assert plateau["live_ready"] is False

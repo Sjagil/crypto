@@ -209,6 +209,38 @@ def test_stage_failure_activates_fail_closed_state(tmp_path):
     assert orchestrator.kill_switch()["manual_reset_required"] is True
 
 
+def test_preflight_runs_before_data_and_failure_activates_kill_switch(
+    tmp_path,
+) -> None:
+    events: list[str] = []
+    orchestrator = AutopilotOrchestrator(tmp_path)
+    successful = orchestrator.run_once(
+        preflight_stage=lambda: (
+            events.append("preflight")
+            or {"status": "PASSED", "orders_generated": 0}
+        ),
+        data_stage=lambda: (
+            events.append("data") or _data_stage("v1")
+        ),
+        observer_stage=_observer_stage,
+    )
+    assert successful["status"] == "COMPLETED_ORDERLESS"
+    assert events == ["preflight", "data"]
+    assert successful["stages"][0]["stage"] == "LEDGER_PREFLIGHT"
+
+    def corrupt_preflight():
+        raise RuntimeError("FORWARD_LEDGER_HASH_CHAIN_MISMATCH")
+
+    failed = AutopilotOrchestrator(tmp_path / "failed").run_once(
+        preflight_stage=corrupt_preflight,
+        data_stage=lambda: _data_stage("v1"),
+        observer_stage=_observer_stage,
+    )
+    assert failed["status"] == "SYSTEM_DEGRADED"
+    assert failed["error"]["type"] == "RuntimeError"
+    assert failed["orders_generated"] == 0
+
+
 def test_order_or_promotion_payload_is_rejected():
     with pytest.raises(RuntimeError, match="ORDER_INVARIANT"):
         assert_orderless_research_payload({"live_orders": 1})
@@ -312,11 +344,38 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_absolute_momentum_plateau_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
+            "generated_trial_count": 117,
+            "registered_unique_plateau_trials": 117,
+            "total_known_trials": 16_832,
+            "plateau_eligible_count": 81,
+            "standard_pbo": 0.4857142857142857,
+            "plateau_selection_pbo": 0.5142857142857142,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
     assert result["portfolio_storm_total_known_trials"] == 6_312
     assert result["signal_synthesis_total_known_trials"] == 16_312
+    assert (
+        result["parallel_absolute_momentum_plateau_campaign"][
+            "total_known_trials"
+        ]
+        == 16_832
+    )
+    assert not result[
+        "parallel_absolute_momentum_plateau_campaign"
+    ]["live_ready"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

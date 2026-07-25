@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from itertools import product
 from typing import Any, Mapping
 
 import numpy as np
@@ -26,6 +27,10 @@ from utils.common import stable_hash
 
 ABSOLUTE_MOMENTUM_ENGINE_VERSION = "1.0.0"
 ABSOLUTE_MOMENTUM_FAMILY = "MULTI_ASSET_ABSOLUTE_MOMENTUM_VOL_TARGET"
+ABSOLUTE_MOMENTUM_PLATEAU_FAMILY = (
+    "MULTI_ASSET_ABSOLUTE_MOMENTUM_GAUSSIAN_PLATEAU"
+)
+ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,113 @@ def absolute_momentum_parameter_set() -> tuple[AbsoluteMomentumParameters, ...]:
     )
     if len({row.dna_hash for row in rows}) != len(rows):
         raise RuntimeError("absolute-momentum parameter set contains duplicate DNA")
+    return rows
+
+
+@dataclass(frozen=True, slots=True)
+class AbsoluteMomentumPlateauDNA:
+    """Independent candidate ID for a predeclared horizon plateau path."""
+
+    horizon_shift: int
+    volatility_lookback: int
+    target_annualized_volatility: float
+    base_momentum_lookbacks: tuple[int, ...] = (20, 60, 120)
+    minimum_positive_horizons: int = 2
+    asset_ema_period: int = 200
+    btc_ema_period: int = 200
+    rebalance_weekday: int = 6
+
+    def __post_init__(self) -> None:
+        shifted = self.momentum_lookbacks
+        if min(shifted) < 5:
+            raise ValueError("plateau shift creates an invalid horizon")
+        if self.volatility_lookback not in {40, 60, 90}:
+            raise ValueError("undeclared plateau volatility lookback")
+        if self.target_annualized_volatility not in {
+            0.04,
+            0.05,
+            0.06,
+        }:
+            raise ValueError("undeclared plateau volatility target")
+
+    @property
+    def momentum_lookbacks(self) -> tuple[int, ...]:
+        return tuple(
+            value + self.horizon_shift
+            for value in self.base_momentum_lookbacks
+        )
+
+    @property
+    def parameters(self) -> AbsoluteMomentumParameters:
+        return AbsoluteMomentumParameters(
+            momentum_lookbacks=self.momentum_lookbacks,
+            minimum_positive_horizons=(
+                self.minimum_positive_horizons
+            ),
+            asset_ema_period=self.asset_ema_period,
+            btc_ema_period=self.btc_ema_period,
+            volatility_lookback=self.volatility_lookback,
+            target_annualized_volatility=(
+                self.target_annualized_volatility
+            ),
+            rebalance_weekday=self.rebalance_weekday,
+        )
+
+    @property
+    def nuisance_group(self) -> str:
+        return stable_hash(
+            {
+                "volatility_lookback": self.volatility_lookback,
+                "target_annualized_volatility": (
+                    self.target_annualized_volatility
+                ),
+                "minimum_positive_horizons": (
+                    self.minimum_positive_horizons
+                ),
+                "asset_ema_period": self.asset_ema_period,
+                "btc_ema_period": self.btc_ema_period,
+                "rebalance_weekday": self.rebalance_weekday,
+            },
+            length=32,
+        )
+
+    @property
+    def dna_hash(self) -> str:
+        return stable_hash(
+            {
+                "family": ABSOLUTE_MOMENTUM_PLATEAU_FAMILY,
+                "engine_version": (
+                    ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION
+                ),
+                "parameters": asdict(self),
+                "derived_momentum_lookbacks": (
+                    self.momentum_lookbacks
+                ),
+            },
+            length=64,
+        )
+
+
+def absolute_momentum_plateau_parameter_set(
+) -> tuple[AbsoluteMomentumPlateauDNA, ...]:
+    """Return all 117 predeclared plateau trials in deterministic order."""
+
+    rows = tuple(
+        AbsoluteMomentumPlateauDNA(
+            horizon_shift=shift,
+            volatility_lookback=volatility_lookback,
+            target_annualized_volatility=target,
+        )
+        for shift, volatility_lookback, target in product(
+            range(-6, 7),
+            (40, 60, 90),
+            (0.04, 0.05, 0.06),
+        )
+    )
+    if len(rows) != 117:
+        raise RuntimeError("plateau parameter set cardinality drift")
+    if len({row.dna_hash for row in rows}) != len(rows):
+        raise RuntimeError("plateau parameter set contains duplicate DNA")
     return rows
 
 
@@ -362,8 +474,12 @@ def backtest_absolute_momentum(
 __all__ = [
     "ABSOLUTE_MOMENTUM_ENGINE_VERSION",
     "ABSOLUTE_MOMENTUM_FAMILY",
+    "ABSOLUTE_MOMENTUM_PLATEAU_ENGINE_VERSION",
+    "ABSOLUTE_MOMENTUM_PLATEAU_FAMILY",
     "AbsoluteMomentumParameters",
+    "AbsoluteMomentumPlateauDNA",
     "AbsoluteMomentumResult",
+    "absolute_momentum_plateau_parameter_set",
     "absolute_momentum_parameter_set",
     "backtest_absolute_momentum",
 ]

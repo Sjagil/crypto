@@ -88,6 +88,7 @@ def build_acceptance_summary(
     diversified_rotation: dict[str, Any] | None = None,
     portfolio_breakout: dict[str, Any] | None = None,
     absolute_momentum: dict[str, Any] | None = None,
+    absolute_momentum_plateau: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -180,6 +181,50 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "absolute momentum",
             absolute_momentum["policy_results"],
+            container="gates",
+        )
+    if absolute_momentum_plateau is not None:
+        if (
+            absolute_momentum_plateau.get("campaign")
+            != "ABSOLUTE_MOMENTUM_PLATEAU_V1"
+        ):
+            raise ValueError(
+                "absolute momentum plateau campaign identity mismatch"
+            )
+        if int(
+            absolute_momentum_plateau.get("orders_generated") or 0
+        ) != 0:
+            raise ValueError(
+                "absolute momentum plateau campaign contains orders"
+            )
+        if bool(
+            absolute_momentum_plateau.get("live_ready", False)
+        ):
+            raise ValueError(
+                "absolute momentum plateau campaign contains live permission"
+            )
+        registry = absolute_momentum_plateau.get("trial_registry") or {}
+        if registry.get("status") != "PASSED":
+            raise ValueError(
+                "absolute momentum plateau registry audit failed"
+            )
+        if int(registry.get("unique_trial_count") or 0) != int(
+            absolute_momentum_plateau.get(
+                "registered_unique_plateau_trials"
+            )
+            or 0
+        ):
+            raise ValueError(
+                "absolute momentum plateau trial count mismatch"
+            )
+        primary = absolute_momentum_plateau.get("primary_result")
+        if not isinstance(primary, dict):
+            raise ValueError(
+                "absolute momentum plateau primary result missing"
+            )
+        require_stochastic_validation(
+            "absolute momentum plateau",
+            [primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -446,6 +491,46 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if absolute_momentum_plateau is not None:
+        summary["absolute_momentum_plateau"] = {
+            "status": absolute_momentum_plateau["status"],
+            "campaign": absolute_momentum_plateau["campaign"],
+            "engine_version": absolute_momentum_plateau[
+                "engine_version"
+            ],
+            "generated_trial_count": absolute_momentum_plateau[
+                "generated_trial_count"
+            ],
+            "registered_unique_plateau_trials": (
+                absolute_momentum_plateau[
+                    "registered_unique_plateau_trials"
+                ]
+            ),
+            "total_known_trials": absolute_momentum_plateau[
+                "total_known_trials"
+            ],
+            "plateau_eligible_count": absolute_momentum_plateau[
+                "plateau_eligible_count"
+            ],
+            "primary_strategy_id": absolute_momentum_plateau[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": absolute_momentum_plateau[
+                "multiple_testing"
+            ],
+            "trial_registry": absolute_momentum_plateau[
+                "trial_registry"
+            ],
+            "primary_result": absolute_momentum_plateau[
+                "primary_result"
+            ],
+            "holdout_status": absolute_momentum_plateau[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -584,6 +669,18 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "absolute_momentum_campaign_v1.csv": (
             reports / "absolute_momentum_campaign_v1.csv"
         ),
+        "absolute_momentum_plateau_campaign_v1.json": (
+            reports / "absolute_momentum_plateau_campaign_v1.json"
+        ),
+        "absolute_momentum_plateau_campaign_v1.csv": (
+            reports / "absolute_momentum_plateau_campaign_v1.csv"
+        ),
+        "absolute_momentum_plateau_plan_v1.json": (
+            reports / "absolute_momentum_plateau_plan_v1.json"
+        ),
+        "forward_ledger_preflight_v1.json": (
+            reports / "forward_ledger_preflight_v1.json"
+        ),
         "portfolio_breakout_forward_observer_v1.json": (
             reports / "portfolio_breakout_forward_observer_v1.json"
         ),
@@ -621,6 +718,26 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     )
     for observer in sorted(absolute_momentum_observer_directory.glob("*.json")):
         paths[f"absolute_momentum_observer_{observer.name}"] = observer
+    plateau_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "absolute_momentum_plateau_v1"
+    )
+    for observer in sorted(plateau_observer_directory.glob("*.json")):
+        paths[f"absolute_momentum_plateau_observer_{observer.name}"] = observer
+    plateau_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "absolute_momentum_plateau_v1"
+    )
+    registry_index = plateau_registry_directory / "index.json"
+    paths["absolute_momentum_plateau_registry_index.json"] = (
+        registry_index
+    )
+    for record in sorted(
+        (plateau_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"absolute_momentum_plateau_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -710,6 +827,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
         portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
         absolute_momentum=payloads["absolute_momentum_campaign_v1.json"],
+        absolute_momentum_plateau=payloads[
+            "absolute_momentum_plateau_campaign_v1.json"
+        ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
         autopilot_state=payloads.get("autopilot_state.json"),

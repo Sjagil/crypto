@@ -685,6 +685,26 @@ research-search interval. Each append-only ledger reports read-only 30, 90 and
 180-day diagnostic milestones plus the mandatory 365-day formal sample gate;
 diagnostic milestones never authorize promotion.
 
+`python main.py lab campaign run --name absolute-momentum-plateau-v1 --yes`
+runs a separately versioned robustness family around the fixed 20/60/120-day
+absolute-momentum hypothesis. It predeclares all 117 horizon-shift,
+volatility-lookback and volatility-budget trials, evaluates the complete
+Gaussian N±2 horizon neighbourhood, and selects only on development data.
+Every trial is written once to a content-addressed, hash-chained registry under
+`output/lab/strategy_registry/absolute_momentum_plateau_v1/`. Repeating the
+same data and DNA is idempotent; changed data creates a new trial identity.
+Plateau smoothing is a robustness diagnostic, never a way to override DSR,
+White Reality Check, Hansen SPA, standard PBO, plateau-selection PBO or the
+untouched-forward requirement. The campaign is orderless, uses at most 20%
+total exposure and remains blocked whenever any formal gate fails.
+
+Before each daily autopilot cycle, all active forward-observer ledgers are
+cryptographically audited. Observation checksums, the hash chain, immutable
+identity fields and zero-order/live-permission invariants must all match before
+data refresh or research is allowed to start. Corruption trips the existing
+persistent kill switch and is reported in
+`output/lab/reports/forward_ledger_preflight_v1.json`.
+
 AI, neural-network and other machine-learning development is explicitly
 embargoed. `python main.py lab ai status` reports the fail-closed policy.
 Eligibility requires an economically and statistically passed immutable

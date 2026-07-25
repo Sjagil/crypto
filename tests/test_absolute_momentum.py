@@ -9,6 +9,7 @@ import pytest
 from research.absolute_momentum import (
     AbsoluteMomentumParameters,
     absolute_momentum_parameter_set,
+    absolute_momentum_plateau_parameter_set,
     backtest_absolute_momentum,
 )
 from research.forward_observer import (
@@ -83,6 +84,24 @@ def test_absolute_momentum_parameter_set_is_fixed_and_unique() -> None:
         0.08,
         0.10,
     }
+
+
+def test_absolute_momentum_plateau_set_is_predeclared_and_unique() -> None:
+    rows = absolute_momentum_plateau_parameter_set()
+
+    assert len(rows) == 117
+    assert len({row.dna_hash for row in rows}) == 117
+    assert {row.horizon_shift for row in rows} == set(
+        range(-6, 7)
+    )
+    assert {
+        row.volatility_lookback for row in rows
+    } == {40, 60, 90}
+    assert {
+        row.target_annualized_volatility for row in rows
+    } == {0.04, 0.05, 0.06}
+    assert rows[0].parameters.momentum_lookbacks == (14, 54, 114)
+    assert rows[-1].parameters.momentum_lookbacks == (26, 66, 126)
 
 
 def test_absolute_momentum_is_next_open_costed_and_exposure_bounded() -> None:

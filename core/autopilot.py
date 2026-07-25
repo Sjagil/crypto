@@ -452,6 +452,7 @@ class AutopilotOrchestrator:
         *,
         data_stage: Stage,
         observer_stage: Stage,
+        preflight_stage: Stage | None = None,
         feature_store_stage: Stage | None = None,
         research_stage: Stage | None = None,
         degradation_observation: DegradationObservation | None = None,
@@ -490,6 +491,12 @@ class AutopilotOrchestrator:
                 atomic_write_json(cycle_path, cycle)
                 return cycle
 
+            if preflight_stage is not None:
+                preflight_result = self._run_stage(
+                    "LEDGER_PREFLIGHT",
+                    preflight_stage,
+                )
+                cycle["stages"].append(preflight_result)
             data_result = self._run_stage("DATA_AUDIT", data_stage)
             cycle["stages"].append(data_result)
             data_fingerprint = data_result["payload"].get("data_fingerprint")
