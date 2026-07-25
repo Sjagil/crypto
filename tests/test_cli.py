@@ -51,6 +51,13 @@ def test_required_command_families_are_registered() -> None:
         ["operate", "stop", "--mode", "shadow", "--wait-seconds", "30"],
         ["operate", "candidates"],
         ["operate", "task-install", "--dry-run"],
+        ["lab", "campaign", "plan", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "plan", "--name", "institutional-rotation-v2"],
+        ["lab", "campaign", "forward", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "external", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "audit", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "observe", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "package", "--name", "cross-sectional-ensemble"],
     ):
         assert parser.parse_args(arguments).command
 

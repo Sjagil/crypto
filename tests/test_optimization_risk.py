@@ -170,6 +170,7 @@ def test_multiple_testing_diagnostics_separate_signal_from_noise() -> None:
         seed=7,
     )
     assert result.strategy_count == 4
+    assert result.known_trial_count == 4
     assert result.observation_count == rows
     assert result.white_reality_check_pvalue < 0.10
     assert result.hansen_spa_pvalue < 0.10
@@ -177,6 +178,18 @@ def test_multiple_testing_diagnostics_separate_signal_from_noise() -> None:
     assert (
         result.deflated_sharpe_probabilities["persistent_signal"]
         > result.deflated_sharpe_probabilities["noise_a"]
+    )
+    conservative = multiple_testing_bootstrap(
+        returns,
+        bootstrap_samples=200,
+        block_size=5,
+        seed=7,
+        known_trial_count=1_000,
+    )
+    assert conservative.known_trial_count == 1_000
+    assert (
+        conservative.deflated_sharpe_probabilities["persistent_signal"]
+        <= result.deflated_sharpe_probabilities["persistent_signal"]
     )
     pbo, logits = probability_of_backtest_overfitting(returns, group_count=8)
     assert pbo is not None

@@ -83,6 +83,12 @@ class ParameterKind(StrEnum):
     DURATION = "DURATION"
 
 
+class ExitProfile(StrEnum):
+    FIXED_R = "FIXED_R"
+    TRAILING_TREND = "TRAILING_TREND"
+    TIME_REGIME = "TIME_REGIME"
+
+
 class BlockRole(StrEnum):
     ENTRY_TRIGGER = "ENTRY_TRIGGER"
     TREND_FILTER = "TREND_FILTER"
@@ -522,6 +528,10 @@ class SignalBlock:
 ALL_TIMEFRAMES = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1W")
 TECH_TIMEFRAMES = ALL_TIMEFRAMES
 FAST_SCREEN_VERSION = "2.0.0"
+SCREEN_POLICY_VERSION = "2.1.0"
+EXIT_MODEL_VERSION = "2.2.0"
+SURVIVOR_POLICY_VERSION = "2.1.0"
+FAST_SCREEN_MINIMUM_TRADES = 30
 DEFAULT_COMPATIBLE = tuple(BlockRole)
 
 
@@ -2323,16 +2333,18 @@ class CombinatorialStrategy(Strategy):
     family = "combinatorial_lab"
     description = "Canonical SignalBlock combination"
     defaults = {
+        "exit_profile": ExitProfile.FIXED_R.value,
         "stop_atr": 2.0,
         "target_atr": 3.0,
         "trailing_atr": 1.5,
         "maximum_holding_bars": 120,
     }
     parameter_space = {
-        "stop_atr": (1.5, 2.0, 2.5),
-        "target_atr": (2.0, 3.0, 4.0),
-        "trailing_atr": (0.0, 1.0, 1.5),
-        "maximum_holding_bars": (48, 120, 240),
+        "exit_profile": tuple(profile.value for profile in ExitProfile),
+        "stop_atr": (1.5, 2.0, 2.5, 3.0, 4.0, 6.0),
+        "target_atr": (2.0, 3.0, 4.0, 6.0, 10.0, 20.0),
+        "trailing_atr": (0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0),
+        "maximum_holding_bars": (48, 120, 240, 480, 720),
     }
 
     def __init__(
@@ -2349,6 +2361,7 @@ class CombinatorialStrategy(Strategy):
         }
         self.strategy_id = f"lab_{combination.strategy_dna_hash[:24]}"
         defaults: dict[str, Any] = {
+            "exit__profile": ExitProfile.FIXED_R.value,
             "exit__stop_atr": Decimal("2.0"),
             "exit__target_atr": Decimal("3.0"),
             "exit__trailing_atr": Decimal("1.5"),
@@ -2358,10 +2371,17 @@ class CombinatorialStrategy(Strategy):
             "logic__vote_threshold": Decimal("0.5"),
         }
         spaces: dict[str, tuple[Any, ...]] = {
-            "exit__stop_atr": tuple(Decimal(str(value)) for value in (1.5, 2.0, 2.5)),
-            "exit__target_atr": tuple(Decimal(str(value)) for value in (2.0, 3.0, 4.0)),
-            "exit__trailing_atr": tuple(Decimal(str(value)) for value in (0.0, 1.0, 1.5)),
-            "exit__maximum_holding_bars": (48, 120, 240),
+            "exit__profile": tuple(profile.value for profile in ExitProfile),
+            "exit__stop_atr": tuple(
+                Decimal(str(value)) for value in (1.5, 2.0, 2.5, 3.0, 4.0, 6.0)
+            ),
+            "exit__target_atr": tuple(
+                Decimal(str(value)) for value in (2.0, 3.0, 4.0, 6.0, 10.0, 20.0)
+            ),
+            "exit__trailing_atr": tuple(
+                Decimal(str(value)) for value in (0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+            ),
+            "exit__maximum_holding_bars": (48, 120, 240, 480, 720),
             "risk__risk_fraction": (
                 Decimal("0.0025"),
                 Decimal("0.005"),
@@ -2379,14 +2399,20 @@ class CombinatorialStrategy(Strategy):
             ),
         }
         optimizer_specs: dict[str, ParameterSpec] = {
-            "exit__stop_atr": _half("exit__stop_atr", "1.5", "2.5", "2.0"),
-            "exit__target_atr": _half("exit__target_atr", "2.0", "4.0", "3.0"),
-            "exit__trailing_atr": _half("exit__trailing_atr", "0.0", "1.5", "1.5"),
+            "exit__profile": ParameterSpec(
+                name="exit__profile",
+                kind=ParameterKind.CHOICE,
+                choices=tuple(profile.value for profile in ExitProfile),
+                default=ExitProfile.FIXED_R.value,
+            ),
+            "exit__stop_atr": _half("exit__stop_atr", "1.5", "6.0", "2.0"),
+            "exit__target_atr": _half("exit__target_atr", "2.0", "20.0", "3.0"),
+            "exit__trailing_atr": _half("exit__trailing_atr", "0.0", "4.0", "1.5"),
             "exit__maximum_holding_bars": ParameterSpec(
                 name="exit__maximum_holding_bars",
                 kind=ParameterKind.INTEGER,
                 minimum=48,
-                maximum=240,
+                maximum=720,
                 step=24,
                 default=120,
                 integer_only=True,
@@ -2446,6 +2472,7 @@ class CombinatorialStrategy(Strategy):
     def validate_parameters(self, parameters: dict[str, Any]) -> None:
         if _decimal(parameters["exit__stop_atr"]) <= 0:
             raise ValueError("exit__stop_atr must be positive")
+        ExitProfile(str(parameters["exit__profile"]))
         if _decimal(parameters["exit__target_atr"]) <= 0:
             raise ValueError("exit__target_atr must be positive")
         if _decimal(parameters["exit__trailing_atr"]) < 0:
@@ -2573,11 +2600,24 @@ class CombinatorialStrategy(Strategy):
             float(selected["risk__position_fraction"]),
             index=features.index,
         )
+        exit_profile = ExitProfile(str(selected["exit__profile"]))
+        stop_atr = selected["exit__stop_atr"]
+        target_atr = selected["exit__target_atr"]
+        trailing_atr = selected["exit__trailing_atr"]
+        maximum_holding_bars = selected["exit__maximum_holding_bars"]
+        if exit_profile is ExitProfile.FIXED_R:
+            trailing_atr = Decimal("0")
+        elif exit_profile is ExitProfile.TRAILING_TREND:
+            target_atr = max(_decimal(target_atr), Decimal("20"))
+            trailing_atr = max(_decimal(trailing_atr), Decimal("2.5"))
+        else:
+            target_atr = max(_decimal(target_atr), Decimal("20"))
+            trailing_atr = Decimal("0")
         execution_parameters = {
-            "stop_atr": selected["exit__stop_atr"],
-            "target_atr": selected["exit__target_atr"],
-            "trailing_atr": selected["exit__trailing_atr"],
-            "maximum_holding_bars": selected["exit__maximum_holding_bars"],
+            "stop_atr": stop_atr,
+            "target_atr": target_atr,
+            "trailing_atr": trailing_atr,
+            "maximum_holding_bars": maximum_holding_bars,
         }
         return self._output(
             features,
@@ -2593,6 +2633,10 @@ class CombinatorialStrategy(Strategy):
                 "strategy_dna_hash": self.combination.strategy_dna_hash,
                 "block_ids": list(self.combination.block_ids),
                 "logic_mode": self.combination.logic_mode.value,
+                "exit_profile": exit_profile.value,
+                "effective_exit_parameters": canonical_parameters(
+                    execution_parameters
+                ),
                 "flattened_parameters": canonical_parameters(selected),
                 "risk_overlay_semantics": {
                     block_id: self.registry[block_id].overlay_semantics
@@ -2780,6 +2824,9 @@ def _matches_research_slice(
     data_hashes_by_timeframe: Mapping[str, str],
     feature_hashes_by_timeframe: Mapping[str, str],
     screening_engine_version: str,
+    screen_policy_version: str | None = None,
+    exit_model_version: str | None = None,
+    survivor_policy_version: str | None = None,
     markets: Sequence[str],
     snapshot_id: str,
     sources: set[str],
@@ -2798,6 +2845,18 @@ def _matches_research_slice(
         and payload.get("data_hash") == expected_data_hash
         and payload.get("feature_hash") == expected_feature_hash
         and payload.get("screening_engine_version") == screening_engine_version
+        and (
+            screen_policy_version is None
+            or payload.get("screen_policy_version") == screen_policy_version
+        )
+        and (
+            exit_model_version is None
+            or payload.get("exit_model_version") == exit_model_version
+        )
+        and (
+            survivor_policy_version is None
+            or payload.get("survivor_policy_version") == survivor_policy_version
+        )
         and payload.get("universe_snapshot_id") == snapshot_id
         and payload.get("source") in sources
         and set(payload.get("assets_tested") or ()) == set(markets)
@@ -3045,10 +3104,20 @@ class LabStore:
             entry_profile={
                 "logic_mode": combination.logic_mode.value,
                 "screening_engine_version": FAST_SCREEN_VERSION,
+                "screen_policy_version": SCREEN_POLICY_VERSION,
             },
-            exit_profile={"type": "canonical_defaults"},
+            exit_profile={
+                "type": "profiled_atr_stop_target_trailing_time_regime",
+                "profiles": [profile.value for profile in ExitProfile],
+                "exit_model_version": EXIT_MODEL_VERSION,
+            },
             risk_profile={"type": "settings"},
-            cost_profile={"type": "normal"},
+            cost_profile={
+                "type": "normal",
+                "fee": self.settings.costs.default_fee,
+                "slippage_bps": self.settings.costs.slippage_bps,
+                "spread_bps": self.settings.costs.spread_bps,
+            },
             data_hashes={timeframe: data_hash},
             feature_hashes=({timeframe: feature_hash} if feature_hash is not None else {}),
             software_version=self.settings.app.version,
@@ -3121,6 +3190,15 @@ class LabStore:
             else base_experiment
         )
         job_id = f"{base_job_id}-{run_version}" if run_version else base_job_id
+        result_type = (
+            "PARAMETER_SENSITIVITY"
+            if sensitivity_parameter and sensitivity_parameter != "CLI_OVERRIDE"
+            else (
+                "JOINT_PARAMETER_SCREEN"
+                if sensitivity_parameter == "CLI_OVERRIDE"
+                else "BASELINE_SCREEN"
+            )
+        )
         payload = {
             "job_id": job_id,
             "run_id": run_id,
@@ -3135,7 +3213,12 @@ class LabStore:
             "parameters": canonical_parameters(parameters),
             "markets": sorted(markets),
             "timeframe": timeframe,
-            "stage": "SENSITIVITY" if sensitivity_parameter else "BASELINE",
+            "stage": (
+                "SENSITIVITY"
+                if result_type == "PARAMETER_SENSITIVITY"
+                else "BASELINE"
+            ),
+            "result_type": result_type,
             "status": CombinationState.QUEUED_BASELINE.value,
             "reason_code": "NEW_OR_CHANGED_EXPERIMENT",
             "attempt": 0,
@@ -3148,6 +3231,9 @@ class LabStore:
             "data_hash": data_hash,
             "feature_hash": feature_hash,
             "screening_engine_version": FAST_SCREEN_VERSION,
+            "screen_policy_version": SCREEN_POLICY_VERSION,
+            "exit_model_version": EXIT_MODEL_VERSION,
+            "survivor_policy_version": SURVIVOR_POLICY_VERSION,
             "data_provenance": _canonical_value(provenance),
             "source_type": _provenance_source_type(provenance),
             "software_version": self.settings.app.version,
@@ -4006,8 +4092,11 @@ def fast_screen(
     """Causal long-only coarse screen used only for parameter-region ranking."""
 
     trade_returns: list[float] = []
+    gross_trade_returns: list[float] = []
+    exit_reasons: Counter[str] = Counter()
+    trade_entry_buckets: set[str] = set()
     trades = 0
-    for frame in frames.values():
+    for market, frame in frames.items():
         output = strategy.generate(frame)
         entry = output.entry.to_numpy(dtype=bool)
         exit_signal = (output.exit | output.avoid | output.reduce).to_numpy(dtype=bool)
@@ -4029,11 +4118,22 @@ def fast_screen(
         maximum_seen = -math.inf
         bars_held = 0
         size_multiplier = 1.0
+        entry_timestamp: pd.Timestamp | None = None
 
-        def close_trade(exit_price: float) -> None:
+        def close_trade(exit_price: float, reason: str) -> None:
             nonlocal holding, trades
             gross_return = exit_price / entry_price - 1.0
-            trade_returns.append(size_multiplier * (gross_return - round_trip_cost))
+            gross_trade_returns.append(size_multiplier * gross_return)
+            trade_returns.append(
+                size_multiplier * gross_return
+                - size_multiplier * round_trip_cost
+            )
+            exit_reasons[reason] += 1
+            if entry_timestamp is not None:
+                iso = entry_timestamp.isocalendar()
+                trade_entry_buckets.add(
+                    f"{market}:{int(iso.year):04d}-W{int(iso.week):02d}"
+                )
             trades += 1
             holding = False
 
@@ -4049,6 +4149,7 @@ def fast_screen(
                 ):
                     continue
                 holding = True
+                entry_timestamp = pd.Timestamp(frame.index[index])
                 entry_price = float(opens[index])
                 stop_price = entry_price - stop_distance
                 target_price = entry_price + target_distance
@@ -4063,7 +4164,7 @@ def fast_screen(
             if not holding:
                 continue
             if exit_signal[index - 1]:
-                close_trade(float(opens[index]))
+                close_trade(float(opens[index]), "SIGNAL_EXIT_NEXT_OPEN")
                 continue
             bars_held += 1
             effective_stop = max(
@@ -4074,10 +4175,10 @@ def fast_screen(
             target_hit = highs[index] >= target_price
             if stop_hit:
                 # Conservative same-bar ordering: stop wins if both are touched.
-                close_trade(effective_stop)
+                close_trade(effective_stop, "STOP_OR_PRIOR_TRAILING_STOP")
                 continue
             if target_hit:
-                close_trade(target_price)
+                close_trade(target_price, "TARGET")
                 continue
             maximum_seen = max(maximum_seen, float(highs[index]))
             if trailing_distance > 0:
@@ -4086,11 +4187,17 @@ def fast_screen(
                     maximum_seen - trailing_distance,
                 )
             if maximum_holding is not None and bars_held >= maximum_holding:
-                close_trade(float(closes[index]))
+                close_trade(float(closes[index]), "MAXIMUM_HOLDING")
         if holding:
-            close_trade(float(closes[-1]))
+            close_trade(float(closes[-1]), "TERMINAL_LIQUIDATION")
     values = np.asarray(trade_returns, dtype=float)
+    gross_values = np.asarray(gross_trade_returns, dtype=float)
     cumulative = float(np.prod(1.0 + values) - 1.0) if len(values) else 0.0
+    gross_cumulative = (
+        float(np.prod(1.0 + gross_values) - 1.0)
+        if len(gross_values)
+        else 0.0
+    )
     volatility = float(values.std(ddof=0)) if len(values) else 0.0
     mean = float(values.mean()) if len(values) else 0.0
     score = mean / volatility * math.sqrt(len(values)) if volatility > 0 else mean
@@ -4104,7 +4211,17 @@ def fast_screen(
         "conservative_same_bar_stop_priority": True,
         "future_data_used_for_signals": False,
         "trades": trades,
+        "gross_screening_return": gross_cumulative,
         "screening_return": cumulative,
+        "cost_drag": gross_cumulative - cumulative,
+        "round_trip_cost": float(round_trip_cost),
+        "exit_reason_counts": dict(sorted(exit_reasons.items())),
+        "terminal_liquidations": int(exit_reasons["TERMINAL_LIQUIDATION"]),
+        "trade_entry_buckets": sorted(trade_entry_buckets),
+        "trade_overlap_signature": stable_hash(
+            sorted(trade_entry_buckets),
+            length=64,
+        ),
         "screening_score": float(score),
         "paper_candidate_permitted": False,
     }
@@ -4212,6 +4329,110 @@ ECONOMIC_HYPOTHESIS_TEMPLATES: dict[str, tuple[str, ...]] = {
         "positive_return_20",
     ),
 }
+
+
+def economic_hypothesis_family(combination: StrategyCombination) -> str:
+    """Map arbitrary block DNA to its nearest declared economic hypothesis."""
+
+    selected = set(combination.block_ids)
+    scored = [
+        (
+            len(selected.intersection(template)) / max(1, len(set(template))),
+            family,
+        )
+        for family, template in ECONOMIC_HYPOTHESIS_TEMPLATES.items()
+    ]
+    best_score, best_family = max(scored, default=(0.0, "UNCLASSIFIED"))
+    if best_score > 0:
+        return best_family
+    return (
+        f"BLOCK_FAMILY:{sorted(combination.families)[0]}"
+        if combination.families
+        else "UNCLASSIFIED"
+    )
+
+
+def diverse_screening_survivors(
+    candidates: Sequence[
+        tuple[float, Mapping[str, Any], Mapping[str, Any], StrategyCombination]
+    ],
+    *,
+    maximum_survivors: int,
+    maximum_per_family: int = 2,
+    global_slots: int = 3,
+) -> list[tuple[float, Mapping[str, Any], Mapping[str, Any], StrategyCombination]]:
+    """Select high-scoring candidates without collapsing onto one hypothesis."""
+
+    if maximum_survivors < 1:
+        return []
+    ordered = sorted(candidates, key=lambda item: item[0], reverse=True)
+    selected: list[
+        tuple[float, Mapping[str, Any], Mapping[str, Any], StrategyCombination]
+    ] = []
+    selected_experiments: set[str] = set()
+    family_counts: Counter[str] = Counter()
+
+    def jaccard(left: set[str], right: set[str]) -> float:
+        union = left.union(right)
+        return len(left.intersection(right)) / len(union) if union else 0.0
+
+    def add(item) -> bool:
+        _, payload, screening, combination = item
+        experiment = str(payload.get("experiment_hash"))
+        family = economic_hypothesis_family(combination)
+        if (
+            experiment in selected_experiments
+            or family_counts[family] >= maximum_per_family
+        ):
+            return False
+        blocks = set(combination.block_ids)
+        trade_buckets = set(screening.get("trade_entry_buckets") or ())
+        for _, _, selected_screening, selected_combination in selected:
+            if economic_hypothesis_family(selected_combination) != family:
+                continue
+            block_overlap = jaccard(blocks, set(selected_combination.block_ids))
+            selected_buckets = set(
+                selected_screening.get("trade_entry_buckets") or ()
+            )
+            trade_overlap = (
+                jaccard(trade_buckets, selected_buckets)
+                if trade_buckets and selected_buckets
+                else 0.0
+            )
+            if block_overlap >= 0.75 and trade_overlap >= 0.80:
+                return False
+        selected.append(item)
+        selected_experiments.add(experiment)
+        family_counts[family] += 1
+        return True
+
+    for item in ordered:
+        if len(selected) >= min(global_slots, maximum_survivors):
+            break
+        add(item)
+    families = sorted(
+        {economic_hypothesis_family(item[3]) for item in ordered}
+    )
+    while len(selected) < maximum_survivors:
+        added = False
+        for family in families:
+            item = next(
+                (
+                    candidate
+                    for candidate in ordered
+                    if economic_hypothesis_family(candidate[3]) == family
+                    and str(candidate[1].get("experiment_hash"))
+                    not in selected_experiments
+                ),
+                None,
+            )
+            if item is not None and add(item):
+                added = True
+                if len(selected) >= maximum_survivors:
+                    break
+        if not added:
+            break
+    return selected
 
 
 class LabRunner:
@@ -5162,6 +5383,10 @@ class LabRunner:
             "data_hash": job.get("data_hash"),
             "feature_hash": job.get("feature_hash"),
             "screening_engine_version": job.get("screening_engine_version"),
+            "screen_policy_version": job.get("screen_policy_version"),
+            "exit_model_version": job.get("exit_model_version"),
+            "survivor_policy_version": job.get("survivor_policy_version"),
+            "result_type": "EXACT_BACKTEST",
             "data_provenance": job.get("data_provenance"),
             "source_type": (
                 job.get("source_type") or _provenance_source_type(job.get("data_provenance"))
@@ -5197,14 +5422,23 @@ class LabRunner:
         frames_by_timeframe: Mapping[str, Mapping[str, pd.DataFrame]],
         executor: ProcessPoolExecutor,
         allow_review_required_research_only: bool = False,
-        maximum_survivors: int = 5,
+        maximum_survivors: int = 12,
     ) -> tuple[int, int, list[dict[str, Any]]]:
-        screened: list[tuple[float, Mapping[str, Any], Mapping[str, Any]]] = []
+        screened: list[
+            tuple[
+                float,
+                Mapping[str, Any],
+                Mapping[str, Any],
+                StrategyCombination,
+            ]
+        ] = []
         existing_exact = {
             str(row.get("experiment_hash"))
             for row in _payload_rows(self.store.database, "exact_backtest_results")
         }
         for payload in baseline_payloads:
+            if payload.get("result_type") == "PARAMETER_SENSITIVITY":
+                continue
             combination = combinations.get(str(payload["combination_id"]))
             timeframe = str(payload["timeframes_tested"][0])
             frames = frames_by_timeframe.get(timeframe)
@@ -5215,17 +5449,22 @@ class LabRunner:
                 continue
             rank_score = screening_survivor_score(
                 result,
-                minimum_trades=self.settings.research.minimum_trades,
+                minimum_trades=FAST_SCREEN_MINIMUM_TRADES,
             )
             if rank_score is None:
                 continue
-            screened.append((rank_score, payload, result))
+            screened.append((rank_score, payload, result, combination))
         best_by_combination_timeframe: dict[
             tuple[str, str],
-            tuple[float, Mapping[str, Any], Mapping[str, Any]],
+            tuple[
+                float,
+                Mapping[str, Any],
+                Mapping[str, Any],
+                StrategyCombination,
+            ],
         ] = {}
         for item in screened:
-            _, payload, _ = item
+            _, payload, _, _ = item
             key = (
                 str(payload["combination_id"]),
                 str(payload["timeframes_tested"][0]),
@@ -5233,7 +5472,14 @@ class LabRunner:
             current = best_by_combination_timeframe.get(key)
             if current is None or item[0] > current[0]:
                 best_by_combination_timeframe[key] = item
-        survivors: list[tuple[float, Mapping[str, Any], Mapping[str, Any]]] = []
+        survivors: list[
+            tuple[
+                float,
+                Mapping[str, Any],
+                Mapping[str, Any],
+                StrategyCombination,
+            ]
+        ] = []
         for timeframe in sorted(frames_by_timeframe):
             candidates = [
                 item
@@ -5241,16 +5487,14 @@ class LabRunner:
                 if selected_timeframe == timeframe
             ]
             survivors.extend(
-                sorted(
+                diverse_screening_survivors(
                     candidates,
-                    key=lambda item: item[0],
-                    reverse=True,
-                )[:maximum_survivors]
+                    maximum_survivors=maximum_survivors,
+                )
             )
         exact_backtests = 0
         exact_payloads: list[dict[str, Any]] = []
-        for _, payload, screening in survivors:
-            combination = combinations[str(payload["combination_id"])]
+        for _, payload, screening, combination in survivors:
             timeframe = str(payload["timeframes_tested"][0])
             if str(payload["experiment_hash"]) in existing_exact:
                 continue
@@ -5351,7 +5595,7 @@ class LabRunner:
         if job.get("deduplicated"):
             return dict(job), None
         async with semaphore:
-            sensitivity = bool(job.get("sensitivity_parameter"))
+            sensitivity = job.get("result_type") == "PARAMETER_SENSITIVITY"
             stage = "SENSITIVITY_SCREENING" if sensitivity else "SCREENING"
             running = self.store.update_job(
                 job,
@@ -5403,6 +5647,9 @@ class LabRunner:
                     "strategy_dna_hash": combination.strategy_dna_hash,
                     "block_ids": list(combination.block_ids),
                     "families": list(combination.families),
+                    "economic_hypothesis_family": economic_hypothesis_family(
+                        combination
+                    ),
                     "roles": list(combination.roles),
                     "logic_mode": combination.logic_mode.value,
                     "combination_size": combination.combination_size,
@@ -5411,6 +5658,10 @@ class LabRunner:
                     "data_hash": running.get("data_hash"),
                     "feature_hash": running.get("feature_hash"),
                     "screening_engine_version": running.get("screening_engine_version"),
+                    "screen_policy_version": running.get("screen_policy_version"),
+                    "exit_model_version": running.get("exit_model_version"),
+                    "survivor_policy_version": running.get("survivor_policy_version"),
+                    "result_type": running.get("result_type", "BASELINE_SCREEN"),
                     "data_provenance": running.get("data_provenance"),
                     "source_type": running.get("source_type"),
                     "software_version": running.get("software_version"),
@@ -5423,7 +5674,9 @@ class LabRunner:
                     },
                     "metrics": {
                         "trade_count": int(screening["trades"]),
+                        "gross_return": float(screening["gross_screening_return"]),
                         "net_return": float(screening["screening_return"]),
+                        "cost_drag": float(screening["cost_drag"]),
                         "sharpe": float(screening["screening_score"]),
                     },
                     "integrity": {
@@ -6442,7 +6695,7 @@ class LabRunner:
                     )
                 else:
                     completed += 1
-                    if job.get("sensitivity_parameter"):
+                    if job.get("result_type") == "PARAMETER_SENSITIVITY":
                         sensitivity_completed += 1
                     baseline_payloads.append(payload)
                 self.heartbeat(
@@ -6476,6 +6729,9 @@ class LabRunner:
                 data_hashes_by_timeframe=data_hashes_by_timeframe,
                 feature_hashes_by_timeframe=feature_hashes_by_timeframe,
                 screening_engine_version=FAST_SCREEN_VERSION,
+                screen_policy_version=SCREEN_POLICY_VERSION,
+                exit_model_version=EXIT_MODEL_VERSION,
+                survivor_policy_version=SURVIVOR_POLICY_VERSION,
                 markets=markets,
                 snapshot_id=snapshot_id,
                 sources={"FAST_SCREEN_REAL", "SYNTHETIC_FAST_SCREEN"},
@@ -6545,6 +6801,9 @@ class LabRunner:
                     data_hashes_by_timeframe=data_hashes_by_timeframe,
                     feature_hashes_by_timeframe=feature_hashes_by_timeframe,
                     screening_engine_version=FAST_SCREEN_VERSION,
+                    screen_policy_version=SCREEN_POLICY_VERSION,
+                    exit_model_version=EXIT_MODEL_VERSION,
+                    survivor_policy_version=SURVIVOR_POLICY_VERSION,
                     markets=markets,
                     snapshot_id=snapshot_id,
                     sources={"EXACT_REAL", "SYNTHETIC_SMOKE"},
@@ -7054,6 +7313,7 @@ __all__ = [
     "CombinationGenerator",
     "CombinationState",
     "CombinatorialStrategy",
+    "ExitProfile",
     "GenerationMode",
     "LabControl",
     "LabRunner",

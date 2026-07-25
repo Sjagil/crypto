@@ -3311,6 +3311,1172 @@ def _lab_generation_arguments(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _rotation_campaign_path(
+    settings: Settings,
+    *,
+    ensemble: bool = False,
+    institutional: bool = False,
+) -> Path:
+    name = (
+        "cross_sectional_institutional_v2.json"
+        if institutional
+        else (
+            "cross_sectional_ensemble_v1.json"
+            if ensemble
+            else "cross_sectional_rotation_v1.json"
+        )
+    )
+    return settings.paths.lab_dir / "reports" / name
+
+
+def _rotation_return_ci_lower(
+    returns: pd.Series,
+    *,
+    samples: int,
+    block_size: int,
+    seed: int,
+) -> float:
+    values = returns.dropna().to_numpy(dtype=float)
+    if len(values) < block_size or samples < 100:
+        return -math.inf
+    randomizer = np.random.default_rng(seed)
+    means = np.empty(samples, dtype=float)
+    for sample in range(samples):
+        indices: list[int] = []
+        while len(indices) < len(values):
+            start = int(randomizer.integers(0, len(values)))
+            indices.extend((start + offset) % len(values) for offset in range(block_size))
+        means[sample] = values[np.asarray(indices[: len(values)], dtype=int)].mean()
+    return float(np.quantile(means, 0.025))
+
+
+def _run_rotation_campaign(
+    settings: Settings,
+    *,
+    ensemble: bool = False,
+    institutional: bool = False,
+) -> dict[str, Any]:
+    """Run and persist the allowed-universe daily rotation research campaign."""
+
+    from research.combinatorial_lab import FAST_SCREEN_MINIMUM_TRADES
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        ROTATION_ENGINE_VERSION,
+        ROTATION_POLICY_VERSION,
+        RotationPortfolioPolicy,
+        backtest_rotation,
+        ensemble_rotation_parameter_grid,
+        rotation_parameter_grid,
+        rotation_period_metrics,
+    )
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"missing normalized 1d rotation datasets: {missing}")
+    frames = {market: pd.read_parquet(path) for market, path in paths.items()}
+    ensemble_mode = ensemble or institutional
+    grid_factory = (
+        ensemble_rotation_parameter_grid
+        if ensemble_mode
+        else rotation_parameter_grid
+    )
+    portfolio_policy: RotationPortfolioPolicy | None = None
+    if institutional:
+        portfolio_policy = _strict_rotation_portfolio_policy(
+            settings,
+            markets=markets,
+        )
+        grid = grid_factory(
+            horizon_sets=((20, 90), (20, 60, 120), (20, 90, 180)),
+            top_ns=(1, 2),
+            rebalance_days=(7,),
+            asset_ema_periods=(50, 200),
+            continuous_regimes=(False, True),
+            weightings=("equal", "inverse_volatility"),
+            gross_exposure=portfolio_policy.maximum_total_exposure,
+            minimum_cash=portfolio_policy.minimum_cash,
+            maximum_positions=settings.operational.maximum_positions,
+        )
+    else:
+        grid = grid_factory(
+            gross_exposure=(
+                min(0.25, settings.operational.maximum_portfolio_exposure)
+                if ensemble
+                else settings.operational.maximum_portfolio_exposure
+            ),
+            minimum_cash=settings.operational.reserve_cash_fraction,
+            maximum_positions=settings.operational.maximum_positions,
+        )
+    prior_trials = 1_245 if institutional else (1_080 if ensemble else 648)
+    periods = {
+        "development": ("2021-08-05", "2023-12-31"),
+        "validation": ("2024-01-01", "2025-06-30"),
+        "confirmation": ("2025-07-01", "2026-07-23"),
+    }
+    rows: list[dict[str, Any]] = []
+    development_returns: dict[str, pd.Series] = {}
+    results: dict[str, Any] = {}
+    for parameters in grid:
+        result = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=portfolio_policy,
+        )
+        period_results: dict[str, Any] = {}
+        for period, (start, end) in periods.items():
+            metrics, returns = rotation_period_metrics(
+                result.equity_curve,
+                start=start,
+                end=end,
+            )
+            period_results[period] = metrics
+            if period == "development":
+                development_returns[parameters.dna_hash] = returns
+        development = period_results["development"]
+        development_start = pd.Timestamp(periods["development"][0], tz="UTC")
+        development_end = pd.Timestamp(periods["development"][1], tz="UTC")
+        development_rebalances = int(
+            (
+                (pd.to_datetime(result.decisions["executed_at"], utc=True) >= development_start)
+                & (pd.to_datetime(result.decisions["executed_at"], utc=True) <= development_end)
+                & (result.decisions["turnover"].astype(float) > 1e-12)
+            ).sum()
+        )
+        development_score = (
+            float(development["sharpe"])
+            + float(development["annualized_return"])
+            - abs(float(development["maximum_drawdown"]))
+        )
+        row = {
+            "strategy_dna_hash": parameters.dna_hash,
+            "parameters": asdict(parameters),
+            "development_score": development_score,
+            "development_rebalances": development_rebalances,
+            "periods": period_results,
+            "full_sample": result.metrics,
+            "cost_breakdown": result.cost_breakdown,
+            "integrity": result.integrity,
+        }
+        rows.append(row)
+        results[parameters.dna_hash] = result
+
+    rows.sort(key=lambda item: float(item["development_score"]), reverse=True)
+    matrix = pd.concat(development_returns, axis=1).dropna(how="any")
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=len(rows) + prior_trials,
+    )
+    development_eligible = [
+        row
+        for row in rows
+        if float(row["periods"]["development"]["net_return"]) > 0
+        and int(row["development_rebalances"]) >= FAST_SCREEN_MINIMUM_TRADES
+        and int(row["periods"]["development"]["effective_sample_size"])
+        >= FAST_SCREEN_MINIMUM_TRADES
+    ]
+    survivors: list[dict[str, Any]] = []
+    signatures: Counter[tuple[Any, ...]] = Counter()
+    for row in development_eligible:
+        parameters = row["parameters"]
+        signature = (
+            (
+                parameters["momentum_lookback"],
+                *parameters.get("additional_momentum_lookbacks", ()),
+            ),
+            parameters["top_n"],
+            parameters.get("continuous_regime", False),
+        )
+        if signatures[signature] >= 1:
+            continue
+        survivors.append(row)
+        signatures[signature] += 1
+        if len(survivors) >= 12:
+            break
+
+    for row in survivors:
+        dna_hash = str(row["strategy_dna_hash"])
+        result = results[dna_hash]
+        stressed = backtest_rotation(
+            frames,
+            result.parameters,
+            fee_rate=settings.costs.default_fee
+            * settings.costs.stressed_cost_multiplier,
+            slippage_bps=settings.costs.slippage_bps
+            * settings.costs.stressed_cost_multiplier,
+            spread_bps=settings.costs.spread_bps
+            * settings.costs.stressed_cost_multiplier,
+            portfolio_policy=portfolio_policy,
+        )
+        stressed_confirmation, _ = rotation_period_metrics(
+            stressed.equity_curve,
+            start=periods["confirmation"][0],
+            end=periods["confirmation"][1],
+        )
+        _, confirmation_returns = rotation_period_metrics(
+            result.equity_curve,
+            start=periods["confirmation"][0],
+            end=periods["confirmation"][1],
+        )
+        fold_returns = np.array_split(
+            result.equity_curve.pct_change(fill_method=None).dropna().to_numpy(dtype=float),
+            settings.research.walk_forward_folds,
+        )
+        positive_folds = sum(
+            float(np.prod(1.0 + fold) - 1.0) > 0
+            for fold in fold_returns
+            if len(fold)
+        )
+        ci_lower = _rotation_return_ci_lower(
+            confirmation_returns,
+            samples=2_000,
+            block_size=10,
+            seed=settings.app.random_seed,
+        )
+        dsr = float(multiple.deflated_sharpe_probabilities.get(dna_hash, 0.0))
+        checks = {
+            "development_positive": (
+                float(row["periods"]["development"]["net_return"]) > 0
+            ),
+            "validation_positive": (
+                float(row["periods"]["validation"]["net_return"]) > 0
+            ),
+            "confirmation_positive": (
+                float(row["periods"]["confirmation"]["net_return"]) > 0
+            ),
+            "normal_profit_factor": (
+                float(row["periods"]["validation"]["daily_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "stressed_positive": float(stressed_confirmation["net_return"]) > 0,
+            "stressed_profit_factor": (
+                float(stressed_confirmation["daily_profit_factor"])
+                >= settings.research.minimum_stressed_profit_factor
+            ),
+            "minimum_rebalances": (
+                int(result.metrics["rebalance_count"])
+                >= settings.research.minimum_trades
+            ),
+            "minimum_effective_sample": (
+                int(row["periods"]["confirmation"]["effective_sample_size"])
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "positive_fold_gate": (
+                positive_folds >= settings.research.minimum_positive_folds
+            ),
+            "confidence_interval_lower_positive": ci_lower > 0,
+            "deflated_sharpe_gate": (
+                dsr >= settings.research.minimum_deflated_sharpe_probability
+            ),
+            "white_reality_check_gate": (
+                multiple.white_reality_check_pvalue
+                <= settings.research.maximum_white_reality_check_pvalue
+            ),
+            "hansen_spa_gate": (
+                multiple.hansen_spa_pvalue
+                <= settings.research.maximum_hansen_spa_pvalue
+            ),
+            "pbo_gate": (
+                multiple.probability_of_backtest_overfitting is not None
+                and multiple.probability_of_backtest_overfitting
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+            "maximum_drawdown_gate": (
+                abs(float(row["full_sample"]["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+        }
+        statistical_checks = {
+            "confidence_interval_lower_positive",
+            "deflated_sharpe_gate",
+            "white_reality_check_gate",
+            "hansen_spa_gate",
+            "pbo_gate",
+        }
+        row["robustness"] = {
+            "checks": checks,
+            "positive_folds": positive_folds,
+            "total_folds": len(fold_returns),
+            "confirmation_mean_return_ci_lower_95": ci_lower,
+            "deflated_sharpe_probability": dsr,
+            "stressed_confirmation": stressed_confirmation,
+            "all_numeric_gates_passed": all(checks.values()),
+            "economic_gates_passed": all(
+                passed
+                for name, passed in checks.items()
+                if name not in statistical_checks
+            ),
+            "statistical_gates_passed": all(
+                checks[name] for name in statistical_checks
+            ),
+            "paper_candidate_permitted": False,
+            "holdout_status": "CONTAMINATED_BY_PRIOR_EXPLORATION",
+        }
+
+    positive_all_periods = sum(
+        all(float(row["periods"][period]["net_return"]) > 0 for period in periods)
+        for row in rows
+    )
+    economic_research_leads = [
+        row for row in survivors if row["robustness"]["economic_gates_passed"]
+    ]
+    statistically_qualified = [
+        row for row in survivors if row["robustness"]["all_numeric_gates_passed"]
+    ]
+    campaign_label = (
+        "CROSS_SECTIONAL_INSTITUTIONAL_CONTINUATION_V2"
+        if institutional
+        else (
+            "CROSS_SECTIONAL_MULTI_HORIZON_ENSEMBLE_V1"
+            if ensemble
+            else "CROSS_SECTIONAL_ROTATION_ALLOWED_V1"
+        )
+    )
+    report = {
+        "status": "COMPLETED",
+        "campaign": campaign_label,
+        "result_type": "JOINT_PARAMETER_SCREEN",
+        "rotation_engine_version": ROTATION_ENGINE_VERSION,
+        "rotation_policy_version": ROTATION_POLICY_VERSION,
+        "markets": list(markets),
+        "timeframe": "1d",
+        "bias_label": "CURRENT_UNIVERSE_RETROSPECTIVE",
+        "selection_basis": "DEVELOPMENT_ONLY",
+        "periods": periods,
+        "joint_parameter_trials": len(rows),
+        "prior_exploratory_trials_accounted": prior_trials,
+        "total_known_family_trials": len(rows) + prior_trials,
+        "development_eligible": len(development_eligible),
+        "positive_all_three_periods_descriptive_only": positive_all_periods,
+        "survivor_count": len(survivors),
+        "economic_research_lead_count": len(economic_research_leads),
+        "economic_research_leads": economic_research_leads,
+        "statistically_qualified_count": len(statistically_qualified),
+        "multiple_testing": asdict(multiple),
+        "survivors": survivors,
+        "top_development_rows": rows[:25],
+        "paper_candidates": 0,
+        "live_orders": 0,
+        "portfolio_policy": (
+            asdict(portfolio_policy) if portfolio_policy is not None else None
+        ),
+        "portfolio_policy_hash": (
+            portfolio_policy.policy_hash if portfolio_policy is not None else None
+        ),
+        "acceptance_note": (
+            "Positive rows are research evidence only. The recent confirmation period "
+            "was previously inspected and is not an untouched final holdout."
+        ),
+        "data_files": {
+            market: {
+                "path": str(path),
+                "sha256": sha256_file(path),
+                "rows": len(frames[market]),
+                "start": frames[market].index.min().isoformat(),
+                "end": frames[market].index.max().isoformat(),
+            }
+            for market, path in paths.items()
+        },
+    }
+    report_path = _rotation_campaign_path(
+        settings,
+        ensemble=ensemble,
+        institutional=institutional,
+    )
+    atomic_write_json(report_path, _json_ready(report))
+    frozen_path: Path | None = None
+    if ensemble_mode and economic_research_leads:
+        lead = economic_research_leads[0]
+        frozen_path = (
+            settings.paths.lab_dir
+            / "candidates"
+            / (
+                "rotation_institutional_lead_v2.json"
+                if institutional
+                else "rotation_research_lead_v1.json"
+            )
+        )
+        lead_result = results[str(lead["strategy_dna_hash"])]
+        atomic_write_json(
+            frozen_path,
+            _json_ready(
+                {
+                    "status": "FROZEN_RESEARCH_LEAD",
+                    "candidate_type": "ECONOMIC_RESEARCH_LEAD_NOT_PAPER_APPROVED",
+                    "strategy_dna_hash": lead["strategy_dna_hash"],
+                    "execution_identity": lead_result.summary()["execution_identity"],
+                    "parameters": lead["parameters"],
+                    "portfolio_policy": asdict(lead_result.portfolio_policy),
+                    "portfolio_policy_hash": lead_result.portfolio_policy.policy_hash,
+                    "periods": lead["periods"],
+                    "full_sample": lead["full_sample"],
+                    "cost_breakdown": lead["cost_breakdown"],
+                    "robustness": lead["robustness"],
+                    "source_report": str(report_path),
+                    "known_family_trials_accounted": report["total_known_family_trials"],
+                    "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
+                    "forward_validation_start": "2026-07-25T00:00:00Z",
+                    "minimum_forward_closed_daily_observations": 365,
+                    "minimum_forward_rebalances": FAST_SCREEN_MINIMUM_TRADES,
+                    "paper_candidate_permitted": False,
+                    "live_ready": False,
+                    "immutable_identity": stable_hash(
+                        {
+                            "strategy_dna_hash": lead["strategy_dna_hash"],
+                            "parameters": lead["parameters"],
+                            "data_hashes": {
+                                market: sha256_file(path)
+                                for market, path in paths.items()
+                            },
+                            "portfolio_policy_hash": (
+                                lead_result.portfolio_policy.policy_hash
+                            ),
+                        },
+                        length=64,
+                    ),
+                }
+            ),
+        )
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "strategy_dna_hash": row["strategy_dna_hash"],
+                **{
+                    key: value
+                    for key, value in row["parameters"].items()
+                    if not isinstance(value, (list, dict))
+                },
+                "development_return": row["periods"]["development"]["net_return"],
+                "validation_return": row["periods"]["validation"]["net_return"],
+                "confirmation_return": row["periods"]["confirmation"]["net_return"],
+                "development_sharpe": row["periods"]["development"]["sharpe"],
+                "validation_sharpe": row["periods"]["validation"]["sharpe"],
+                "confirmation_sharpe": row["periods"]["confirmation"]["sharpe"],
+                "full_maximum_drawdown": row["full_sample"]["maximum_drawdown"],
+                "full_rebalances": row["full_sample"]["rebalance_count"],
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": report["status"],
+        "campaign": report["campaign"],
+        "joint_parameter_trials": report["joint_parameter_trials"],
+        "development_eligible": report["development_eligible"],
+        "positive_all_three_periods_descriptive_only": positive_all_periods,
+        "survivor_count": len(survivors),
+        "economic_research_lead_count": len(economic_research_leads),
+        "statistically_qualified_count": len(statistically_qualified),
+        "paper_candidates": 0,
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "frozen_research_lead": str(frozen_path) if frozen_path else None,
+    }
+
+
+def _run_rotation_forward_validation(settings: Settings) -> dict[str, Any]:
+    """Evaluate only the frozen rotation DNA on observations after its freeze."""
+
+    from research.portfolio_selection import (
+        RotationParameters,
+        backtest_rotation,
+        rotation_period_metrics,
+        rotation_regime_coverage,
+    )
+
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    if not frozen_path.is_file():
+        return {
+            "status": "BLOCKED",
+            "reason_code": "NO_FROZEN_ROTATION_RESEARCH_LEAD",
+            "frozen_manifest": str(frozen_path),
+        }
+    frozen = read_json(frozen_path)
+    parameters_payload = dict(frozen["parameters"])
+    parameters_payload["additional_momentum_lookbacks"] = tuple(
+        parameters_payload.get("additional_momentum_lookbacks") or ()
+    )
+    parameters = RotationParameters(**parameters_payload)
+    if parameters.dna_hash != frozen["strategy_dna_hash"]:
+        raise ValueError("frozen rotation DNA does not match its parameters")
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"missing forward-validation data: {missing}")
+    frames = {market: pd.read_parquet(path) for market, path in paths.items()}
+    forward_start = pd.Timestamp(frozen["forward_validation_start"])
+    forward_start = (
+        forward_start.tz_localize("UTC")
+        if forward_start.tzinfo is None
+        else forward_start.tz_convert("UTC")
+    )
+    btc_index = pd.to_datetime(frames["BTC-EUR"].index, utc=True)
+    closed_observations = int((btc_index >= forward_start).sum())
+    minimum_observations = int(frozen["minimum_forward_closed_daily_observations"])
+    minimum_rebalances = int(frozen["minimum_forward_rebalances"])
+    report_path = (
+        settings.paths.lab_dir / "reports" / "rotation_forward_validation_v1.json"
+    )
+    base = {
+        "candidate_identity": frozen["immutable_identity"],
+        "strategy_dna_hash": frozen["strategy_dna_hash"],
+        "forward_start": forward_start.isoformat(),
+        "latest_closed_candle": btc_index.max().isoformat(),
+        "closed_daily_observations": closed_observations,
+        "required_closed_daily_observations": minimum_observations,
+        "required_rebalances": minimum_rebalances,
+        "required_regime_coverage": {
+            "axes": {
+                "btc_trend": ["UP", "DOWN"],
+                "volatility": ["HIGH", "LOW"],
+                "breadth": ["BROAD", "NARROW"],
+            },
+            "minimum_decisions_per_state": 5,
+        },
+        "parameters_frozen": True,
+        "parameter_reselection_permitted": False,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+    }
+    if closed_observations < 30:
+        payload = base | {
+            "status": "COLLECTING_FORWARD_DATA",
+            "reason_code": "INSUFFICIENT_NEW_CLOSED_DAILY_OBSERVATIONS",
+            "remaining_observations": max(0, minimum_observations - closed_observations),
+        }
+        atomic_write_json(report_path, payload)
+        return payload | {"report": str(report_path)}
+
+    normal = backtest_rotation(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+    )
+    stressed = backtest_rotation(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee * settings.costs.stressed_cost_multiplier,
+        slippage_bps=settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier,
+        spread_bps=settings.costs.spread_bps * settings.costs.stressed_cost_multiplier,
+    )
+    forward_end = btc_index.max()
+    normal_metrics, normal_returns = rotation_period_metrics(
+        normal.equity_curve,
+        start=forward_start,
+        end=forward_end,
+    )
+    stressed_metrics, _ = rotation_period_metrics(
+        stressed.equity_curve,
+        start=forward_start,
+        end=forward_end,
+    )
+    forward_decisions = normal.decisions[
+        pd.to_datetime(normal.decisions["executed_at"], utc=True) >= forward_start
+    ]
+    rebalances = int((forward_decisions["turnover"].astype(float) > 1e-12).sum())
+    regime_coverage = rotation_regime_coverage(
+        forward_decisions,
+        minimum_per_state=5,
+    )
+    ci_lower = _rotation_return_ci_lower(
+        normal_returns,
+        samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+    )
+    checks = {
+        "minimum_closed_observations": closed_observations >= minimum_observations,
+        "minimum_rebalances": rebalances >= minimum_rebalances,
+        "net_positive": float(normal_metrics["net_return"]) > 0,
+        "profit_factor": (
+            float(normal_metrics["daily_profit_factor"])
+            >= settings.research.minimum_profit_factor
+        ),
+        "stressed_net_positive": float(stressed_metrics["net_return"]) > 0,
+        "stressed_profit_factor": (
+            float(stressed_metrics["daily_profit_factor"])
+            >= settings.research.minimum_stressed_profit_factor
+        ),
+        "effective_sample_size": (
+            int(normal_metrics["effective_sample_size"])
+            >= settings.research.minimum_effective_sample_size
+        ),
+        "confidence_interval_lower_positive": ci_lower > 0,
+        "minimum_regime_coverage": regime_coverage["passed"],
+    }
+    passed = all(checks.values())
+    payload = base | {
+        "status": "FORWARD_PASS" if passed else "FORWARD_NOT_YET_QUALIFIED",
+        "checks": checks,
+        "normal": normal_metrics,
+        "stressed": stressed_metrics,
+        "forward_rebalances": rebalances,
+        "regime_coverage": regime_coverage,
+        "mean_return_ci_lower_95": ci_lower,
+        "shadow_review_eligible": passed,
+        "paper_candidate_permitted": False,
+    }
+    atomic_write_json(report_path, _json_ready(payload))
+    return payload | {"report": str(report_path)}
+
+
+def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
+    """Test frozen DNA once across declared quote and asset holdout views."""
+
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        RotationParameters,
+        backtest_rotation,
+        rotation_period_metrics,
+    )
+
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    if not frozen_path.is_file():
+        return {
+            "status": "BLOCKED",
+            "reason_code": "NO_FROZEN_ROTATION_RESEARCH_LEAD",
+            "frozen_manifest": str(frozen_path),
+        }
+    frozen = read_json(frozen_path)
+    parameter_payload = dict(frozen["parameters"])
+    parameter_payload["additional_momentum_lookbacks"] = tuple(
+        parameter_payload.get("additional_momentum_lookbacks") or ()
+    )
+    parameters = RotationParameters(**parameter_payload)
+    if parameters.dna_hash != frozen["strategy_dna_hash"]:
+        raise ValueError("frozen rotation DNA does not match its parameters")
+
+    base_eur = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    views: dict[str, tuple[tuple[str, ...], str]] = {
+        "USDT_QUOTE_PROVIDER": (
+            ("BTC-USDT", "ETH-USDT", "SOL-USDT", "LINK-USDT"),
+            "BTC-USDT",
+        ),
+        "ADD_XMR": ((*base_eur, "XMR-EUR"), "BTC-EUR"),
+        "ADD_ZEC": ((*base_eur, "ZEC-EUR"), "BTC-EUR"),
+        "ADD_HYPE": ((*base_eur, "HYPE-EUR"), "BTC-EUR"),
+        "ADD_XMR_ZEC_HYPE": (
+            (*base_eur, "XMR-EUR", "ZEC-EUR", "HYPE-EUR"),
+            "BTC-EUR",
+        ),
+    }
+    period = ("2025-07-01", "2026-07-23")
+    normal_returns: dict[str, pd.Series] = {}
+    results: dict[str, Any] = {}
+    all_paths: dict[str, Path] = {}
+    for view, (markets, benchmark) in views.items():
+        paths = {
+            market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
+            for market in markets
+        }
+        missing = [str(path) for path in paths.values() if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"{view} lacks external-validation data: {missing}")
+        all_paths.update(paths)
+        frames = {market: pd.read_parquet(path) for market, path in paths.items()}
+        normal = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            benchmark_market=benchmark,
+        )
+        stressed = backtest_rotation(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee
+            * settings.costs.stressed_cost_multiplier,
+            slippage_bps=settings.costs.slippage_bps
+            * settings.costs.stressed_cost_multiplier,
+            spread_bps=settings.costs.spread_bps
+            * settings.costs.stressed_cost_multiplier,
+            benchmark_market=benchmark,
+        )
+        normal_metrics, returns = rotation_period_metrics(
+            normal.equity_curve,
+            start=period[0],
+            end=period[1],
+        )
+        stressed_metrics, _ = rotation_period_metrics(
+            stressed.equity_curve,
+            start=period[0],
+            end=period[1],
+        )
+        normal_returns[view] = returns
+        ci_lower = _rotation_return_ci_lower(
+            returns,
+            samples=settings.research.multiple_testing_bootstrap_samples,
+            block_size=settings.research.multiple_testing_block_size,
+            seed=settings.app.random_seed,
+        )
+        results[view] = {
+            "markets": list(markets),
+            "benchmark_market": benchmark,
+            "normal": normal_metrics,
+            "stressed": stressed_metrics,
+            "mean_return_ci_lower_95": ci_lower,
+            "integrity": normal.integrity,
+        }
+
+    matrix = pd.concat(normal_returns, axis=1).dropna(how="any")
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=int(frozen["known_family_trials_accounted"]) + len(views),
+    )
+    for view, result in results.items():
+        normal = result["normal"]
+        stressed = result["stressed"]
+        dsr = float(multiple.deflated_sharpe_probabilities[view])
+        checks = {
+            "net_positive": float(normal["net_return"]) > 0,
+            "normal_profit_factor": (
+                float(normal["daily_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "stressed_net_positive": float(stressed["net_return"]) > 0,
+            "stressed_profit_factor": (
+                float(stressed["daily_profit_factor"])
+                >= settings.research.minimum_stressed_profit_factor
+            ),
+            "effective_sample_size": (
+                int(normal["effective_sample_size"])
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "maximum_drawdown": (
+                abs(float(normal["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+            "confidence_interval_lower_positive": (
+                float(result["mean_return_ci_lower_95"]) > 0
+            ),
+            "deflated_sharpe": (
+                dsr >= settings.research.minimum_deflated_sharpe_probability
+            ),
+        }
+        result["deflated_sharpe_probability"] = dsr
+        result["checks"] = checks
+        result["economic_positive"] = all(
+            checks[name]
+            for name in (
+                "net_positive",
+                "stressed_net_positive",
+                "stressed_profit_factor",
+                "effective_sample_size",
+                "maximum_drawdown",
+            )
+        )
+        result["all_view_gates_passed"] = all(checks.values())
+
+    global_checks = {
+        "all_views_net_positive": all(
+            float(result["normal"]["net_return"]) > 0 for result in results.values()
+        ),
+        "all_views_stressed_positive": all(
+            float(result["stressed"]["net_return"]) > 0 for result in results.values()
+        ),
+        "white_reality_check": (
+            multiple.white_reality_check_pvalue
+            <= settings.research.maximum_white_reality_check_pvalue
+        ),
+        "hansen_spa": (
+            multiple.hansen_spa_pvalue
+            <= settings.research.maximum_hansen_spa_pvalue
+        ),
+        "pbo": (
+            multiple.probability_of_backtest_overfitting is not None
+            and multiple.probability_of_backtest_overfitting
+            <= settings.research.maximum_probability_of_backtest_overfitting
+        ),
+        "at_least_one_dsr_pass": any(
+            probability >= settings.research.minimum_deflated_sharpe_probability
+            for probability in multiple.deflated_sharpe_probabilities.values()
+        ),
+    }
+    full_pass = all(global_checks.values()) and any(
+        result["all_view_gates_passed"] for result in results.values()
+    )
+    payload = {
+        "status": (
+            "EXTERNAL_VALIDATION_PASS"
+            if full_pass
+            else "EXTERNAL_ECONOMIC_PASS_STATISTICAL_PARTIAL"
+        ),
+        "candidate_identity": frozen["immutable_identity"],
+        "strategy_dna_hash": frozen["strategy_dna_hash"],
+        "parameters_frozen": True,
+        "parameter_reselection_permitted": False,
+        "evaluation_count": len(views),
+        "period": {"start": period[0], "end": period[1]},
+        "holdout_label": "EXTERNAL_ASSET_AND_QUOTE_VALIDATION_EVALUATED_ONCE",
+        "views": results,
+        "multiple_testing": asdict(multiple),
+        "global_checks": global_checks,
+        "known_family_trials_before_external_validation": frozen[
+            "known_family_trials_accounted"
+        ],
+        "total_known_trials_after_external_validation": (
+            int(frozen["known_family_trials_accounted"]) + len(views)
+        ),
+        "data_hashes": {
+            market: sha256_file(path)
+            for market, path in sorted(all_paths.items())
+        },
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    report_path = (
+        settings.paths.lab_dir / "reports" / "rotation_external_holdouts_v1.json"
+    )
+    atomic_write_json(report_path, _json_ready(payload))
+    return {
+        "status": payload["status"],
+        "global_checks": global_checks,
+        "report": str(report_path),
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
+def _strict_rotation_portfolio_policy(
+    settings: Settings,
+    *,
+    markets: tuple[str, ...],
+) -> Any:
+    from research.portfolio_selection import RotationPortfolioPolicy
+
+    maximum_total = min(
+        0.40,
+        settings.operational.maximum_portfolio_exposure,
+    )
+    maximum_position = min(
+        0.20,
+        settings.operational.maximum_position_fraction,
+        maximum_total,
+    )
+    return RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=maximum_total,
+        maximum_position_exposure=maximum_position,
+        minimum_cash=max(
+            settings.operational.reserve_cash_fraction,
+            1.0 - maximum_total,
+        ),
+        minimum_history_observations=90,
+    )
+
+
+def _frozen_rotation_inputs(
+    settings: Settings,
+) -> tuple[dict[str, Any], Any, tuple[str, ...], dict[str, Path], dict[str, pd.DataFrame]]:
+    from research.portfolio_selection import RotationParameters
+
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    if not frozen_path.is_file():
+        raise FileNotFoundError(f"frozen rotation lead is missing: {frozen_path}")
+    frozen = read_json(frozen_path)
+    parameter_payload = dict(frozen["parameters"])
+    parameter_payload["additional_momentum_lookbacks"] = tuple(
+        parameter_payload.get("additional_momentum_lookbacks") or ()
+    )
+    parameters = RotationParameters(**parameter_payload)
+    if parameters.dna_hash != frozen["strategy_dna_hash"]:
+        raise ValueError("frozen rotation DNA does not match its parameters")
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"strict rotation datasets are missing: {missing}")
+    frames = {market: pd.read_parquet(path) for market, path in paths.items()}
+    return frozen, parameters, markets, paths, frames
+
+
+def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
+    """Reproduce frozen signal DNA under a new explicit strict execution policy."""
+
+    from research.portfolio_selection import (
+        PORTFOLIO_METRICS_VERSION,
+        backtest_rotation,
+        rotation_benchmark_suite,
+        rotation_period_metrics,
+    )
+
+    frozen, parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
+    source_report = read_json(_rotation_campaign_path(settings, ensemble=True))
+    if tuple(source_report["markets"]) != markets:
+        raise ValueError("source lead was not selected on the strict core market universe")
+    policy = _strict_rotation_portfolio_policy(settings, markets=markets)
+    normal = backtest_rotation(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=policy,
+    )
+    stressed = backtest_rotation(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee * settings.costs.stressed_cost_multiplier,
+        slippage_bps=settings.costs.slippage_bps
+        * settings.costs.stressed_cost_multiplier,
+        spread_bps=settings.costs.spread_bps
+        * settings.costs.stressed_cost_multiplier,
+        portfolio_policy=policy,
+    )
+    periods = dict(source_report["periods"])
+    period_results: dict[str, Any] = {}
+    stressed_period_results: dict[str, Any] = {}
+    for period, bounds in periods.items():
+        period_results[period], _ = rotation_period_metrics(
+            normal.equity_curve,
+            start=bounds[0],
+            end=bounds[1],
+        )
+        stressed_period_results[period], _ = rotation_period_metrics(
+            stressed.equity_curve,
+            start=bounds[0],
+            end=bounds[1],
+        )
+    benchmarks = rotation_benchmark_suite(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=policy,
+    )
+    checks = {
+        "source_universe_allowed_only": tuple(source_report["markets"]) == markets,
+        "all_periods_net_positive": all(
+            float(metrics["net_return"]) > 0
+            for metrics in period_results.values()
+        ),
+        "all_periods_stressed_net_positive": all(
+            float(metrics["net_return"]) > 0
+            for metrics in stressed_period_results.values()
+        ),
+        "full_sample_net_positive": float(normal.metrics["net_return"]) > 0,
+        "full_sample_stressed_net_positive": (
+            float(stressed.metrics["net_return"]) > 0
+        ),
+        "portfolio_period_ess": (
+            int(normal.metrics["portfolio_period_effective_sample_size"])
+            >= settings.research.minimum_effective_sample_size
+        ),
+        "minimum_holding_episodes": (
+            int(normal.metrics["closed_position_episodes"]) >= 30
+        ),
+        "minimum_rebalance_opportunities": (
+            int(normal.metrics["scheduled_rebalance_opportunities"])
+            >= settings.research.minimum_trades
+        ),
+        "maximum_total_exposure": normal.integrity["maximum_exposure_respected"],
+        "maximum_position_exposure": normal.integrity[
+            "maximum_position_exposure_respected"
+        ],
+        "minimum_cash": normal.integrity["minimum_cash_respected"],
+        "asset_pnl_reconciled": normal.integrity["asset_pnl_reconciled"],
+        "next_open_execution": normal.integrity[
+            "decision_at_close_execution_next_open"
+        ],
+        "terminal_liquidation": normal.integrity["terminal_liquidation_recorded"],
+    }
+    economic_pass = all(checks.values())
+    execution_identity = normal.summary()["execution_identity"]
+    payload = {
+        "status": (
+            "STRICT_ALLOWED_POLICY_ECONOMIC_PASS"
+            if economic_pass
+            else "STRICT_ALLOWED_POLICY_NOT_QUALIFIED"
+        ),
+        "candidate_type": "INSTITUTIONAL_POLICY_REPRODUCTION_NOT_NEW_SELECTION",
+        "source_candidate_identity": frozen["immutable_identity"],
+        "strategy_dna_hash": frozen["strategy_dna_hash"],
+        "execution_identity": execution_identity,
+        "portfolio_metrics_version": PORTFOLIO_METRICS_VERSION,
+        "parameters_frozen": True,
+        "parameter_reselection_permitted": False,
+        "source_universe": list(markets),
+        "discovery_assets_used_for_original_selection": [],
+        "external_assets_used_for_original_selection": [],
+        "portfolio_policy": asdict(policy),
+        "portfolio_policy_hash": policy.policy_hash,
+        "exposure_semantics": {
+            "gross_exposure_parameter_is_total_not_per_position": True,
+            "signal_target_total_exposure": parameters.gross_exposure,
+            "hard_maximum_total_exposure": policy.maximum_total_exposure,
+            "hard_maximum_position_exposure": policy.maximum_position_exposure,
+            "hard_minimum_cash": policy.minimum_cash,
+            "maximum_observed_total_exposure": float(
+                normal.executed_weights.sum(axis=1).max()
+            ),
+            "maximum_observed_position_exposure": normal.metrics[
+                "maximum_position_exposure_observed"
+            ],
+        },
+        "checks": checks,
+        "economic_gates_passed": economic_pass,
+        "normal": normal.summary(),
+        "stressed": stressed.summary(),
+        "periods": period_results,
+        "stressed_periods": stressed_period_results,
+        "asset_pnl_attribution": normal.metrics["asset_pnl_attribution"],
+        "benchmarks_and_ablations": benchmarks,
+        "historical_multiple_testing": source_report["multiple_testing"],
+        "historical_statistical_gates_passed": frozen["robustness"][
+            "statistical_gates_passed"
+        ],
+        "statistical_recalculation_note": (
+            "The original 160-strategy multiple-testing matrix already used only "
+            "BTC-EUR, ETH-EUR, SOL-EUR and LINK-EUR. This fixed-policy reproduction "
+            "does not create a new search family and cannot manufacture a new DSR."
+        ),
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+        "live_orders": 0,
+    }
+    report_path = (
+        settings.paths.lab_dir / "reports" / "rotation_institutional_audit_v2.json"
+    )
+    atomic_write_json(report_path, _json_ready(payload))
+    benchmark_csv = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {"name": "strict_rotation", **normal.metrics},
+            *[
+                {"name": name, **metrics}
+                for name, metrics in benchmarks["benchmarks"].items()
+            ],
+        ]
+    ).to_csv(benchmark_csv, index=False)
+    return {
+        "status": payload["status"],
+        "execution_identity": execution_identity,
+        "economic_gates_passed": economic_pass,
+        "historical_statistical_gates_passed": False,
+        "report": str(report_path),
+        "benchmark_csv": str(benchmark_csv),
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
+def _run_rotation_forward_observer(settings: Settings) -> dict[str, Any]:
+    """Persist a frozen daily research snapshot without generating any order."""
+
+    from research.portfolio_selection import (
+        backtest_rotation,
+        rotation_decision_snapshot,
+        rotation_regime_coverage,
+    )
+
+    frozen, parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
+    policy = _strict_rotation_portfolio_policy(settings, markets=markets)
+    snapshot = rotation_decision_snapshot(
+        frames,
+        parameters,
+        portfolio_policy=policy,
+    )
+    result = backtest_rotation(
+        frames,
+        parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=policy,
+    )
+    forward_start = pd.Timestamp(frozen["forward_validation_start"])
+    forward_start = (
+        forward_start.tz_localize("UTC")
+        if forward_start.tzinfo is None
+        else forward_start.tz_convert("UTC")
+    )
+    forward_decisions = result.decisions[
+        pd.to_datetime(result.decisions["decision_at"], utc=True) >= forward_start
+    ].copy()
+    coverage = rotation_regime_coverage(
+        forward_decisions,
+        minimum_per_state=5,
+    )
+    report_path = (
+        settings.paths.lab_dir / "reports" / "rotation_forward_observer_v2.json"
+    )
+    existing_observations: list[dict[str, Any]] = []
+    if report_path.is_file():
+        existing_observations = list(read_json(report_path).get("observations") or [])
+    by_decision_at = {
+        str(item["decision_at"]): item for item in existing_observations
+    }
+    if pd.Timestamp(snapshot["decision_at"]) >= forward_start:
+        by_decision_at[snapshot["decision_at"]] = snapshot
+    observations = [by_decision_at[key] for key in sorted(by_decision_at)]
+    payload = {
+        "status": "FROZEN_FORWARD_RESEARCH",
+        "source_candidate_identity": frozen["immutable_identity"],
+        "strategy_dna_hash": frozen["strategy_dna_hash"],
+        "execution_identity": result.summary()["execution_identity"],
+        "portfolio_policy": asdict(policy),
+        "parameters_frozen": True,
+        "parameter_reselection_permitted": False,
+        "forward_start": forward_start.isoformat(),
+        "latest_snapshot": snapshot,
+        "observations": observations,
+        "forward_decision_count": len(forward_decisions),
+        "regime_coverage": coverage,
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "shadow_candidate": False,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    atomic_write_json(report_path, _json_ready(payload))
+    return {
+        "status": payload["status"],
+        "latest_snapshot": snapshot,
+        "forward_decision_count": len(forward_decisions),
+        "regime_coverage": coverage,
+        "report": str(report_path),
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -3690,15 +4856,167 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             "microstructure-5m15m",
         )
         formal_campaign = campaign_name == "formal-five-family"
-        campaign_timeframes = ("1h",) if formal_campaign else ("5m", "15m")
+        ensemble_campaign = campaign_name == "cross-sectional-ensemble"
+        institutional_campaign = campaign_name == "institutional-rotation-v2"
+        rotation_campaign = campaign_name in {
+            "cross-sectional-rotation",
+            "cross-sectional-ensemble",
+            "institutional-rotation-v2",
+        }
+        campaign_timeframes = (
+            ("1d",)
+            if rotation_campaign
+            else (("1h",) if formal_campaign else ("5m", "15m"))
+        )
         campaign_label = (
-            "FORMAL_CAUSAL_FIVE_FAMILY_V1" if formal_campaign else "ALLOWED_5M_15M_FULL_HISTORY_V2"
+            (
+                "CROSS_SECTIONAL_INSTITUTIONAL_CONTINUATION_V2"
+                if institutional_campaign
+                else (
+                    "CROSS_SECTIONAL_MULTI_HORIZON_ENSEMBLE_V1"
+                    if ensemble_campaign
+                    else "CROSS_SECTIONAL_ROTATION_ALLOWED_V1"
+                )
+            )
+            if rotation_campaign
+            else (
+                "FORMAL_CAUSAL_FIVE_FAMILY_V1"
+                if formal_campaign
+                else "ALLOWED_5M_15M_FULL_HISTORY_V2"
+            )
         )
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
         )
+        if campaign_action == "forward":
+            if not ensemble_campaign:
+                raise ValueError(
+                    "forward validation is available only for cross-sectional-ensemble"
+                )
+            emit(await asyncio.to_thread(_run_rotation_forward_validation, settings))
+            return 0
+        if campaign_action == "external":
+            if not ensemble_campaign:
+                raise ValueError(
+                    "external validation is available only for cross-sectional-ensemble"
+                )
+            emit(await asyncio.to_thread(_run_rotation_external_validation, settings))
+            return 0
+        if campaign_action == "audit":
+            if not ensemble_campaign:
+                raise ValueError(
+                    "institutional audit is available only for cross-sectional-ensemble"
+                )
+            emit(await asyncio.to_thread(_run_rotation_institutional_audit, settings))
+            return 0
+        if campaign_action == "observe":
+            if not ensemble_campaign:
+                raise ValueError(
+                    "forward observer is available only for cross-sectional-ensemble"
+                )
+            emit(await asyncio.to_thread(_run_rotation_forward_observer, settings))
+            return 0
+        if campaign_action == "package":
+            if not ensemble_campaign:
+                raise ValueError(
+                    "acceptance package is available only for cross-sectional-ensemble"
+                )
+            from reporting.research_package import build_rotation_acceptance_package
+
+            emit(
+                await asyncio.to_thread(
+                    build_rotation_acceptance_package,
+                    settings,
+                )
+            )
+            return 0
         if campaign_action in {"plan", "estimate"}:
+            if rotation_campaign:
+                from research.portfolio_selection import (
+                    ensemble_rotation_parameter_grid,
+                    rotation_parameter_grid,
+                )
+
+                ensemble_mode = ensemble_campaign or institutional_campaign
+                grid_factory = (
+                    ensemble_rotation_parameter_grid
+                    if ensemble_mode
+                    else rotation_parameter_grid
+                )
+                campaign_exposure = (
+                    settings.operational.maximum_portfolio_exposure
+                    if institutional_campaign
+                    else (
+                        min(0.25, settings.operational.maximum_portfolio_exposure)
+                        if ensemble_campaign
+                        else settings.operational.maximum_portfolio_exposure
+                    )
+                )
+                campaign_minimum_cash = (
+                    max(
+                        settings.operational.reserve_cash_fraction,
+                        1.0 - campaign_exposure,
+                    )
+                    if institutional_campaign
+                    else settings.operational.reserve_cash_fraction
+                )
+                grid_arguments: dict[str, Any] = {
+                    "gross_exposure": campaign_exposure,
+                    "minimum_cash": campaign_minimum_cash,
+                    "maximum_positions": settings.operational.maximum_positions,
+                }
+                if institutional_campaign:
+                    grid_arguments.update(
+                        {
+                            "horizon_sets": (
+                                (20, 90),
+                                (20, 60, 120),
+                                (20, 90, 180),
+                            ),
+                            "top_ns": (1, 2),
+                            "rebalance_days": (7,),
+                            "asset_ema_periods": (50, 200),
+                            "continuous_regimes": (False, True),
+                            "weightings": ("equal", "inverse_volatility"),
+                        }
+                    )
+
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "strategy_family": "CROSS_SECTIONAL_MOMENTUM_ROTATION",
+                        "result_type": "JOINT_PARAMETER_SCREEN",
+                        "joint_parameter_trials": len(
+                            grid_factory(**grid_arguments)
+                        ),
+                        "markets": ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"],
+                        "timeframes": ["1d"],
+                        "selection_basis": "DEVELOPMENT_ONLY",
+                        "maximum_positions": settings.operational.maximum_positions,
+                        "maximum_exposure": (
+                            campaign_exposure
+                        ),
+                        "minimum_cash": campaign_minimum_cash,
+                        "maximum_position_exposure": (
+                            settings.operational.maximum_position_fraction
+                            if institutional_campaign
+                            else None
+                        ),
+                        "prior_trials_accounted": (
+                            1_245 if institutional_campaign else None
+                        ),
+                        "closed_candles_only": True,
+                        "next_open_execution": True,
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             registry = signal_block_registry()
             if formal_campaign:
                 selected_blocks = sorted(
@@ -3746,6 +5064,30 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "run":
+            if rotation_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "joint_parameter_trials": (
+                                48
+                                if institutional_campaign
+                                else (160 if ensemble_campaign else 432)
+                            ),
+                            "reason_code": "FORMAL_JOINT_PARAMETER_SCREEN",
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_rotation_campaign,
+                        settings,
+                        ensemble=ensemble_campaign,
+                        institutional=institutional_campaign,
+                    )
+                )
+                return 0
             registry = signal_block_registry()
             if formal_campaign:
                 selected_blocks = sorted(
@@ -3811,6 +5153,22 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
+            if rotation_campaign:
+                report_path = _rotation_campaign_path(
+                    settings,
+                    ensemble=ensemble_campaign,
+                    institutional=institutional_campaign,
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             emit(
                 {
                     "campaign": campaign_label,
@@ -3823,6 +5181,21 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "status":
+            if rotation_campaign:
+                report_path = _rotation_campaign_path(
+                    settings,
+                    ensemble=ensemble_campaign,
+                    institutional=institutional_campaign,
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": "COMPLETED" if report_path.is_file() else "NOT_RUN",
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
             emit(
                 {
                     "campaign": campaign_label,
@@ -5813,7 +7186,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="lab_action",
         required=True,
     )
-    campaign_names = ("microstructure-5m15m", "formal-five-family")
+    campaign_names = (
+        "microstructure-5m15m",
+        "formal-five-family",
+        "cross-sectional-rotation",
+        "cross-sectional-ensemble",
+        "institutional-rotation-v2",
+    )
     campaign_plan = campaign.add_parser("plan")
     campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_plan.add_argument("--combination-sizes", default="1,2")
@@ -5832,6 +7211,36 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_report = campaign.add_parser("report")
     campaign_report.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_report.add_argument("--run-id")
+    campaign_forward = campaign.add_parser("forward")
+    campaign_forward.add_argument(
+        "--name",
+        choices=("cross-sectional-ensemble",),
+        default="cross-sectional-ensemble",
+    )
+    campaign_external = campaign.add_parser("external")
+    campaign_external.add_argument(
+        "--name",
+        choices=("cross-sectional-ensemble",),
+        default="cross-sectional-ensemble",
+    )
+    campaign_audit = campaign.add_parser("audit")
+    campaign_audit.add_argument(
+        "--name",
+        choices=("cross-sectional-ensemble",),
+        default="cross-sectional-ensemble",
+    )
+    campaign_observe = campaign.add_parser("observe")
+    campaign_observe.add_argument(
+        "--name",
+        choices=("cross-sectional-ensemble",),
+        default="cross-sectional-ensemble",
+    )
+    campaign_package = campaign.add_parser("package")
+    campaign_package.add_argument(
+        "--name",
+        choices=("cross-sectional-ensemble",),
+        default="cross-sectional-ensemble",
+    )
     lab.add_parser("queue")
     lab.add_parser("workers")
     lab.add_parser("failures")

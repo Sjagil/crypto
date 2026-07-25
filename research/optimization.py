@@ -99,6 +99,7 @@ class MultipleTestingResult:
     probability_of_backtest_overfitting: float | None
     pbo_logits: tuple[float, ...]
     deflated_sharpe_probabilities: dict[str, float]
+    known_trial_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -641,6 +642,7 @@ def deflated_sharpe_ratio(
     *,
     observed_sharpe: float | None = None,
     effective_sample_size: int | None = None,
+    total_trials: int | None = None,
 ) -> float:
     """Probability that Sharpe exceeds the expected maximum from multiple trials."""
 
@@ -667,7 +669,7 @@ def deflated_sharpe_ratio(
         ],
         dtype=float,
     )
-    trial_count = max(1, len(raw_trials))
+    trial_count = max(1, len(raw_trials), int(total_trials or 0))
     trial_std = (
         float(raw_trials.std(ddof=1))
         if len(raw_trials) > 1
@@ -756,6 +758,7 @@ def multiple_testing_bootstrap(
     bootstrap_samples: int = 1_000,
     block_size: int = 5,
     seed: int = 42,
+    known_trial_count: int | None = None,
 ) -> MultipleTestingResult:
     """Run White Reality Check, Hansen SPA, PBO and per-strategy DSR."""
 
@@ -772,6 +775,8 @@ def multiple_testing_bootstrap(
         raise ValueError("multiple-testing matrix is empty")
     values = matrix.to_numpy(dtype=float)
     observations, strategies = values.shape
+    if known_trial_count is not None and known_trial_count < strategies:
+        raise ValueError("known trial count cannot be smaller than return matrix")
     means = values.mean(axis=0)
     standard = values.std(axis=0, ddof=1)
     standard_error = np.where(
@@ -820,6 +825,7 @@ def multiple_testing_bootstrap(
             matrix[column],
             trial_sharpes,
             observed_sharpe=float(trial_sharpes[index]),
+            total_trials=known_trial_count,
         )
         for index, column in enumerate(matrix.columns)
     }
@@ -834,6 +840,7 @@ def multiple_testing_bootstrap(
         probability_of_backtest_overfitting=pbo,
         pbo_logits=logits,
         deflated_sharpe_probabilities=dsr,
+        known_trial_count=known_trial_count or strategies,
     )
 
 

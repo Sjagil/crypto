@@ -24,6 +24,7 @@ from research.combinatorial_lab import (
     CombinationGenerator,
     CombinationState,
     CombinatorialStrategy,
+    ExitProfile,
     GenerationMode,
     LabControl,
     LabRunner,
@@ -35,6 +36,8 @@ from research.combinatorial_lab import (
     UniverseType,
     _matches_research_slice,
     canonical_parameters,
+    diverse_screening_survivors,
+    economic_hypothesis_family,
     fast_screen,
     parameter_hash,
     screening_survivor_score,
@@ -522,6 +525,51 @@ def test_combinatorial_strategy_uses_canonical_backtester_and_no_short(features)
     assert not screen["paper_candidate_permitted"]
 
 
+def test_combinatorial_exit_dna_has_distinct_fixed_trailing_and_time_profiles(
+    features,
+) -> None:
+    registry = signal_block_registry()
+    combination = CombinationGenerator(
+        {"positive_return_20": registry["positive_return_20"]}
+    ).generate(sizes=(1,), timeframes=("1h",))[0]
+    strategy = CombinatorialStrategy(combination, registry)
+    fixed = strategy.generate(
+        features,
+        {
+            "exit__profile": ExitProfile.FIXED_R.value,
+            "exit__target_atr": Decimal("4.0"),
+            "exit__trailing_atr": Decimal("3.0"),
+        },
+    )
+    trend = strategy.generate(
+        features,
+        {
+            "exit__profile": ExitProfile.TRAILING_TREND.value,
+            "exit__target_atr": Decimal("4.0"),
+            "exit__trailing_atr": Decimal("1.0"),
+            "exit__maximum_holding_bars": 720,
+        },
+    )
+    time_regime = strategy.generate(
+        features,
+        {
+            "exit__profile": ExitProfile.TIME_REGIME.value,
+            "exit__target_atr": Decimal("3.0"),
+            "exit__trailing_atr": Decimal("4.0"),
+            "exit__maximum_holding_bars": 480,
+        },
+    )
+    atr = features["atr_14"].astype(float)
+    assert (fixed.trailing_distance.dropna() == 0).all()
+    assert fixed.metadata["exit_profile"] == ExitProfile.FIXED_R.value
+    assert trend.target_distance.dropna().equals((atr * 20.0).dropna())
+    assert trend.trailing_distance.dropna().equals((atr * 2.5).dropna())
+    assert trend.maximum_holding_bars == 720
+    assert time_regime.target_distance.dropna().equals((atr * 20.0).dropna())
+    assert (time_regime.trailing_distance.dropna() == 0).all()
+    assert time_regime.maximum_holding_bars == 480
+
+
 def test_fast_screen_uses_maximum_holding_exit_instead_of_holding_forever(
     ohlcv,
 ) -> None:
@@ -554,6 +602,8 @@ def test_fast_screen_uses_maximum_holding_exit_instead_of_holding_forever(
     assert screen["screening_return"] == pytest.approx(0.99**4 - 1.0)
     assert screen["canonical_exit_family_approximated"]
     assert screen["conservative_same_bar_stop_priority"]
+    assert screen["trade_entry_buckets"]
+    assert len(screen["trade_overlap_signature"]) == 64
 
 
 def test_fast_screen_survivor_score_requires_minimum_trades_and_finite_score() -> None:
@@ -593,6 +643,95 @@ def test_fast_screen_survivor_score_requires_minimum_trades_and_finite_score() -
         {"trades": 30, "screening_score": 1.25, "screening_return": 0.01},
         minimum_trades=30,
     ) == pytest.approx(1.25)
+
+
+def test_result_types_and_diverse_survivors_separate_sensitivity_from_joint_screen(
+    isolated_settings,
+    tmp_path,
+) -> None:
+    settings = lab_settings(isolated_settings, tmp_path)
+    store = LabStore(settings)
+    registry = signal_block_registry()
+    combinations = [
+        CombinationGenerator(
+            {block_id: registry[block_id] for block_id in blocks}
+        ).generate(
+            sizes=(len(blocks),),
+            logic_modes=(LogicMode.LAYERED,),
+            timeframes=("1h",),
+        )[0]
+        for blocks in (
+            ("donchian20_breakout", "relative_volume_expansion"),
+            ("rsi_recovery", "ema20_reclaim"),
+            ("choppiness_high", "bollinger_lower_reversion"),
+        )
+    ]
+    base_arguments = {
+        "run_id": "result-types",
+        "snapshot_id": "snapshot",
+        "markets": ["BTC-EUR"],
+        "timeframe": "1h",
+        "data_hash": "data",
+    }
+    baseline = store.queue_job(
+        combination=combinations[0],
+        parameters=combinations[0].default_parameters,
+        **base_arguments,
+    )
+    sensitivity = store.queue_job(
+        combination=combinations[1],
+        parameters=combinations[1].default_parameters,
+        sensitivity_parameter="rsi_recovery__value",
+        **base_arguments,
+    )
+    joint = store.queue_job(
+        combination=combinations[2],
+        parameters=combinations[2].default_parameters,
+        sensitivity_parameter="CLI_OVERRIDE",
+        **base_arguments,
+    )
+    assert baseline["result_type"] == "BASELINE_SCREEN"
+    assert sensitivity["result_type"] == "PARAMETER_SENSITIVITY"
+    assert joint["result_type"] == "JOINT_PARAMETER_SCREEN"
+    assert baseline["screen_policy_version"]
+    assert baseline["exit_model_version"]
+    assert baseline["survivor_policy_version"]
+
+    candidates = [
+        (
+            float(10 - index),
+            {"experiment_hash": f"experiment-{index}"},
+            {"trades": 100},
+            combination,
+        )
+        for index, combination in enumerate(combinations)
+    ]
+    selected = diverse_screening_survivors(
+        candidates,
+        maximum_survivors=3,
+        maximum_per_family=1,
+    )
+    assert len(selected) == 3
+    assert len({economic_hypothesis_family(item[3]) for item in selected}) == 3
+    overlapping = diverse_screening_survivors(
+        [
+            (
+                2.0,
+                {"experiment_hash": "overlap-a"},
+                {"trade_entry_buckets": ["BTC-EUR:2026-W01", "BTC-EUR:2026-W02"]},
+                combinations[0],
+            ),
+            (
+                1.9,
+                {"experiment_hash": "overlap-b"},
+                {"trade_entry_buckets": ["BTC-EUR:2026-W01", "BTC-EUR:2026-W02"]},
+                combinations[0],
+            ),
+        ],
+        maximum_survivors=2,
+        maximum_per_family=2,
+    )
+    assert len(overlapping) == 1
 
 
 def test_weighted_vote_uses_weights_and_overlay_reduces_once(features) -> None:

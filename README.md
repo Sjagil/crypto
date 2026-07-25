@@ -452,6 +452,19 @@ python main.py lab campaign plan --name microstructure-5m15m
 python main.py lab campaign run --name microstructure-5m15m --workers 4 --max-trials 20 --yes
 python main.py lab campaign plan --name formal-five-family
 python main.py lab campaign run --name formal-five-family --workers 4 --max-trials 20 --yes
+python main.py lab campaign plan --name cross-sectional-rotation
+python main.py lab campaign run --name cross-sectional-rotation --yes
+python main.py lab campaign plan --name cross-sectional-ensemble
+python main.py lab campaign run --name cross-sectional-ensemble --yes
+python main.py lab campaign report --name cross-sectional-ensemble
+python main.py lab campaign external --name cross-sectional-ensemble
+python main.py lab campaign forward --name cross-sectional-ensemble
+python main.py lab campaign audit --name cross-sectional-ensemble
+python main.py lab campaign observe --name cross-sectional-ensemble
+python main.py lab campaign package --name cross-sectional-ensemble
+python main.py lab campaign plan --name institutional-rotation-v2
+python main.py lab campaign run --name institutional-rotation-v2 --yes
+python main.py lab campaign report --name institutional-rotation-v2
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -465,6 +478,52 @@ feature, software, cost, gate, seed, and DNA hashes in a stage-0 plan before
 screening. Higher-timeframe 4h/1d state becomes visible only after the source
 candle closes. Zero accepted candidates is a valid result; no gate is weakened
 to manufacture profitability.
+
+The cross-sectional campaigns rank the allowed daily assets, execute the
+decision at the next open, hold at most two assets, and support cash as an
+explicit allocation. Every one-way weight change, including terminal
+liquidation, pays fees, slippage, and half-spread. Assets join the panel only
+after their own real point-in-time history provides the required warmup.
+`cross-sectional-ensemble` combines declared momentum horizons with continuous
+BTC-trend and market-breadth exposure scaling. Baseline, joint-parameter,
+sensitivity, and exact results are separate result types; sensitivity rows
+cannot become screening survivors.
+
+The institutional audit keeps the frozen signal DNA unchanged but applies a
+separately hashed fail-closed portfolio policy: BTC-EUR, ETH-EUR, SOL-EUR and
+LINK-EUR only, at most 40% total exposure, at most 20% per asset, at least 60%
+cash, and at least 90 real daily observations before an asset can rank. Reports
+separate scheduled rebalances, changed portfolios, buy/sell fills, holding
+episodes, weekly effective sample size, daily/weekly returns, and asset-trade,
+closed-position, portfolio-period and rebalance-episode profit factors. Exact
+asset PnL attribution is reconciled to final equity.
+
+`institutional-rotation-v2` is a separate 48-combination continuation family;
+it cannot overwrite the original frozen lead. Its DSR accounts for all prior
+known trials. Benchmark evidence includes cash, BTC buy-and-hold, point-in-time
+equal-weight weekly portfolios, a volatility-matched BTC view, and predeclared
+regime/momentum ablations. These are diagnostics, not retroactive promotion
+evidence.
+
+`campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
+next-open weights with zero generated or submitted orders. Forward promotion
+requires 365 new closed daily observations, 30 valid rebalances, and coverage
+of rising/falling BTC trend, high/low volatility and broad/narrow breadth.
+`campaign package` requires a clean committed worktree, reruns Ruff and the
+non-network test suite, cross-checks candidate identities, archives the exact
+Git source, and writes a SHA-256 manifest and zip checksum.
+
+Single-market combinations also carry explicit exit DNA. `FIXED_R` uses a
+hard ATR stop and finite R-target, `TRAILING_TREND` uses a distant safety target
+plus a prior-bar ATR trail, and `TIME_REGIME` uses a hard stop with time or
+causal regime/signal exits. Swing searches include wider stops and holding
+windows up to 720 bars; the exit-model version is part of the experiment hash.
+
+The ensemble run may write
+`output/lab/candidates/rotation_research_lead_v1.json`. This is an immutable
+forward-validation registration, not an approved trading candidate. It remains
+blocked from paper and live modes until every statistical and multiple-testing
+gate passes on genuinely new data.
 
 `QUICK` runs static checks, canonical baselines, a bounded fast screen, and
 exact survivor backtests. `STANDARD`, `DEEP`, and `EXHAUSTIVE` progressively
