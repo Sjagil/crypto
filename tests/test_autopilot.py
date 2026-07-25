@@ -383,6 +383,25 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_multi_alpha_ensemble_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+            "generated_trial_count": 1,
+            "registered_unique_trials": 1,
+            "total_known_trials": 16_849,
+            "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
+            "economic_pass": False,
+            "statistical_pass": False,
+            "inherited_selection_bias_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -406,6 +425,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_volatility_contraction_campaign"
     ]["statistical_pass"]
+    assert (
+        result["parallel_multi_alpha_ensemble_campaign"][
+            "total_known_trials"
+        ]
+        == 16_849
+    )
+    assert not result[
+        "parallel_multi_alpha_ensemble_campaign"
+    ]["inherited_selection_bias_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

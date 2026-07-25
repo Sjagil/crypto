@@ -330,3 +330,46 @@ def test_acceptance_summary_includes_rejected_contraction_family() -> None:
     ]
     assert contraction["orders_generated"] == 0
     assert contraction["live_ready"] is False
+
+
+def test_acceptance_summary_includes_rejected_multi_alpha_ensemble() -> None:
+    values = _inputs()
+    values["multi_alpha_ensemble"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+        "engine_version": "1.0.0",
+        "generated_trial_count": 1,
+        "registered_unique_trials": 1,
+        "total_known_trials": 16_849,
+        "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
+        "multiple_testing": {
+            "single_preregistered_dna_no_meta_selection": True,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 1,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "inherited_selection_bias_pass": False,
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    ensemble = summary["multi_alpha_ensemble"]
+    assert ensemble["registered_unique_trials"] == 1
+    assert not ensemble["inherited_selection_bias_pass"]
+    assert not ensemble["primary_result"]["gates"]["statistical_pass"]
+    assert ensemble["orders_generated"] == 0
+    assert ensemble["live_ready"] is False

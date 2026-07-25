@@ -3363,6 +3363,16 @@ def _volatility_contraction_campaign_path(
     )
 
 
+def _multi_alpha_ensemble_campaign_path(
+    settings: Settings,
+) -> Path:
+    return (
+        settings.paths.lab_dir
+        / "reports"
+        / "multi_alpha_ensemble_campaign_v1.json"
+    )
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4467,6 +4477,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in contraction_forward_summaries.values()
     )
+    ensemble_result = _run_multi_alpha_ensemble_campaign(
+        settings
+    )
+    assert_orderless_research_payload(ensemble_result)
+    ensemble_report = read_json(
+        _multi_alpha_ensemble_campaign_path(settings)
+    )
+    assert_orderless_research_payload(ensemble_report)
+    ensemble_forward_summaries = dict(
+        ensemble_report.get("forward_summaries") or {}
+    )
+    ensemble_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in ensemble_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4526,12 +4551,25 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_multi_alpha_ensemble_observers": {
+            "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+            "status": ensemble_result["status"],
+            "observer_count": len(ensemble_forward_summaries),
+            "forward_summaries": ensemble_forward_summaries,
+            "total_forward_observations": (
+                ensemble_forward_observations
+            ),
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
             + absolute_forward_observations
             + plateau_forward_observations
             + contraction_forward_observations
+            + ensemble_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4561,6 +4599,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "absolute_momentum_v1",
         observer_root / "absolute_momentum_plateau_v1",
         observer_root / "volatility_contraction_v1",
+        observer_root / "multi_alpha_ensemble_v1",
     )
     paths = [
         path
@@ -4640,6 +4679,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     )
     volatility_contraction = (
         _run_volatility_contraction_campaign(settings)
+    )
+    multi_alpha_ensemble = (
+        _run_multi_alpha_ensemble_campaign(settings)
     )
     data_audit = _autopilot_data_stage(
         settings,
@@ -4748,6 +4790,39 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": volatility_contraction[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_multi_alpha_ensemble_campaign": {
+            "campaign": multi_alpha_ensemble["campaign"],
+            "status": multi_alpha_ensemble["status"],
+            "generated_trial_count": multi_alpha_ensemble[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": multi_alpha_ensemble[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": multi_alpha_ensemble[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": multi_alpha_ensemble[
+                "primary_strategy_id"
+            ],
+            "economic_pass": multi_alpha_ensemble[
+                "economic_pass"
+            ],
+            "statistical_pass": multi_alpha_ensemble[
+                "statistical_pass"
+            ],
+            "inherited_selection_bias_pass": (
+                multi_alpha_ensemble[
+                    "inherited_selection_bias_pass"
+                ]
+            ),
+            "observer_manifests": multi_alpha_ensemble[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -8823,6 +8898,651 @@ def _run_volatility_contraction_campaign(
     }
 
 
+def _run_multi_alpha_ensemble_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Run one fixed portfolio-of-strategies DNA without meta-selection."""
+
+    from research.absolute_momentum import (
+        AbsoluteMomentumParameters,
+        backtest_absolute_momentum,
+    )
+    from research.forward_observer import (
+        ForwardPerformanceGatePolicy,
+        build_rotation_forward_evidence,
+        merge_portfolio_forward_manifest,
+    )
+    from research.multi_alpha_ensemble import (
+        FROZEN_COMPONENT_DNA,
+        MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION,
+        MULTI_ALPHA_ENSEMBLE_FAMILY,
+        MultiAlphaEnsembleParameters,
+        backtest_multi_alpha_ensemble,
+    )
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_breakout import (
+        BreakoutPortfolioParameters,
+        backtest_breakout_portfolio,
+    )
+    from research.portfolio_selection import (
+        RotationPortfolioPolicy,
+        rotation_period_metrics,
+    )
+    from research.strategy_registry import (
+        ContentAddressedTrialRegistry,
+    )
+    from research.volatility_contraction import (
+        VolatilityContractionParameters,
+        backtest_volatility_contraction,
+    )
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir
+        / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"missing multi-alpha datasets: {missing}"
+        )
+    data_hashes = {
+        market: sha256_file(path) for market, path in paths.items()
+    }
+    data_fingerprint = stable_hash(data_hashes, length=64)
+    frames = {
+        market: pd.read_parquet(path)
+        for market, path in paths.items()
+    }
+    defensive_policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.20,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.80,
+        minimum_history_observations=90,
+    )
+    ensemble_policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.40,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.60,
+        minimum_history_observations=90,
+    )
+    parameters = MultiAlphaEnsembleParameters()
+    periods = {
+        "development": ("2019-12-01", "2023-12-31"),
+        "validation": ("2024-01-01", "2025-06-30"),
+        "confirmation": ("2025-07-01", "2026-07-24"),
+    }
+    report_path = _multi_alpha_ensemble_campaign_path(settings)
+    plan_path = report_path.with_name(
+        "multi_alpha_ensemble_plan_v1.json"
+    )
+    expected_plan = {
+        "schema_version": "multi_alpha_ensemble_plan_v1",
+        "status": "PREREGISTERED_NOT_RUN",
+        "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+        "strategy_family": MULTI_ALPHA_ENSEMBLE_FAMILY,
+        "engine_version": MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION,
+        "trial_count": 1,
+        "strategy_dna_hash": parameters.dna_hash,
+        "strategy_dna": asdict(parameters),
+        "component_dna": dict(FROZEN_COMPONENT_DNA),
+        "selection_basis": "NONE_SINGLE_FIXED_DNA",
+        "component_allocation": "EQUAL_FIXED_SLEEVES",
+        "portfolio_policy": asdict(ensemble_policy),
+        "periods": periods,
+        "inherited_selection_bias_must_be_reported": True,
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    if plan_path.is_file():
+        stored = read_json(plan_path)
+        for field in (
+            "campaign",
+            "engine_version",
+            "trial_count",
+            "strategy_dna_hash",
+            "component_dna",
+            "selection_basis",
+            "portfolio_policy",
+            "periods",
+        ):
+            if _json_ready(stored.get(field)) != _json_ready(
+                expected_plan.get(field)
+            ):
+                raise RuntimeError(
+                    f"MULTI_ALPHA_ENSEMBLE_PLAN_DRIFT:{field}"
+                )
+    else:
+        atomic_write_json(plan_path, _json_ready(expected_plan))
+
+    absolute_parameters = AbsoluteMomentumParameters(
+        target_annualized_volatility=0.05
+    )
+    breakout_parameters = BreakoutPortfolioParameters(
+        entry_lookback=20,
+        exit_lookback=10,
+        trend_ema_period=200,
+        weighting="equal",
+    )
+    contraction_parameters = VolatilityContractionParameters(
+        volatility_lookback=20,
+        contraction_quantile=0.20,
+        entry_lookback=55,
+        exit_lookback=20,
+        target_annualized_volatility=0.10,
+    )
+    expected_component_hashes = dict(FROZEN_COMPONENT_DNA)
+    actual_component_hashes = {
+        "ABSOLUTE_MOMENTUM_VOL_05": (
+            absolute_parameters.dna_hash
+        ),
+        "TURTLE_20_10_EMA200_EQUAL": (
+            breakout_parameters.dna_hash
+        ),
+        "VOLATILITY_CONTRACTION_PRIMARY": (
+            contraction_parameters.dna_hash
+        ),
+    }
+    if actual_component_hashes != expected_component_hashes:
+        raise RuntimeError(
+            "MULTI_ALPHA_ENSEMBLE_COMPONENT_DNA_DRIFT"
+        )
+    absolute = backtest_absolute_momentum(
+        frames,
+        absolute_parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=defensive_policy,
+    )
+    breakout = backtest_breakout_portfolio(
+        frames,
+        breakout_parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=ensemble_policy,
+    )
+    contraction = backtest_volatility_contraction(
+        frames,
+        contraction_parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=ensemble_policy,
+    )
+    component_weights = {
+        "ABSOLUTE_MOMENTUM_VOL_05": (
+            absolute.executed_weights
+        ),
+        "TURTLE_20_10_EMA200_EQUAL": (
+            breakout.executed_weights
+        ),
+        "VOLATILITY_CONTRACTION_PRIMARY": (
+            contraction.executed_weights
+        ),
+    }
+    normal = backtest_multi_alpha_ensemble(
+        frames,
+        component_weights,
+        parameters,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        portfolio_policy=ensemble_policy,
+    )
+    stressed = backtest_multi_alpha_ensemble(
+        frames,
+        component_weights,
+        parameters,
+        fee_rate=(
+            settings.costs.default_fee
+            * settings.costs.stressed_cost_multiplier
+        ),
+        slippage_bps=(
+            settings.costs.slippage_bps
+            * settings.costs.stressed_cost_multiplier
+        ),
+        spread_bps=(
+            settings.costs.spread_bps
+            * settings.costs.stressed_cost_multiplier
+        ),
+        portfolio_policy=ensemble_policy,
+    )
+    period_results: dict[str, Any] = {}
+    stressed_periods: dict[str, Any] = {}
+    development_returns: pd.Series | None = None
+    for period, bounds in periods.items():
+        metrics, returns = rotation_period_metrics(
+            normal.equity_curve,
+            start=bounds[0],
+            end=bounds[1],
+        )
+        period_results[period] = metrics
+        stressed_periods[period] = rotation_period_metrics(
+            stressed.equity_curve,
+            start=bounds[0],
+            end=bounds[1],
+        )[0]
+        if period == "development":
+            development_returns = returns
+    if development_returns is None or development_returns.empty:
+        raise RuntimeError(
+            "MULTI_ALPHA_ENSEMBLE_DEVELOPMENT_EMPTY"
+        )
+    registry = ContentAddressedTrialRegistry(
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "multi_alpha_ensemble_v1",
+        campaign_id="MULTI_ALPHA_ENSEMBLE_V1",
+    )
+    registration = registry.register(
+        data_fingerprint=data_fingerprint,
+        strategy_family=MULTI_ALPHA_ENSEMBLE_FAMILY,
+        strategy_dna_hash=parameters.dna_hash,
+        parameters=asdict(parameters),
+        metrics_at_birth={
+            **period_results["development"],
+            "full_sample_metrics": normal.metrics,
+        },
+        return_path_hash=stable_hash(
+            [
+                round(float(value), 15)
+                for value in development_returns.to_numpy(dtype=float)
+            ],
+            length=64,
+        ),
+        selection_metadata={
+            "selection_basis": "NONE_SINGLE_FIXED_DNA",
+            "meta_family_trial_count": 1,
+            "inherited_component_selection_bias": True,
+        },
+    )
+    registry_audit = registry.audit()
+    contraction_report = read_json(
+        _volatility_contraction_campaign_path(settings)
+    )
+    base_known_trials = int(
+        contraction_report.get("total_known_trials", 16_848)
+    )
+    total_known_trials = (
+        base_known_trials
+        + int(registry_audit["unique_trial_count"])
+    )
+    matrix = pd.DataFrame(
+        {"MULTI_ALPHA_FIXED_V1": development_returns}
+    ).dropna()
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=(
+            settings.research.multiple_testing_bootstrap_samples
+        ),
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=total_known_trials,
+    )
+    stochastic = _portfolio_stochastic_validation(
+        settings,
+        normal_equity=normal.equity_curve,
+        stressed_equity=stressed.equity_curve,
+        seed_offset=70_000,
+    )
+    component_reports = {
+        "absolute_momentum": read_json(
+            _absolute_momentum_campaign_path(settings)
+        ),
+        "portfolio_breakout": read_json(
+            _breakout_portfolio_campaign_path(settings)
+        ),
+        "volatility_contraction": contraction_report,
+    }
+    inherited_pbo = {
+        "absolute_momentum": component_reports[
+            "absolute_momentum"
+        ]["multiple_testing"][
+            "probability_of_backtest_overfitting"
+        ],
+        "portfolio_breakout": component_reports[
+            "portfolio_breakout"
+        ]["multiple_testing"][
+            "probability_of_backtest_overfitting"
+        ],
+        "volatility_contraction": component_reports[
+            "volatility_contraction"
+        ]["multiple_testing"][
+            "probability_of_backtest_overfitting"
+        ],
+    }
+    inherited_selection_bias_pass = all(
+        value is not None
+        and float(value)
+        <= settings.research.maximum_probability_of_backtest_overfitting
+        for value in inherited_pbo.values()
+    )
+    economic_checks = {
+        "all_periods_positive": all(
+            float(period_results[period]["net_return"]) > 0.0
+            for period in periods
+        ),
+        "all_stressed_periods_positive": all(
+            float(stressed_periods[period]["net_return"]) > 0.0
+            for period in periods
+        ),
+        "minimum_rebalances": (
+            int(normal.metrics["rebalance_count"])
+            >= settings.research.minimum_trades
+        ),
+        "minimum_effective_sample": (
+            int(
+                normal.metrics[
+                    "portfolio_period_effective_sample_size"
+                ]
+            )
+            >= settings.research.minimum_effective_sample_size
+        ),
+        "profit_factor": (
+            float(
+                normal.metrics[
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_profit_factor
+        ),
+        "validation_profit_factor": (
+            float(
+                period_results["validation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_profit_factor
+        ),
+        "stressed_validation_profit_factor": (
+            float(
+                stressed_periods["validation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_stressed_profit_factor
+        ),
+        "maximum_drawdown": (
+            abs(float(normal.metrics["maximum_drawdown"]))
+            <= settings.research.maximum_drawdown
+        ),
+        "exposure_limits_respected": all(
+            bool(normal.integrity[field])
+            for field in (
+                "maximum_exposure_respected",
+                "maximum_position_exposure_respected",
+                "minimum_cash_respected",
+            )
+        ),
+        "component_dna_frozen": bool(
+            normal.integrity["component_dna_frozen"]
+        ),
+    }
+    statistical_checks = {
+        "deflated_sharpe": (
+            float(
+                multiple.deflated_sharpe_probabilities.get(
+                    "MULTI_ALPHA_FIXED_V1",
+                    0.0,
+                )
+            )
+            >= settings.research.minimum_deflated_sharpe_probability
+        ),
+        "white_reality_check": (
+            multiple.white_reality_check_pvalue
+            <= settings.research.maximum_white_reality_check_pvalue
+        ),
+        "hansen_spa": (
+            multiple.hansen_spa_pvalue
+            <= settings.research.maximum_hansen_spa_pvalue
+        ),
+        "single_preregistered_dna_no_meta_selection": (
+            multiple.probability_of_backtest_overfitting is None
+        ),
+        "inherited_component_selection_bias": (
+            inherited_selection_bias_pass
+        ),
+        "monte_carlo": bool(
+            stochastic["normal"]["monte_carlo"]["passed"]
+            and stochastic["stressed"]["monte_carlo"]["passed"]
+        ),
+        "dirichlet": bool(
+            stochastic["normal"]["dirichlet"]["passed"]
+            and stochastic["stressed"]["dirichlet"]["passed"]
+        ),
+        "untouched_holdout": False,
+    }
+    gates = {
+        "economic_checks": economic_checks,
+        "statistical_checks": statistical_checks,
+        "deflated_sharpe_probability": float(
+            multiple.deflated_sharpe_probabilities.get(
+                "MULTI_ALPHA_FIXED_V1",
+                0.0,
+            )
+        ),
+        "stochastic_validation": stochastic,
+        "economic_pass": all(economic_checks.values()),
+        "statistical_pass": all(statistical_checks.values()),
+        "research_pass": False,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    primary_result = {
+        "strategy_id": "MULTI_ALPHA_FIXED_V1",
+        "strategy_dna_hash": parameters.dna_hash,
+        "parameters": asdict(parameters),
+        "registration": registration,
+        "normal": normal.summary(),
+        "stressed": stressed.summary(),
+        "periods": period_results,
+        "stressed_periods": stressed_periods,
+        "gates": gates,
+    }
+
+    forward_start = pd.Timestamp("2026-07-26T00:00:00+00:00")
+    execution_identity = normal.summary()["execution_identity"]
+    source_candidate_identity = stable_hash(
+        {
+            "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+            "strategy_dna_hash": parameters.dna_hash,
+            "portfolio_policy_hash": ensemble_policy.policy_hash,
+            "forward_start": forward_start.isoformat(),
+        },
+        length=64,
+    )
+    observer_path = (
+        settings.paths.lab_dir
+        / "observers"
+        / "multi_alpha_ensemble_v1"
+        / "multi_alpha_fixed_v1.json"
+    )
+    observer = {
+        "status": "FROZEN_FORWARD_RESEARCH",
+        "family": "MULTI_ALPHA_ENSEMBLE_V1",
+        "policy_name": "MULTI_ALPHA_FIXED_V1",
+        "source_candidate_identity": source_candidate_identity,
+        "strategy_dna_hash": parameters.dna_hash,
+        "execution_identity": execution_identity,
+        "parameters": asdict(parameters),
+        "portfolio_policy": asdict(ensemble_policy),
+        "portfolio_policy_hash": ensemble_policy.policy_hash,
+        "forward_start": forward_start.isoformat(),
+        "minimum_forward_closed_daily_observations": 365,
+        "minimum_forward_rebalances": 30,
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    if observer_path.is_file():
+        observer.update(
+            _preserved_breakout_forward_fields(
+                read_json(observer_path),
+                source_candidate_identity=source_candidate_identity,
+                strategy_dna_hash=parameters.dna_hash,
+                execution_identity=execution_identity,
+                forward_start=forward_start,
+            )
+        )
+    evidence = build_rotation_forward_evidence(
+        normal,
+        frames,
+        forward_start=forward_start,
+        minimum_observations=365,
+        minimum_rebalances=30,
+        performance_policy=ForwardPerformanceGatePolicy(
+            minimum_profit_factor=(
+                settings.research.minimum_profit_factor
+            ),
+            minimum_stressed_profit_factor=(
+                settings.research.minimum_stressed_profit_factor
+            ),
+            maximum_drawdown=(
+                settings.research.maximum_drawdown
+            ),
+            minimum_effective_sample_size=(
+                settings.research.minimum_effective_sample_size
+            ),
+            stressed_cost_multiplier=(
+                settings.costs.stressed_cost_multiplier
+            ),
+            bootstrap_samples=(
+                settings.research.multiple_testing_bootstrap_samples
+            ),
+            bootstrap_block_size=(
+                settings.research.multiple_testing_block_size
+            ),
+            bootstrap_seed=settings.app.random_seed,
+        ),
+    )
+    observer = merge_portfolio_forward_manifest(
+        observer,
+        evidence,
+        source_candidate_identity=source_candidate_identity,
+        strategy_dna_hash=parameters.dna_hash,
+        execution_identity=execution_identity,
+        forward_start=forward_start,
+    )
+    observer["data_hashes"] = data_hashes
+    atomic_write_json(observer_path, _json_ready(observer))
+    payload = {
+        "schema_version": "multi_alpha_ensemble_report_v1",
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
+        "strategy_family": MULTI_ALPHA_ENSEMBLE_FAMILY,
+        "engine_version": MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION,
+        "plan": str(plan_path),
+        "plan_sha256": sha256_file(plan_path),
+        "selection_basis": "NONE_SINGLE_FIXED_DNA",
+        "selection_integrity": {
+            "meta_family_trial_count": 1,
+            "development_selection_performed": False,
+            "validation_used_for_selection": False,
+            "confirmation_used_for_selection": False,
+            "pbo_not_applicable_to_single_meta_dna": True,
+            "inherited_component_bias_preserved": True,
+        },
+        "generated_trial_count": 1,
+        "registered_unique_trials": int(
+            registry_audit["unique_trial_count"]
+        ),
+        "base_known_trials": base_known_trials,
+        "total_known_trials": total_known_trials,
+        "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
+        "primary_result": primary_result,
+        "multiple_testing": asdict(multiple),
+        "inherited_component_pbo": inherited_pbo,
+        "inherited_selection_bias_pass": (
+            inherited_selection_bias_pass
+        ),
+        "component_dna": actual_component_hashes,
+        "component_results": {
+            "absolute_momentum": absolute.summary(),
+            "portfolio_breakout": breakout.summary(),
+            "volatility_contraction": contraction.summary(),
+        },
+        "trial_registry": registry_audit,
+        "data_fingerprint": data_fingerprint,
+        "data_hashes": data_hashes,
+        "periods": periods,
+        "portfolio_policy": asdict(ensemble_policy),
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "observer_manifests": {
+            "MULTI_ALPHA_FIXED_V1": str(observer_path)
+        },
+        "forward_summaries": {
+            "MULTI_ALPHA_FIXED_V1": observer["forward_summary"]
+        },
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "strategy_id": "MULTI_ALPHA_FIXED_V1",
+                "net_return": normal.metrics["net_return"],
+                "stressed_net_return": stressed.metrics["net_return"],
+                "cagr": normal.metrics["annualized_return"],
+                "sharpe": normal.metrics["sharpe"],
+                "maximum_drawdown": normal.metrics[
+                    "maximum_drawdown"
+                ],
+                "average_exposure": normal.metrics[
+                    "average_exposure"
+                ],
+                "profit_factor": normal.metrics[
+                    "portfolio_period_profit_factor"
+                ],
+                "validation_profit_factor": period_results[
+                    "validation"
+                ]["portfolio_period_profit_factor"],
+                "confirmation_net_return": period_results[
+                    "confirmation"
+                ]["net_return"],
+                "economic_pass": gates["economic_pass"],
+                "statistical_pass": gates["statistical_pass"],
+                "research_pass": False,
+                "orders_generated": 0,
+                "live_ready": False,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "generated_trial_count": 1,
+        "registered_unique_trials": payload[
+            "registered_unique_trials"
+        ],
+        "total_known_trials": total_known_trials,
+        "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
+        "economic_pass": gates["economic_pass"],
+        "statistical_pass": gates["statistical_pass"],
+        "inherited_selection_bias_pass": (
+            inherited_selection_bias_pass
+        ),
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": payload["observer_manifests"],
+        "forward_summaries": payload["forward_summaries"],
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -9325,6 +10045,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         volatility_contraction_campaign = (
             campaign_name == "volatility-contraction-v1"
         )
+        multi_alpha_ensemble_campaign = (
+            campaign_name == "multi-alpha-ensemble-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -9345,6 +10068,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     or absolute_momentum_campaign
                     or absolute_momentum_plateau_campaign
                     or volatility_contraction_campaign
+                    or multi_alpha_ensemble_campaign
                     or portfolio_storm_campaign
                 )
                 else (("1h",) if formal_campaign else ("5m", "15m"))
@@ -9412,6 +10136,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "ABSOLUTE_MOMENTUM_PLATEAU_V1"
         if volatility_contraction_campaign:
             campaign_label = "VOLATILITY_CONTRACTION_V1"
+        if multi_alpha_ensemble_campaign:
+            campaign_label = "MULTI_ALPHA_ENSEMBLE_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -9470,6 +10196,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_volatility_contraction_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if multi_alpha_ensemble_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_multi_alpha_ensemble_campaign,
                         settings,
                     )
                 )
@@ -9696,6 +10430,45 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         "base_known_trials": 16_832,
                         "projected_total_known_trials": (
                             16_832 + len(parameters)
+                        ),
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
+            if multi_alpha_ensemble_campaign:
+                from research.multi_alpha_ensemble import (
+                    FROZEN_COMPONENT_DNA,
+                    MultiAlphaEnsembleParameters,
+                )
+
+                parameters = MultiAlphaEnsembleParameters()
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "SINGLE_PREREGISTERED_PORTFOLIO_OF_STRATEGIES"
+                        ),
+                        "economic_hypothesis": (
+                            "FIXED_CLASSICAL_MULTI_ALPHA_DIVERSIFICATION"
+                        ),
+                        "selection_basis": "NONE_SINGLE_FIXED_DNA",
+                        "generated_trial_count": 1,
+                        "base_known_trials": 16_848,
+                        "projected_total_known_trials": 16_849,
+                        "strategy_dna_hash": parameters.dna_hash,
+                        "component_dna": dict(
+                            FROZEN_COMPONENT_DNA
                         ),
                         "maximum_total_exposure": 0.40,
                         "maximum_position_exposure": 0.20,
@@ -10021,6 +10794,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if multi_alpha_ensemble_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 1,
+                            "reason_code": (
+                                "PREREGISTERED_FIXED_MULTI_ALPHA_ENSEMBLE"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_multi_alpha_ensemble_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -10234,6 +11027,22 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if multi_alpha_ensemble_campaign:
+                report_path = (
+                    _multi_alpha_ensemble_campaign_path(
+                        settings
+                    )
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -10372,6 +11181,25 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             if volatility_contraction_campaign:
                 report_path = (
                     _volatility_contraction_campaign_path(
+                        settings
+                    )
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if multi_alpha_ensemble_campaign:
+                report_path = (
+                    _multi_alpha_ensemble_campaign_path(
                         settings
                     )
                 )
@@ -12416,6 +13244,7 @@ def build_parser() -> argparse.ArgumentParser:
         "absolute-momentum-v1",
         "absolute-momentum-plateau-v1",
         "volatility-contraction-v1",
+        "multi-alpha-ensemble-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -12469,6 +13298,7 @@ def build_parser() -> argparse.ArgumentParser:
             "absolute-momentum-v1",
             "absolute-momentum-plateau-v1",
             "volatility-contraction-v1",
+            "multi-alpha-ensemble-v1",
         ),
         default="cross-sectional-ensemble",
     )

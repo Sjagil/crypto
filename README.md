@@ -711,6 +711,19 @@ development winner fails confirmation, DSR, PBO and stochastic gates; it is
 therefore retained only as `FROZEN_FORWARD_RESEARCH`, with zero order or
 promotion authority.
 
+`python main.py lab campaign run --name multi-alpha-ensemble-v1 --yes`
+evaluates one fixed, preregistered portfolio of three frozen classical sleeves:
+5% absolute momentum, canonical Turtle 20/10 with EMA200, and the frozen
+volatility-contraction primary. Sleeve weights are equal and are not optimized.
+A causal 60-day diagonal volatility target, top-2 selection, next-open
+execution and normal/stressed costs are applied under the same 40% total,
+20% per-asset and 60% minimum-cash limits. Its v1 history remained positive in
+development, validation and confirmation, but validation profit factor,
+inherited component-selection bias, untouched holdout and both stochastic
+gates failed. It is therefore a balanced research lead only: the immutable
+registry and orderless observer are retained, while paper/live promotion stays
+fail-closed.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

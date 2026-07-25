@@ -90,6 +90,7 @@ def build_acceptance_summary(
     absolute_momentum: dict[str, Any] | None = None,
     absolute_momentum_plateau: dict[str, Any] | None = None,
     volatility_contraction: dict[str, Any] | None = None,
+    multi_alpha_ensemble: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -274,6 +275,43 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "volatility contraction",
             [contraction_primary],
+            container="gates",
+        )
+    if multi_alpha_ensemble is not None:
+        if (
+            multi_alpha_ensemble.get("campaign")
+            != "MULTI_ALPHA_ENSEMBLE_V1"
+        ):
+            raise ValueError(
+                "multi-alpha ensemble campaign identity mismatch"
+            )
+        if int(multi_alpha_ensemble.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "multi-alpha ensemble campaign contains orders"
+            )
+        if bool(multi_alpha_ensemble.get("live_ready", False)):
+            raise ValueError(
+                "multi-alpha ensemble campaign contains live permission"
+            )
+        ensemble_registry = multi_alpha_ensemble.get("trial_registry") or {}
+        if ensemble_registry.get("status") != "PASSED":
+            raise ValueError(
+                "multi-alpha ensemble registry audit failed"
+            )
+        if int(ensemble_registry.get("unique_trial_count") or 0) != int(
+            multi_alpha_ensemble.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "multi-alpha ensemble trial count mismatch"
+            )
+        ensemble_primary = multi_alpha_ensemble.get("primary_result")
+        if not isinstance(ensemble_primary, dict):
+            raise ValueError(
+                "multi-alpha ensemble primary result missing"
+            )
+        require_stochastic_validation(
+            "multi-alpha ensemble",
+            [ensemble_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -617,6 +655,36 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if multi_alpha_ensemble is not None:
+        summary["multi_alpha_ensemble"] = {
+            "status": multi_alpha_ensemble["status"],
+            "campaign": multi_alpha_ensemble["campaign"],
+            "engine_version": multi_alpha_ensemble["engine_version"],
+            "generated_trial_count": multi_alpha_ensemble[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": multi_alpha_ensemble[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": multi_alpha_ensemble[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": multi_alpha_ensemble[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": multi_alpha_ensemble[
+                "multiple_testing"
+            ],
+            "trial_registry": multi_alpha_ensemble["trial_registry"],
+            "primary_result": multi_alpha_ensemble["primary_result"],
+            "inherited_selection_bias_pass": multi_alpha_ensemble[
+                "inherited_selection_bias_pass"
+            ],
+            "holdout_status": multi_alpha_ensemble["holdout_status"],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -773,6 +841,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "volatility_contraction_plan_v1.json": (
             reports / "volatility_contraction_plan_v1.json"
         ),
+        "multi_alpha_ensemble_campaign_v1.json": (
+            reports / "multi_alpha_ensemble_campaign_v1.json"
+        ),
+        "multi_alpha_ensemble_campaign_v1.csv": (
+            reports / "multi_alpha_ensemble_campaign_v1.csv"
+        ),
+        "multi_alpha_ensemble_plan_v1.json": (
+            reports / "multi_alpha_ensemble_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -858,6 +935,25 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         paths[f"volatility_contraction_trial_{record.name}"] = (
             record
         )
+    ensemble_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "multi_alpha_ensemble_v1"
+    )
+    for observer in sorted(ensemble_observer_directory.glob("*.json")):
+        paths[f"multi_alpha_ensemble_observer_{observer.name}"] = observer
+    ensemble_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "multi_alpha_ensemble_v1"
+    )
+    paths["multi_alpha_ensemble_registry_index.json"] = (
+        ensemble_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (ensemble_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"multi_alpha_ensemble_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -952,6 +1048,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         ],
         volatility_contraction=payloads[
             "volatility_contraction_campaign_v1.json"
+        ],
+        multi_alpha_ensemble=payloads[
+            "multi_alpha_ensemble_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
