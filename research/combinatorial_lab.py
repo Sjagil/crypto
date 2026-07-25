@@ -3749,6 +3749,8 @@ class LabStore:
                         )
         optimization_rows: list[dict[str, Any]] = []
         for trial in trials:
+            if str(trial.get("stage") or "").upper() != "OPTIMIZATION":
+                continue
             parameters = trial.get("parameters") or {}
             numeric = [
                 float(value)

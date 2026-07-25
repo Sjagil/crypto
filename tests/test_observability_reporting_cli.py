@@ -11,7 +11,12 @@ from pydantic import SecretStr
 
 import main
 from config.settings import PathSettings, Settings
-from core.cli import _safe_exception_message, _task_xml, command_test
+from core.cli import (
+    _parse_utc_datetime,
+    _safe_exception_message,
+    _task_xml,
+    command_test,
+)
 from reporting.reports import write_operational_reports
 from reporting.visualizations import VisualizationReporter
 from research.features import FeaturePipeline
@@ -66,6 +71,13 @@ def test_provider_exception_url_is_redacted(isolated_settings: Settings) -> None
     )
     assert "credential-in-query" not in rendered
     assert "***REDACTED***" in rendered
+
+
+def test_parse_utc_datetime_normalizes_naive_and_offset_values() -> None:
+    naive = _parse_utc_datetime("2026-07-24T22:00:00")
+    offset = _parse_utc_datetime("2026-07-25T00:00:00+02:00")
+    assert naive == datetime(2026, 7, 24, 22, tzinfo=UTC)
+    assert offset == naive
 
 
 def test_operational_reports_alert_throttling_and_windows_task(

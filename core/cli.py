@@ -75,6 +75,18 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+def _parse_utc_datetime(value: datetime | str) -> datetime:
+    """Parse persisted timestamps and normalize legacy naive values to UTC."""
+    parsed = (
+        value
+        if isinstance(value, datetime)
+        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def emit(value: Any) -> None:
     payload = stable_json(_json_ready(value), indent=2)
     try:
@@ -4731,7 +4743,7 @@ def _operational_status(
         closed_candle_freshness: dict[str, Any] = {}
         for key, value in latest_candles.items():
             timeframe = key.rsplit(":", 1)[-1]
-            timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            timestamp = _parse_utc_datetime(value)
             interval_seconds = TIMEFRAME_SECONDS[timeframe]
             grace_seconds = settings.market_data.candle_close_grace_for(timeframe)
             expected_epoch = (
@@ -4752,14 +4764,11 @@ def _operational_status(
         heartbeat_at = heartbeat.get("heartbeat_at")
         heartbeat_age = None
         if heartbeat_at:
-            heartbeat_age = (
-                utc_now() - datetime.fromisoformat(str(heartbeat_at).replace("Z", "+00:00"))
-            ).total_seconds()
+            heartbeat_age = (utc_now() - _parse_utc_datetime(heartbeat_at)).total_seconds()
         uptime = None
         if heartbeat.get("started_at"):
             uptime = (
-                utc_now()
-                - datetime.fromisoformat(str(heartbeat["started_at"]).replace("Z", "+00:00"))
+                utc_now() - _parse_utc_datetime(heartbeat["started_at"])
             ).total_seconds()
         heartbeat_state = heartbeat.get("state")
         service_state = (
