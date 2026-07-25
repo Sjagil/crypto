@@ -7,6 +7,7 @@ import pytest
 from research.portfolio_storm import (
     STORM_TRIAL_COUNT,
     PortfolioStormDNA,
+    large_matrix_multiple_testing,
     preregistered_storm_dna,
     run_portfolio_storm,
     storm_plan,
@@ -76,6 +77,33 @@ def test_storm_rejects_risk_limit_relaxation():
         )
 
 
+def test_large_matrix_multiple_testing_is_deterministic_and_uses_every_path():
+    generator = np.random.default_rng(19)
+    returns = generator.normal(0.0, 0.01, size=(96, 40))
+    returns[:, 0] += 0.002
+    first = large_matrix_multiple_testing(
+        returns,
+        bootstrap_samples=200,
+        block_size=4,
+        seed=17,
+        batch_size=16,
+    )
+    second = large_matrix_multiple_testing(
+        returns,
+        bootstrap_samples=200,
+        block_size=4,
+        seed=17,
+        batch_size=16,
+    )
+
+    assert first == second
+    assert first["strategy_count"] == 40
+    assert first["observation_count"] == 96
+    assert 0 < first["white_reality_check_pvalue"] <= 1
+    assert 0 < first["hansen_spa_pvalue"] <= 1
+    assert first["probability_of_backtest_overfitting"] is not None
+
+
 def test_small_storm_uses_development_only_pareto_and_never_promotes():
     dna = preregistered_storm_dna(trial_count=24, seed=11)
     report, matrix, timestamps = run_portfolio_storm(
@@ -101,6 +129,10 @@ def test_small_storm_uses_development_only_pareto_and_never_promotes():
     assert matrix.shape == (len(timestamps), 24)
     assert np.isfinite(matrix).all()
     assert report["multiple_testing"]["dsr_total_trial_denominator"] == 1_336
+    assert report["multiple_testing"]["strategy_count"] == 24
+    assert report["multiple_testing"]["white_spa_status"] == (
+        "FORMALLY_EVALUATED_ALL_STORM_TRIALS"
+    )
     assert report["research_pass"] is False
     assert report["paper_candidates"] == 0
     assert report["orders_generated"] == 0

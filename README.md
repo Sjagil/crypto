@@ -572,17 +572,24 @@ Every trial stays below 40% total, 20% per asset and above 60% cash. Selection
 uses only the development split and constructs a Pareto front by maximizing
 portfolio-period profit factor while minimizing Ulcer Index and turnover
 efficiency. Validation and confirmation are reported only after survivor DNA
-is frozen. PBO uses all 5,000 development return paths and DSR uses the full
-known-trial denominator. Large-matrix White/SPA remains explicitly deferred,
-so the storm cannot claim a research pass or create a paper/live candidate.
+is frozen. White Reality Check, Hansen SPA and PBO use all 5,000 development
+return paths aggregated to causal W-SUN periods; their 2,000-sample circular
+block bootstrap runs in bounded batches. DSR uses the full known-trial
+denominator. Failed statistics or confirmation therefore prevent a research
+pass and the storm can never create a paper/live candidate directly.
 
 `campaign autopilot` runs one bounded, orderless cycle by default. It audits a
 deterministic data fingerprint, schedules only the already preregistered
-breakout family when `--run-research` is enabled, verifies every frozen observer
+breakout and storm families when `--run-research` is enabled, verifies every frozen observer
 manifest, and persists a cycle record below `output/lab/autopilot/`. Research
 is skipped when data is unchanged or the seven-day research interval has not
 elapsed. `--refresh-data` refreshes only the strict ALLOWED daily universe;
 `--mode continuous` is explicit and can be bounded with `--max-cycles`.
+When new data and the weekly interval are both present, the research stage also
+creates or reuses an immutable 5,000-DNA storm epoch below
+`output/lab/storm_epochs/`. Repeated access to the same data fingerprint reuses
+the existing epoch; a genuinely new selection epoch conservatively adds all
+5,000 trials to the cumulative DSR denominator. Epochs remain research-only.
 Every normal cycle also builds or reuses
 `output/lab/feature_store/portfolio_daily_v1/latest.npz`: a point-in-time
 `time × asset × feature` tensor with separate listing, feature and target

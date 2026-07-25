@@ -3402,6 +3402,9 @@ def _run_portfolio_storm_campaign(
     settings: Settings,
     *,
     maximum_trials: int | None = None,
+    artifact_directory: Path | None = None,
+    prior_known_trials_override: int | None = None,
+    epoch_id: str | None = None,
 ) -> dict[str, Any]:
     """Run an immutable development-only multi-objective portfolio storm."""
 
@@ -3411,7 +3414,15 @@ def _run_portfolio_storm_campaign(
         run_portfolio_storm,
     )
 
-    plan_path, report_path, matrix_path = _portfolio_storm_paths(settings)
+    if artifact_directory is None:
+        plan_path, report_path, matrix_path = _portfolio_storm_paths(
+            settings
+        )
+    else:
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        plan_path = artifact_directory / "plan.json"
+        report_path = artifact_directory / "report.json"
+        matrix_path = artifact_directory / "returns.npz"
     trial_count = maximum_trials or STORM_TRIAL_COUNT
     if trial_count < 2 or trial_count > STORM_TRIAL_COUNT:
         raise ValueError(
@@ -3457,8 +3468,12 @@ def _run_portfolio_storm_campaign(
     frozen_sha_before = sha256_file(frozen_path)
     _, _, _, source_paths, frames = _frozen_rotation_inputs(settings)
     breakout_path = _breakout_portfolio_campaign_path(settings)
-    prior_known_trials = 1_312
-    if breakout_path.is_file():
+    prior_known_trials = (
+        int(prior_known_trials_override)
+        if prior_known_trials_override is not None
+        else 1_312
+    )
+    if prior_known_trials_override is None and breakout_path.is_file():
         prior_known_trials = int(
             read_json(breakout_path).get(
                 "total_known_trials",
@@ -3494,6 +3509,7 @@ def _run_portfolio_storm_campaign(
             "source_candidate_identity": plan[
                 "source_candidate_identity"
             ],
+            "epoch_id": epoch_id,
             "returns_matrix_path": str(matrix_path),
             "returns_matrix_sha256": sha256_file(matrix_path),
             "returns_matrix_shape": list(matrix.shape),
@@ -3512,11 +3528,12 @@ def _run_portfolio_storm_campaign(
     return {
         "status": report["status"],
         "campaign": report["campaign"],
+        "epoch_id": epoch_id,
         "trial_count": report["trial_count"],
         "total_known_trials": report["total_known_trials"],
         "pareto_survivor_count": report["pareto_survivor_count"],
         "pbo": report["multiple_testing"][
-            "pbo_development_all_trials"
+            "probability_of_backtest_overfitting"
         ],
         "white_spa_status": report["multiple_testing"][
             "white_spa_status"
@@ -3529,6 +3546,132 @@ def _run_portfolio_storm_campaign(
         "returns_matrix": str(matrix_path),
         "paper_candidates": 0,
         "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
+def _run_autopilot_storm_epoch(
+    settings: Settings,
+    *,
+    data_fingerprint: str,
+) -> dict[str, Any]:
+    """Run or reuse one immutable research-only storm data epoch."""
+
+    from research.portfolio_storm import (
+        STORM_ENGINE_VERSION,
+        STORM_TRIAL_COUNT,
+    )
+
+    root = settings.paths.lab_dir / "storm_epochs"
+    index_path = root / "index.json"
+    index = (
+        read_json(index_path)
+        if index_path.is_file()
+        else {
+            "schema_version": "portfolio_storm_epoch_index_v1",
+            "campaign": "PORTFOLIO_STORM_V1",
+            "epochs": [],
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+    )
+    epochs = list(index.get("epochs") or [])
+    _, _, _, source_paths, _ = _frozen_rotation_inputs(settings)
+    current_data_hashes = {
+        market: sha256_file(path)
+        for market, path in source_paths.items()
+    }
+    canonical_report_path = _portfolio_storm_paths(settings)[1]
+    if not epochs and canonical_report_path.is_file():
+        canonical = read_json(canonical_report_path)
+        if canonical.get("data_hashes") == current_data_hashes:
+            canonical_epoch = {
+                "epoch_id": "CANONICAL_INITIAL_STORM",
+                "data_fingerprint": data_fingerprint,
+                "source": "CANONICAL_PORTFOLIO_STORM_V1",
+                "engine_version": STORM_ENGINE_VERSION,
+                "new_trial_count": 0,
+                "total_known_trials": int(
+                    canonical["total_known_trials"]
+                ),
+                "report": str(canonical_report_path),
+                "completed_at": utc_now(),
+            }
+            epochs.append(canonical_epoch)
+            index["epochs"] = epochs
+            index["last_epoch_id"] = canonical_epoch["epoch_id"]
+            index["total_known_trials"] = canonical_epoch[
+                "total_known_trials"
+            ]
+            atomic_write_json(index_path, _json_ready(index))
+    existing = next(
+        (
+            row
+            for row in epochs
+            if row.get("data_fingerprint") == data_fingerprint
+        ),
+        None,
+    )
+    if existing is not None:
+        return {
+            "status": "REUSED_EXISTING_STORM_EPOCH",
+            **existing,
+            "index": str(index_path),
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+
+    epoch_id = stable_hash(
+        {
+            "campaign": "PORTFOLIO_STORM_V1",
+            "engine_version": STORM_ENGINE_VERSION,
+            "data_fingerprint": data_fingerprint,
+            "data_hashes": current_data_hashes,
+        },
+        length=20,
+    )
+    prior_known_trials = max(
+        [int(row.get("total_known_trials") or 0) for row in epochs]
+        or [1_312]
+    )
+    epoch_directory = root / epoch_id
+    result = _run_portfolio_storm_campaign(
+        settings,
+        maximum_trials=STORM_TRIAL_COUNT,
+        artifact_directory=epoch_directory,
+        prior_known_trials_override=prior_known_trials,
+        epoch_id=epoch_id,
+    )
+    epoch = {
+        "epoch_id": epoch_id,
+        "data_fingerprint": data_fingerprint,
+        "source": "AUTOPILOT_NEW_DATA_EPOCH",
+        "engine_version": STORM_ENGINE_VERSION,
+        "new_trial_count": STORM_TRIAL_COUNT,
+        "prior_known_trials": prior_known_trials,
+        "total_known_trials": int(result["total_known_trials"]),
+        "pareto_survivor_count": int(
+            result["pareto_survivor_count"]
+        ),
+        "pbo": result["pbo"],
+        "white_spa_status": result["white_spa_status"],
+        "report": result["report"],
+        "returns_matrix": result["returns_matrix"],
+        "completed_at": utc_now(),
+    }
+    epochs.append(epoch)
+    index["epochs"] = epochs
+    index["last_epoch_id"] = epoch_id
+    index["total_known_trials"] = epoch["total_known_trials"]
+    atomic_write_json(index_path, _json_ready(index))
+    return {
+        "status": "COMPLETED_NEW_STORM_EPOCH",
+        **epoch,
+        "index": str(index_path),
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
         "live_ready": False,
     }
 
@@ -3896,9 +4039,18 @@ def _preserved_breakout_forward_fields(
 
 
 def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
-    """Re-run only the already preregistered eight-variant breakout family."""
+    """Run preregistered breakout and one immutable storm data epoch."""
 
     result = _run_breakout_portfolio_campaign(settings)
+    data_audit = _autopilot_data_stage(
+        settings,
+        refresh=False,
+        refresh_timeout_seconds=1.0,
+    )
+    storm_epoch = _run_autopilot_storm_epoch(
+        settings,
+        data_fingerprint=str(data_audit["data_fingerprint"]),
+    )
     total_trials = int(result["total_known_trials"])
     parameters_tested = int(result["parameters_tested"])
     return {
@@ -3921,6 +4073,10 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         "frozen_candidate_unchanged": result[
             "frozen_candidate_unchanged"
         ],
+        "portfolio_storm_epoch": storm_epoch,
+        "portfolio_storm_total_known_trials": int(
+            storm_epoch["total_known_trials"]
+        ),
         "paper_candidates": result["paper_candidates"],
         "live_orders": result["live_orders"],
         "paper_candidate_permitted": False,

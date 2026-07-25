@@ -592,6 +592,11 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
             feature_store_manifest
         )
         paths["feature_store_latest.npz"] = feature_store_tensor
+    storm_epoch_index = (
+        settings.paths.lab_dir / "storm_epochs" / "index.json"
+    )
+    if storm_epoch_index.is_file():
+        paths["portfolio_storm_epoch_index.json"] = storm_epoch_index
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")

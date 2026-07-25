@@ -406,6 +406,135 @@ def _pareto_indices(values: np.ndarray) -> np.ndarray:
     return np.asarray(selected, dtype=int)
 
 
+def _weekly_return_matrix(
+    daily_returns: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+) -> tuple[np.ndarray, pd.DatetimeIndex]:
+    if len(daily_returns) != len(timestamps):
+        raise ValueError("return matrix and timestamps must have equal length")
+    frame = pd.DataFrame(
+        daily_returns,
+        index=pd.DatetimeIndex(timestamps),
+    )
+    weekly = (1.0 + frame).resample("W-SUN").prod() - 1.0
+    weekly = weekly.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    if len(weekly) < 8:
+        raise ValueError("multiple testing requires at least eight weekly observations")
+    return weekly.to_numpy(dtype=np.float64), weekly.index
+
+
+def large_matrix_multiple_testing(
+    weekly_returns: np.ndarray,
+    *,
+    bootstrap_samples: int = 2_000,
+    block_size: int = 4,
+    seed: int = STORM_SEED,
+    batch_size: int = 32,
+) -> dict[str, Any]:
+    """Chunked White/SPA and PBO evaluation over a wide strategy matrix."""
+
+    values = np.asarray(weekly_returns, dtype=np.float64)
+    if values.ndim != 2 or min(values.shape) < 2:
+        raise ValueError("multiple-testing input must be a two-dimensional matrix")
+    if not np.isfinite(values).all():
+        raise ValueError("multiple-testing matrix contains non-finite values")
+    if bootstrap_samples < 100:
+        raise ValueError("multiple-testing bootstrap requires at least 100 samples")
+    if block_size < 1 or batch_size < 1:
+        raise ValueError("bootstrap block and batch sizes must be positive")
+    observations, strategies = values.shape
+    means = values.mean(axis=0)
+    standard = values.std(axis=0, ddof=1)
+    standard_error = np.divide(
+        standard,
+        math.sqrt(observations),
+        out=np.full_like(standard, np.inf),
+        where=standard > 0,
+    )
+    observed_white = math.sqrt(observations) * max(
+        0.0,
+        float(means.max()),
+    )
+    observed_spa = max(
+        0.0,
+        float(
+            np.divide(
+                means,
+                standard_error,
+                out=np.zeros_like(means),
+                where=np.isfinite(standard_error),
+            ).max()
+        ),
+    )
+    centered = (values - means).astype(np.float32)
+    generator = np.random.default_rng(seed)
+    blocks_needed = math.ceil(observations / block_size)
+    white_exceedances = 0
+    spa_exceedances = 0
+    processed = 0
+    while processed < bootstrap_samples:
+        current_batch = min(batch_size, bootstrap_samples - processed)
+        starts = generator.integers(
+            0,
+            observations,
+            size=(current_batch, blocks_needed),
+        )
+        indices = (
+            starts[:, :, None]
+            + np.arange(block_size, dtype=int)[None, None, :]
+        ) % observations
+        indices = indices.reshape(current_batch, -1)[:, :observations]
+        counts = np.vstack(
+            [
+                np.bincount(row, minlength=observations)
+                for row in indices
+            ]
+        ).astype(np.float32)
+        sample_means = (counts @ centered) / float(observations)
+        white_statistics = math.sqrt(observations) * np.maximum(
+            0.0,
+            sample_means.max(axis=1),
+        )
+        spa_statistics = np.maximum(
+            0.0,
+            np.divide(
+                sample_means,
+                standard_error[None, :],
+                out=np.zeros_like(sample_means, dtype=np.float64),
+                where=np.isfinite(standard_error)[None, :],
+            ).max(axis=1),
+        )
+        white_exceedances += int(
+            np.count_nonzero(white_statistics >= observed_white)
+        )
+        spa_exceedances += int(
+            np.count_nonzero(spa_statistics >= observed_spa)
+        )
+        processed += current_batch
+
+    pbo, logits = probability_of_backtest_overfitting(
+        pd.DataFrame(
+            values,
+            columns=[str(index) for index in range(strategies)],
+        ),
+    )
+    denominator = bootstrap_samples + 1
+    return {
+        "strategy_count": strategies,
+        "observation_count": observations,
+        "frequency": "W-SUN",
+        "bootstrap_samples": bootstrap_samples,
+        "block_size_weeks": block_size,
+        "white_reality_check_pvalue": (
+            white_exceedances + 1
+        )
+        / denominator,
+        "hansen_spa_pvalue": (spa_exceedances + 1) / denominator,
+        "probability_of_backtest_overfitting": pbo,
+        "pbo_logits": list(logits),
+    }
+
+
 def run_portfolio_storm(
     frames: Mapping[str, pd.DataFrame],
     dna: tuple[PortfolioStormDNA, ...],
@@ -454,6 +583,12 @@ def run_portfolio_storm(
     observations = matrix.shape[0]
     validation_end = int(observations * 0.80)
     development = matrix[:development_end].astype(float)
+    retained_timestamps = opens.index[1 + common_warmup :]
+    development_timestamps = retained_timestamps[:development_end]
+    weekly_development, _ = _weekly_return_matrix(
+        development,
+        development_timestamps,
+    )
     objective_rows = np.asarray(
         [
             _objectives(
@@ -472,21 +607,26 @@ def run_portfolio_storm(
         robust = (pf_rank + ui_rank + te_rank).to_numpy(dtype=float)
         pareto = pareto[np.argsort(robust)[::-1][:maximum_survivors]]
 
-    development_frame = pd.DataFrame(
-        development,
-        columns=[row.dna_hash for row in dna],
+    multiple_testing = large_matrix_multiple_testing(
+        weekly_development,
+        bootstrap_samples=2_000,
+        block_size=4,
+        seed=STORM_SEED,
     )
-    pbo, pbo_logits = probability_of_backtest_overfitting(
-        development_frame,
+    weekly_standard = weekly_development.std(axis=0, ddof=1)
+    trial_sharpes = np.divide(
+        weekly_development.mean(axis=0),
+        weekly_standard,
+        out=np.zeros(len(dna), dtype=float),
+        where=weekly_standard > 0,
     )
-    trial_sharpes = objective_rows[:, 3]
     survivors: list[dict[str, Any]] = []
     for index in pareto:
         row = dna[int(index)]
         validation = matrix[development_end:validation_end, index].astype(float)
         confirmation = matrix[validation_end:, index].astype(float)
         dsr = deflated_sharpe_ratio(
-            pd.Series(development[:, index]),
+            pd.Series(weekly_development[:, index]),
             trial_sharpes,
             observed_sharpe=float(trial_sharpes[index]),
             total_trials=prior_known_trials + len(dna),
@@ -555,12 +695,23 @@ def run_portfolio_storm(
         ),
         "pareto_survivors": survivors,
         "multiple_testing": {
-            "pbo_development_all_trials": pbo,
-            "pbo_logits": list(pbo_logits),
+            **multiple_testing,
             "dsr_total_trial_denominator": prior_known_trials + len(dna),
-            "white_spa_status": (
-                "DEFERRED_NO_PASS_CLAIM_LARGE_MATRIX"
+            "white_reality_check_gate": (
+                multiple_testing["white_reality_check_pvalue"] <= 0.10
             ),
+            "hansen_spa_gate": (
+                multiple_testing["hansen_spa_pvalue"] <= 0.05
+            ),
+            "pbo_gate": (
+                multiple_testing["probability_of_backtest_overfitting"]
+                is not None
+                and multiple_testing[
+                    "probability_of_backtest_overfitting"
+                ]
+                <= 0.10
+            ),
+            "white_spa_status": "FORMALLY_EVALUATED_ALL_STORM_TRIALS",
         },
         "maximum_total_exposure": 0.40,
         "maximum_position_exposure": 0.20,
@@ -571,7 +722,7 @@ def run_portfolio_storm(
         "orders_generated": 0,
         "live_ready": False,
     }
-    return report, matrix, opens.index[1 + common_warmup :]
+    return report, matrix, retained_timestamps
 
 
 __all__ = [
@@ -579,6 +730,7 @@ __all__ = [
     "STORM_SEED",
     "STORM_TRIAL_COUNT",
     "PortfolioStormDNA",
+    "large_matrix_multiple_testing",
     "preregistered_storm_dna",
     "run_portfolio_storm",
     "storm_plan",

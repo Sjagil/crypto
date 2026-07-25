@@ -234,6 +234,25 @@ def test_insufficient_forward_data_never_degrades_or_promotes(tmp_path):
 def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     monkeypatch.setattr(
         cli,
+        "_autopilot_data_stage",
+        lambda settings, **kwargs: {
+            "data_fingerprint": "strict-data-v1",
+            "orders_generated": 0,
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_autopilot_storm_epoch",
+        lambda settings, **kwargs: {
+            "status": "REUSED_EXISTING_STORM_EPOCH",
+            "total_known_trials": 6_312,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        cli,
         "_run_breakout_portfolio_campaign",
         lambda settings: {
             "status": "COMPLETED_NOT_PROMOTED",
@@ -250,6 +269,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
+    assert result["portfolio_storm_total_known_trials"] == 6_312
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 
