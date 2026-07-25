@@ -88,6 +88,7 @@ def build_acceptance_summary(
     quality: dict[str, Any],
     capital_utilization: dict[str, Any] | None = None,
     diversified_rotation: dict[str, Any] | None = None,
+    portfolio_breakout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -119,6 +120,11 @@ def build_acceptance_summary(
             != dna_hash
         ):
             raise ValueError("diversified rotation source DNA mismatch")
+    if portfolio_breakout is not None:
+        if portfolio_breakout.get("source_candidate_identity") != identity:
+            raise ValueError("portfolio breakout candidate identity mismatch")
+        if portfolio_breakout.get("source_frozen_strategy_dna_hash") != dna_hash:
+            raise ValueError("portfolio breakout source DNA mismatch")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -292,6 +298,36 @@ def build_acceptance_summary(
             "live_orders": 0,
             "live_ready": False,
         }
+    if portfolio_breakout is not None:
+        summary["portfolio_breakout"] = {
+            "status": portfolio_breakout["status"],
+            "campaign": portfolio_breakout["campaign"],
+            "parameters_tested": portfolio_breakout["parameters_tested"],
+            "prior_trials_accounted": portfolio_breakout[
+                "prior_trials_accounted"
+            ],
+            "total_known_trials": portfolio_breakout["total_known_trials"],
+            "multiple_testing": portfolio_breakout["multiple_testing"],
+            "return_path_audit": portfolio_breakout["return_path_audit"],
+            "economic_research_lead_count": portfolio_breakout[
+                "economic_research_lead_count"
+            ],
+            "statistically_qualified_count": portfolio_breakout[
+                "statistically_qualified_count"
+            ],
+            "policy_results": [
+                {
+                    "policy_name": row["policy_name"],
+                    "strategy_dna_hash": row["strategy_dna_hash"],
+                    "metrics": row["normal"]["metrics"],
+                    "gates": row["gates"],
+                }
+                for row in portfolio_breakout["policy_results"]
+            ],
+            "paper_candidates": 0,
+            "live_orders": 0,
+            "live_ready": False,
+        }
     return summary
 
 
@@ -341,6 +377,12 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "diversified_rotation_campaign_v1.csv": (
             reports / "diversified_rotation_campaign_v1.csv"
         ),
+        "portfolio_breakout_campaign_v1.json": (
+            reports / "portfolio_breakout_campaign_v1.json"
+        ),
+        "portfolio_breakout_campaign_v1.csv": (
+            reports / "portfolio_breakout_campaign_v1.csv"
+        ),
     }
     observer_directory = (
         settings.paths.lab_dir / "observers" / "capital_utilization_v1"
@@ -352,6 +394,11 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     )
     for observer in sorted(diversified_observer_directory.glob("*.json")):
         paths[f"diversified_observer_{observer.name}"] = observer
+    breakout_observer_directory = (
+        settings.paths.lab_dir / "observers" / "portfolio_breakout_v1"
+    )
+    for observer in sorted(breakout_observer_directory.glob("*.json")):
+        paths[f"breakout_observer_{observer.name}"] = observer
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -417,6 +464,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         quality=quality,
         capital_utilization=payloads["capital_utilization_campaign_v1.json"],
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
+        portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
     )
     evidence_hash = stable_hash(
         {

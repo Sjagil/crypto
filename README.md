@@ -473,6 +473,10 @@ python main.py lab campaign plan --name diversified-rotation-v1
 python main.py lab campaign run --name diversified-rotation-v1 --yes
 python main.py lab campaign report --name diversified-rotation-v1
 python main.py lab campaign observe --name diversified-rotation-v1
+python main.py lab campaign plan --name portfolio-breakout-v1
+python main.py lab campaign run --name portfolio-breakout-v1 --yes
+python main.py lab campaign report --name portfolio-breakout-v1
+python main.py lab campaign observe --name portfolio-breakout-v1
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -534,6 +538,15 @@ annualized volatility targeting. ERC solver failures, risk-model cash, expected
 costs and decision reasons are fail-closed and audited. The family cannot
 overwrite or promote the original frozen lead and all six variants count toward
 DSR, White, SPA and PBO.
+
+`portfolio-breakout-v1` is a separate eight-trial economic alpha family, not an
+allocation continuation. It evaluates classic prior-channel Turtle 20/10 and
+55/20 rules with EMA50/EMA200 trend filters and equal/inverse-volatility
+weights. Entries and daily exits use completed closes and execute next open.
+The strict policy remains BTC/ETH/SOL/LINK only, 40% maximum total exposure,
+20% per asset and 60% minimum cash. The report detects identical return paths
+caused by hard-cap saturation but still counts every declared variant in the
+1,312-trial multiple-testing universe.
 
 `campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
 next-open weights with zero generated or submitted orders. Forward promotion
