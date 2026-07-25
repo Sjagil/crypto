@@ -87,6 +87,7 @@ def build_acceptance_summary(
     capital_utilization: dict[str, Any] | None = None,
     diversified_rotation: dict[str, Any] | None = None,
     portfolio_breakout: dict[str, Any] | None = None,
+    absolute_momentum: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -167,6 +168,18 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "portfolio breakout",
             portfolio_breakout["policy_results"],
+            container="gates",
+        )
+    if absolute_momentum is not None:
+        if absolute_momentum.get("campaign") != "ABSOLUTE_MOMENTUM_V1":
+            raise ValueError("absolute momentum campaign identity mismatch")
+        if int(absolute_momentum.get("orders_generated") or 0) != 0:
+            raise ValueError("absolute momentum campaign contains orders")
+        if bool(absolute_momentum.get("live_ready", False)):
+            raise ValueError("absolute momentum campaign contains live permission")
+        require_stochastic_validation(
+            "absolute momentum",
+            absolute_momentum["policy_results"],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -415,6 +428,24 @@ def build_acceptance_summary(
             "live_orders": 0,
             "live_ready": False,
         }
+    if absolute_momentum is not None:
+        summary["absolute_momentum"] = {
+            "status": absolute_momentum["status"],
+            "campaign": absolute_momentum["campaign"],
+            "primary_policy_name": absolute_momentum["primary_policy_name"],
+            "primary_strategy_dna_hash": absolute_momentum[
+                "primary_strategy_dna_hash"
+            ],
+            "formal_risk_budget_paths": absolute_momentum[
+                "formal_risk_budget_paths"
+            ],
+            "total_known_trials": absolute_momentum["total_known_trials"],
+            "multiple_testing": absolute_momentum["multiple_testing"],
+            "primary_result": absolute_momentum["primary_result"],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -547,6 +578,12 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "diversified_rotation_campaign_v1.csv": (reports / "diversified_rotation_campaign_v1.csv"),
         "portfolio_breakout_campaign_v1.json": (reports / "portfolio_breakout_campaign_v1.json"),
         "portfolio_breakout_campaign_v1.csv": (reports / "portfolio_breakout_campaign_v1.csv"),
+        "absolute_momentum_campaign_v1.json": (
+            reports / "absolute_momentum_campaign_v1.json"
+        ),
+        "absolute_momentum_campaign_v1.csv": (
+            reports / "absolute_momentum_campaign_v1.csv"
+        ),
         "portfolio_breakout_forward_observer_v1.json": (
             reports / "portfolio_breakout_forward_observer_v1.json"
         ),
@@ -579,6 +616,11 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     breakout_observer_directory = settings.paths.lab_dir / "observers" / "portfolio_breakout_v1"
     for observer in sorted(breakout_observer_directory.glob("*.json")):
         paths[f"breakout_observer_{observer.name}"] = observer
+    absolute_momentum_observer_directory = (
+        settings.paths.lab_dir / "observers" / "absolute_momentum_v1"
+    )
+    for observer in sorted(absolute_momentum_observer_directory.glob("*.json")):
+        paths[f"absolute_momentum_observer_{observer.name}"] = observer
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -667,6 +709,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         capital_utilization=payloads["capital_utilization_campaign_v1.json"],
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
         portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
+        absolute_momentum=payloads["absolute_momentum_campaign_v1.json"],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
         autopilot_state=payloads.get("autopilot_state.json"),

@@ -671,6 +671,16 @@ The generic acceptance gate and the rotation, capital-utilization,
 diversification and breakout campaign reports all enforce and persist this
 evidence.
 
+`python main.py lab campaign run --name absolute-momentum-v1 --yes` evaluates
+the accounted classical absolute-time-series-momentum family. It uses three
+fixed momentum horizons, per-asset EMA200 eligibility, a BTC EMA200 regime,
+inverse-volatility weights, Sunday-close decisions and Monday-next-open
+execution. The primary 5% volatility-budget path is capped at 20% total and
+20% per asset with at least 80% cash. All 16,715 known formal, storm,
+development, ablation and risk-budget trials remain in the DSR denominator.
+Its observers are `FROZEN_FORWARD_RESEARCH`, generate no orders and cannot
+promote while PBO or the untouched-forward gate fails.
+
 AI, neural-network and other machine-learning development is explicitly
 embargoed. `python main.py lab ai status` reports the fail-closed policy.
 Eligibility requires an economically and statistically passed immutable

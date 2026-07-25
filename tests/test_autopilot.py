@@ -297,6 +297,21 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_orders": 0,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_absolute_momentum_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "ABSOLUTE_MOMENTUM_V1",
+            "primary_policy_name": "ABS_MOM_VOL_05",
+            "total_known_trials": 16_715,
+            "pbo": 0.8857142857142857,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312

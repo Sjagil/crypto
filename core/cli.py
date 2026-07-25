@@ -3339,6 +3339,10 @@ def _breakout_portfolio_campaign_path(settings: Settings) -> Path:
     return settings.paths.lab_dir / "reports" / "portfolio_breakout_campaign_v1.json"
 
 
+def _absolute_momentum_campaign_path(settings: Settings) -> Path:
+    return settings.paths.lab_dir / "reports" / "absolute_momentum_campaign_v1.json"
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4490,9 +4494,10 @@ def _preserved_breakout_forward_fields(
 
 
 def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
-    """Run preregistered breakout and one immutable storm data epoch."""
+    """Run classical preregistered campaigns and immutable storm epochs."""
 
     result = _run_breakout_portfolio_campaign(settings)
+    absolute_momentum = _run_absolute_momentum_campaign(settings)
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -4526,6 +4531,23 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         "portfolio_storm_total_known_trials": int(portfolio_storm_epoch["total_known_trials"]),
         "signal_synthesis_storm_epoch": signal_storm_epoch,
         "signal_synthesis_total_known_trials": int(signal_storm_epoch["total_known_trials"]),
+        "parallel_absolute_momentum_campaign": {
+            "campaign": absolute_momentum["campaign"],
+            "status": absolute_momentum["status"],
+            "primary_policy_name": absolute_momentum[
+                "primary_policy_name"
+            ],
+            "total_known_trials": absolute_momentum[
+                "total_known_trials"
+            ],
+            "pbo": absolute_momentum["pbo"],
+            "observer_manifests": absolute_momentum[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "paper_candidates": result["paper_candidates"],
         "live_orders": result["live_orders"],
         "paper_candidate_permitted": False,
@@ -6933,6 +6955,425 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _run_absolute_momentum_campaign(settings: Settings) -> dict[str, Any]:
+    """Run the fixed absolute-momentum volatility-budget family."""
+
+    from research.absolute_momentum import (
+        ABSOLUTE_MOMENTUM_ENGINE_VERSION,
+        ABSOLUTE_MOMENTUM_FAMILY,
+        absolute_momentum_parameter_set,
+        backtest_absolute_momentum,
+    )
+    from research.forward_observer import (
+        ForwardPerformanceGatePolicy,
+        build_rotation_forward_evidence,
+        merge_portfolio_forward_manifest,
+    )
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import (
+        RotationPortfolioPolicy,
+        capital_utilization_benchmark_suite,
+        rotation_period_metrics,
+    )
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"missing absolute-momentum datasets: {missing}")
+    frames = {market: pd.read_parquet(path) for market, path in paths.items()}
+    parameters_set = absolute_momentum_parameter_set()
+    primary_name = "ABS_MOM_VOL_05"
+    policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.20,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.80,
+        minimum_history_observations=90,
+    )
+    periods = {
+        "development": ("2019-12-01", "2023-12-31"),
+        "validation": ("2024-01-01", "2025-06-30"),
+        "confirmation": ("2025-07-01", "2026-07-23"),
+    }
+    exploration_ledger = {
+        "prior_formal_and_storm_trials": 16_312,
+        "absolute_momentum_development_grid": 288,
+        "mean_reversion_development_grid": 108,
+        "component_ablation_paths": 6,
+        "midpoint_risk_budget_path": 1,
+    }
+    total_known_trials = sum(exploration_ledger.values())
+    normal_results: dict[str, Any] = {}
+    stressed_results: dict[str, Any] = {}
+    development_returns: dict[str, pd.Series] = {}
+    rows: list[dict[str, Any]] = []
+    observer_paths: dict[str, str] = {}
+    forward_summaries: dict[str, Any] = {}
+    forward_start = pd.Timestamp("2026-07-25T00:00:00+00:00")
+
+    for parameters in parameters_set:
+        name = f"ABS_MOM_VOL_{int(parameters.target_annualized_volatility * 100):02d}"
+        normal = backtest_absolute_momentum(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=policy,
+        )
+        stressed = backtest_absolute_momentum(
+            frames,
+            parameters,
+            fee_rate=settings.costs.default_fee
+            * settings.costs.stressed_cost_multiplier,
+            slippage_bps=settings.costs.slippage_bps
+            * settings.costs.stressed_cost_multiplier,
+            spread_bps=settings.costs.spread_bps
+            * settings.costs.stressed_cost_multiplier,
+            portfolio_policy=policy,
+        )
+        normal_results[name] = normal
+        stressed_results[name] = stressed
+        period_metrics: dict[str, Any] = {}
+        stressed_period_metrics: dict[str, Any] = {}
+        for period, bounds in periods.items():
+            period_metrics[period], returns = rotation_period_metrics(
+                normal.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+            stressed_period_metrics[period], _ = rotation_period_metrics(
+                stressed.equity_curve,
+                start=bounds[0],
+                end=bounds[1],
+            )
+            if period == "development":
+                development_returns[name] = returns
+        execution_identity = normal.summary()["execution_identity"]
+        source_candidate_identity = stable_hash(
+            {
+                "campaign": "ABSOLUTE_MOMENTUM_V1",
+                "strategy_dna_hash": parameters.dna_hash,
+                "portfolio_policy_hash": policy.policy_hash,
+                "forward_start": forward_start.isoformat(),
+            },
+            length=64,
+        )
+        observer = {
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "family": "ABSOLUTE_MOMENTUM_V1",
+            "policy_name": name,
+            "source_candidate_identity": source_candidate_identity,
+            "strategy_dna_hash": parameters.dna_hash,
+            "execution_identity": execution_identity,
+            "parameters": asdict(parameters),
+            "portfolio_policy": asdict(policy),
+            "portfolio_policy_hash": policy.policy_hash,
+            "forward_start": forward_start.isoformat(),
+            "minimum_forward_closed_daily_observations": 365,
+            "minimum_forward_rebalances": 30,
+            "selection_bias": "CONTAMINATED_BY_PRIOR_HISTORICAL_EXPLORATION",
+            "orders_generated": 0,
+            "orders_submitted": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+        observer_path = (
+            settings.paths.lab_dir
+            / "observers"
+            / "absolute_momentum_v1"
+            / f"{name.lower()}.json"
+        )
+        if observer_path.is_file():
+            existing = read_json(observer_path)
+            observer.update(
+                _preserved_breakout_forward_fields(
+                    existing,
+                    source_candidate_identity=source_candidate_identity,
+                    strategy_dna_hash=parameters.dna_hash,
+                    execution_identity=execution_identity,
+                    forward_start=forward_start,
+                )
+            )
+        evidence = build_rotation_forward_evidence(
+            normal,
+            frames,
+            forward_start=forward_start,
+            minimum_observations=int(
+                observer["minimum_forward_closed_daily_observations"]
+            ),
+            minimum_rebalances=int(observer["minimum_forward_rebalances"]),
+            performance_policy=ForwardPerformanceGatePolicy(
+                minimum_profit_factor=settings.research.minimum_profit_factor,
+                minimum_stressed_profit_factor=(
+                    settings.research.minimum_stressed_profit_factor
+                ),
+                maximum_drawdown=settings.research.maximum_drawdown,
+                minimum_effective_sample_size=(
+                    settings.research.minimum_effective_sample_size
+                ),
+                stressed_cost_multiplier=(
+                    settings.costs.stressed_cost_multiplier
+                ),
+                bootstrap_samples=(
+                    settings.research.multiple_testing_bootstrap_samples
+                ),
+                bootstrap_block_size=(
+                    settings.research.multiple_testing_block_size
+                ),
+                bootstrap_seed=settings.app.random_seed,
+            ),
+        )
+        observer = merge_portfolio_forward_manifest(
+            observer,
+            evidence,
+            source_candidate_identity=source_candidate_identity,
+            strategy_dna_hash=parameters.dna_hash,
+            execution_identity=execution_identity,
+            forward_start=forward_start,
+        )
+        observer["data_hashes"] = {
+            market: sha256_file(path) for market, path in paths.items()
+        }
+        atomic_write_json(observer_path, _json_ready(observer))
+        observer_paths[name] = str(observer_path)
+        forward_summaries[name] = observer["forward_summary"]
+        rows.append(
+            {
+                "policy_name": name,
+                "strategy_dna_hash": parameters.dna_hash,
+                "parameters": asdict(parameters),
+                "primary_pre_registered_path": name == primary_name,
+                "normal": normal.summary(),
+                "stressed": stressed.summary(),
+                "periods": period_metrics,
+                "stressed_periods": stressed_period_metrics,
+                "observer_manifest": str(observer_path),
+            }
+        )
+
+    matrix = pd.concat(development_returns, axis=1).dropna(how="any")
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=settings.research.multiple_testing_bootstrap_samples,
+        block_size=settings.research.multiple_testing_block_size,
+        seed=settings.app.random_seed,
+        known_trial_count=total_known_trials,
+    )
+    for row_index, row in enumerate(rows):
+        name = str(row["policy_name"])
+        normal = normal_results[name]
+        stressed = stressed_results[name]
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=normal.equity_curve,
+            stressed_equity=stressed.equity_curve,
+            seed_offset=40_000 + row_index * 10,
+        )
+        economic_checks = {
+            "all_periods_positive": all(
+                float(row["periods"][period]["net_return"]) > 0.0
+                for period in periods
+            ),
+            "all_stressed_periods_positive": all(
+                float(row["stressed_periods"][period]["net_return"]) > 0.0
+                for period in periods
+            ),
+            "minimum_rebalances": (
+                int(normal.metrics["rebalance_count"])
+                >= settings.research.minimum_trades
+            ),
+            "minimum_effective_sample": (
+                int(normal.metrics["portfolio_period_effective_sample_size"])
+                >= settings.research.minimum_effective_sample_size
+            ),
+            "profit_factor": (
+                float(normal.metrics["portfolio_period_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "validation_profit_factor": (
+                float(row["periods"]["validation"]["portfolio_period_profit_factor"])
+                >= settings.research.minimum_profit_factor
+            ),
+            "stressed_validation_profit_factor": (
+                float(
+                    row["stressed_periods"]["validation"][
+                        "portfolio_period_profit_factor"
+                    ]
+                )
+                >= settings.research.minimum_stressed_profit_factor
+            ),
+            "maximum_drawdown": (
+                abs(float(normal.metrics["maximum_drawdown"]))
+                <= settings.research.maximum_drawdown
+            ),
+            "exposure_limits_respected": bool(
+                normal.integrity["maximum_exposure_respected"]
+                and normal.integrity["maximum_position_exposure_respected"]
+                and normal.integrity["minimum_cash_respected"]
+            ),
+        }
+        statistical_checks = {
+            "deflated_sharpe": (
+                float(multiple.deflated_sharpe_probabilities.get(name, 0.0))
+                >= settings.research.minimum_deflated_sharpe_probability
+            ),
+            "white_reality_check": (
+                multiple.white_reality_check_pvalue
+                <= settings.research.maximum_white_reality_check_pvalue
+            ),
+            "hansen_spa": (
+                multiple.hansen_spa_pvalue
+                <= settings.research.maximum_hansen_spa_pvalue
+            ),
+            "pbo": (
+                multiple.probability_of_backtest_overfitting is not None
+                and multiple.probability_of_backtest_overfitting
+                <= settings.research.maximum_probability_of_backtest_overfitting
+            ),
+            "monte_carlo": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
+            "untouched_holdout": False,
+        }
+        row["gates"] = {
+            "economic_checks": economic_checks,
+            "statistical_checks": statistical_checks,
+            "deflated_sharpe_probability": float(
+                multiple.deflated_sharpe_probabilities.get(name, 0.0)
+            ),
+            "stochastic_validation": stochastic,
+            "economic_pass": all(economic_checks.values()),
+            "statistical_pass": all(statistical_checks.values()),
+            "research_pass": False,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+
+    rows.sort(
+        key=lambda row: float(row["parameters"]["target_annualized_volatility"])
+    )
+    primary = next(row for row in rows if row["policy_name"] == primary_name)
+    benchmarks = capital_utilization_benchmark_suite(
+        frames,
+        start=normal_results[primary_name].equity_curve.index[0],
+        minimum_history_observations=policy.minimum_history_observations,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        allowed_markets=markets,
+        exposure_matches={
+            name: float(result.metrics["average_exposure"])
+            for name, result in normal_results.items()
+        },
+    )
+    primary_positive_lead = bool(
+        primary["gates"]["economic_pass"]
+        and primary["gates"]["statistical_checks"]["deflated_sharpe"]
+        and primary["gates"]["statistical_checks"]["white_reality_check"]
+        and primary["gates"]["statistical_checks"]["hansen_spa"]
+        and primary["gates"]["statistical_checks"]["monte_carlo"]
+        and primary["gates"]["statistical_checks"]["dirichlet"]
+    )
+    payload = {
+        "status": (
+            "POSITIVE_RESEARCH_LEAD_NOT_PROMOTED"
+            if primary_positive_lead
+            else "COMPLETED_NOT_PROMOTED"
+        ),
+        "campaign": "ABSOLUTE_MOMENTUM_V1",
+        "result_type": "FIXED_PRIMARY_WITH_FULL_EXPLORATION_LEDGER",
+        "strategy_family": ABSOLUTE_MOMENTUM_FAMILY,
+        "engine_version": ABSOLUTE_MOMENTUM_ENGINE_VERSION,
+        "primary_policy_name": primary_name,
+        "primary_strategy_dna_hash": primary["strategy_dna_hash"],
+        "markets": list(markets),
+        "timeframe": "1d",
+        "portfolio_policy": asdict(policy),
+        "periods": periods,
+        "formal_risk_budget_paths": len(parameters_set),
+        "exploration_ledger": exploration_ledger,
+        "total_known_trials": total_known_trials,
+        "multiple_testing": asdict(multiple),
+        "primary_result": primary,
+        "policy_results": rows,
+        "benchmarks": benchmarks,
+        "selection_bias": "CONTAMINATED_BY_PRIOR_HISTORICAL_EXPLORATION",
+        "holdout_status": "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS",
+        "forward_evidence_required": True,
+        "observer_manifests": observer_paths,
+        "forward_summaries": forward_summaries,
+        "total_forward_observations": sum(
+            int(summary["closed_daily_observations"])
+            for summary in forward_summaries.values()
+        ),
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+        "data_hashes": {
+            market: sha256_file(path)
+            for market, path in paths.items()
+        },
+    }
+    report_path = _absolute_momentum_campaign_path(settings)
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "policy": row["policy_name"],
+                "target_volatility": row["parameters"][
+                    "target_annualized_volatility"
+                ],
+                "net_return": row["normal"]["metrics"]["net_return"],
+                "cagr": row["normal"]["metrics"]["annualized_return"],
+                "sharpe": row["normal"]["metrics"]["sharpe"],
+                "maximum_drawdown": row["normal"]["metrics"]["maximum_drawdown"],
+                "average_exposure": row["normal"]["metrics"]["average_exposure"],
+                "profit_factor": row["normal"]["metrics"][
+                    "portfolio_period_profit_factor"
+                ],
+                "dsr": row["gates"]["deflated_sharpe_probability"],
+                "monte_carlo_gate": row["gates"]["statistical_checks"][
+                    "monte_carlo"
+                ],
+                "dirichlet_gate": row["gates"]["statistical_checks"]["dirichlet"],
+                "pbo_gate": row["gates"]["statistical_checks"]["pbo"],
+                "economic_pass": row["gates"]["economic_pass"],
+                "statistical_pass": row["gates"]["statistical_pass"],
+                "research_pass": False,
+                "paper_candidate": False,
+                "live_ready": False,
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "primary_policy_name": primary_name,
+        "primary_positive_research_lead": primary_positive_lead,
+        "formal_risk_budget_paths": len(parameters_set),
+        "total_known_trials": total_known_trials,
+        "pbo": multiple.probability_of_backtest_overfitting,
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": observer_paths,
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int:
     from research.combinatorial_lab import (
         ECONOMIC_HYPOTHESIS_TEMPLATES,
@@ -7425,6 +7866,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         capital_utilization_campaign = campaign_name == "capital-utilization-v1"
         diversified_rotation_campaign = campaign_name == "diversified-rotation-v1"
         breakout_portfolio_campaign = campaign_name == "portfolio-breakout-v1"
+        absolute_momentum_campaign = campaign_name == "absolute-momentum-v1"
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -7442,6 +7884,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     or capital_utilization_campaign
                     or diversified_rotation_campaign
                     or breakout_portfolio_campaign
+                    or absolute_momentum_campaign
                     or portfolio_storm_campaign
                 )
                 else (("1h",) if formal_campaign else ("5m", "15m"))
@@ -7462,16 +7905,28 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 (
                     (
                         (
-                            "PORTFOLIO_STORM_V1"
-                            if portfolio_storm_campaign
+                            (
+                                "ABSOLUTE_MOMENTUM_V1"
+                                if absolute_momentum_campaign
+                                else "PORTFOLIO_STORM_V1"
+                            )
+                            if (
+                                portfolio_storm_campaign
+                                or absolute_momentum_campaign
+                            )
                             else "PORTFOLIO_BREAKOUT_V1"
                         )
-                        if breakout_portfolio_campaign or portfolio_storm_campaign
+                        if (
+                            breakout_portfolio_campaign
+                            or portfolio_storm_campaign
+                            or absolute_momentum_campaign
+                        )
                         else "DIVERSIFIED_ROTATION_V1"
                     )
                     if (
                         diversified_rotation_campaign
                         or breakout_portfolio_campaign
+                        or absolute_momentum_campaign
                         or portfolio_storm_campaign
                     )
                     else "CAPITAL_UTILIZATION_V1"
@@ -7491,6 +7946,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         )
         if signal_synthesis_storm_campaign:
             campaign_label = "SIGNAL_SYNTHESIS_STORM_V1"
+        if absolute_momentum_campaign:
+            campaign_label = "ABSOLUTE_MOMENTUM_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -7525,6 +7982,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _autopilot_observer_stage,
+                        settings,
+                    )
+                )
+                return 0
+            if absolute_momentum_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_absolute_momentum_campaign,
                         settings,
                     )
                 )
@@ -7672,6 +8137,39 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         "next_open_execution": True,
                         "paper_candidates": 0,
                         "live_orders": 0,
+                    }
+                )
+                return 0
+            if absolute_momentum_campaign:
+                from research.absolute_momentum import (
+                    absolute_momentum_parameter_set,
+                )
+
+                parameters = absolute_momentum_parameter_set()
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "FIXED_PRIMARY_WITH_FULL_EXPLORATION_LEDGER"
+                        ),
+                        "economic_hypothesis": (
+                            "MULTI_ASSET_ABSOLUTE_MOMENTUM_VOL_TARGET"
+                        ),
+                        "primary_policy_name": "ABS_MOM_VOL_05",
+                        "parameters": [asdict(row) for row in parameters],
+                        "formal_risk_budget_paths": len(parameters),
+                        "total_known_trials": 16_715,
+                        "maximum_total_exposure": 0.20,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.80,
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
                     }
                 )
                 return 0
@@ -7916,6 +8414,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if absolute_momentum_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "formal_risk_budget_paths": 5,
+                            "reason_code": (
+                                "ACCOUNTED_ABSOLUTE_MOMENTUM_RESEARCH_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_absolute_momentum_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if diversified_rotation_campaign:
                 if not args.yes:
                     emit(
@@ -8065,6 +8583,18 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if absolute_momentum_campaign:
+                report_path = _absolute_momentum_campaign_path(settings)
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -8161,6 +8691,21 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     {
                         "campaign": campaign_label,
                         "status": ("COMPLETED" if report_path.is_file() else "NOT_RUN"),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if absolute_momentum_campaign:
+                report_path = _absolute_momentum_campaign_path(settings)
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
                         "report": str(report_path),
                         "live_orders": 0,
                     }
@@ -10191,6 +10736,7 @@ def build_parser() -> argparse.ArgumentParser:
         "capital-utilization-v1",
         "diversified-rotation-v1",
         "portfolio-breakout-v1",
+        "absolute-momentum-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )

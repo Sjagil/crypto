@@ -56,6 +56,7 @@ def test_required_command_families_are_registered() -> None:
         ["lab", "campaign", "plan", "--name", "capital-utilization-v1"],
         ["lab", "campaign", "plan", "--name", "diversified-rotation-v1"],
         ["lab", "campaign", "plan", "--name", "portfolio-breakout-v1"],
+        ["lab", "campaign", "plan", "--name", "absolute-momentum-v1"],
         [
             "lab",
             "campaign",
