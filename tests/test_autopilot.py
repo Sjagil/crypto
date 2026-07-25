@@ -52,7 +52,7 @@ def test_performance_degradation_z_score_is_finite_and_fail_closed():
 
 def test_autopilot_cycle_is_orderless_and_research_is_scheduled(tmp_path):
     current = datetime(2026, 7, 25, tzinfo=UTC)
-    calls = {"research": 0}
+    calls = {"feature_store": 0, "research": 0}
 
     def clock():
         return current
@@ -66,21 +66,34 @@ def test_autopilot_cycle_is_orderless_and_research_is_scheduled(tmp_path):
             "live_orders": 0,
         }
 
+    def feature_store():
+        calls["feature_store"] += 1
+        return {
+            "status": "REUSED",
+            "dataset_id": "causal-tensor-v1",
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+
     orchestrator = AutopilotOrchestrator(tmp_path, clock=clock)
     first = orchestrator.run_once(
         data_stage=_data_stage,
+        feature_store_stage=feature_store,
         research_stage=research,
         observer_stage=_observer_stage,
     )
     assert first["status"] == "COMPLETED_ORDERLESS"
     assert first["research_ran"] is True
     assert calls["research"] == 1
+    assert calls["feature_store"] == 1
     assert first["orders_generated"] == 0
     assert not orchestrator.lock_path.exists()
 
     current += timedelta(days=1)
     second = orchestrator.run_once(
         data_stage=_data_stage,
+        feature_store_stage=feature_store,
         research_stage=research,
         observer_stage=_observer_stage,
     )
@@ -88,7 +101,12 @@ def test_autopilot_cycle_is_orderless_and_research_is_scheduled(tmp_path):
     assert second["research_ran"] is False
     assert second["research_reason"] == "DATA_UNCHANGED"
     assert calls["research"] == 1
+    assert calls["feature_store"] == 2
     assert orchestrator.state()["cycle_count"] == 2
+    assert (
+        orchestrator.state()["last_feature_store_dataset_id"]
+        == "causal-tensor-v1"
+    )
 
 
 def test_new_data_waits_for_research_interval_and_then_runs(tmp_path):

@@ -168,6 +168,7 @@ class AutopilotOrchestrator:
             "last_data_fingerprint": None,
             "last_research_at": None,
             "last_research_data_fingerprint": None,
+            "last_feature_store_dataset_id": None,
             "orders_generated": 0,
             "paper_candidate_permitted": False,
             "live_ready": False,
@@ -417,6 +418,7 @@ class AutopilotOrchestrator:
         *,
         data_stage: Stage,
         observer_stage: Stage,
+        feature_store_stage: Stage | None = None,
         research_stage: Stage | None = None,
         degradation_observation: DegradationObservation | None = None,
         force_research: bool = False,
@@ -457,6 +459,27 @@ class AutopilotOrchestrator:
             data_result = self._run_stage("DATA_AUDIT", data_stage)
             cycle["stages"].append(data_result)
             data_fingerprint = data_result["payload"].get("data_fingerprint")
+
+            feature_store_dataset_id = prior.get(
+                "last_feature_store_dataset_id"
+            )
+            if feature_store_stage is not None:
+                feature_result = self._run_stage(
+                    "FEATURE_STORE",
+                    feature_store_stage,
+                )
+                cycle["stages"].append(feature_result)
+                feature_store_dataset_id = feature_result["payload"].get(
+                    "dataset_id"
+                )
+            else:
+                cycle["stages"].append(
+                    {
+                        "stage": "FEATURE_STORE",
+                        "status": "SKIPPED",
+                        "reason": "FEATURE_STORE_DISABLED",
+                    }
+                )
 
             research_ran = False
             research_reason = "RESEARCH_DISABLED"
@@ -522,6 +545,9 @@ class AutopilotOrchestrator:
                     if research_ran
                     else prior.get("last_research_data_fingerprint")
                 ),
+                "last_feature_store_dataset_id": (
+                    feature_store_dataset_id
+                ),
                 "research_ran": research_ran,
                 "research_reason": research_reason,
                 "degradation": degradation,
@@ -569,6 +595,9 @@ class AutopilotOrchestrator:
                     "last_research_at": prior.get("last_research_at"),
                     "last_research_data_fingerprint": prior.get(
                         "last_research_data_fingerprint"
+                    ),
+                    "last_feature_store_dataset_id": prior.get(
+                        "last_feature_store_dataset_id"
                     ),
                     "orders_generated": 0,
                     "paper_candidate_permitted": False,

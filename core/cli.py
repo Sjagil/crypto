@@ -3497,6 +3497,27 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
+    """Build or reuse the strict causal daily AI tensor snapshot."""
+
+    from data.feature_store import (
+        STRICT_PORTFOLIO_MARKETS,
+        build_and_persist_feature_store,
+    )
+
+    normalized = settings.paths.data_dir / "normalized"
+    source_paths = {
+        market: normalized / f"{market}_1d.parquet"
+        for market in STRICT_PORTFOLIO_MARKETS
+    }
+    return build_and_persist_feature_store(
+        source_paths,
+        settings.paths.lab_dir
+        / "feature_store"
+        / "portfolio_daily_v1",
+    )
+
+
 def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     """Re-run only the already preregistered eight-variant breakout family."""
 
@@ -6461,6 +6482,15 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             args.refresh_timeout_seconds
                         ),
                     ),
+                    feature_store_stage=(
+                        (
+                            lambda: _autopilot_feature_store_stage(
+                                settings
+                            )
+                        )
+                        if not args.skip_feature_store
+                        else None
+                    ),
                     research_stage=(
                         (lambda: _autopilot_research_stage(settings))
                         if args.run_research
@@ -9233,6 +9263,10 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_autopilot.add_argument("--run-research", action="store_true")
     campaign_autopilot.add_argument("--force-research", action="store_true")
     campaign_autopilot.add_argument("--refresh-data", action="store_true")
+    campaign_autopilot.add_argument(
+        "--skip-feature-store",
+        action="store_true",
+    )
     campaign_autopilot.add_argument(
         "--refresh-timeout-seconds",
         type=float,

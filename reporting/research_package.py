@@ -91,6 +91,7 @@ def build_acceptance_summary(
     portfolio_breakout: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
     autopilot_degradation: dict[str, Any] | None = None,
+    feature_store: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -134,6 +135,19 @@ def build_acceptance_summary(
             raise ValueError("autopilot state contains paper permission")
         if bool(autopilot_state.get("live_ready", False)):
             raise ValueError("autopilot state contains live permission")
+    if feature_store is not None:
+        if int(feature_store.get("orders_generated") or 0) != 0:
+            raise ValueError("feature store contains generated orders")
+        if bool(feature_store.get("paper_candidate_permitted", False)):
+            raise ValueError("feature store contains paper permission")
+        if bool(feature_store.get("live_ready", False)):
+            raise ValueError("feature store contains live permission")
+        if (
+            autopilot_state is not None
+            and autopilot_state.get("last_feature_store_dataset_id")
+            != feature_store.get("dataset_id")
+        ):
+            raise ValueError("autopilot feature store identity mismatch")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -360,6 +374,22 @@ def build_acceptance_summary(
             "paper_candidate_permitted": False,
             "live_ready": False,
         }
+    if feature_store is not None:
+        summary["feature_store"] = {
+            "schema_version": feature_store["schema_version"],
+            "dataset_id": feature_store["dataset_id"],
+            "frequency": feature_store["frequency"],
+            "assets": feature_store["assets"],
+            "feature_names": feature_store["feature_names"],
+            "shapes": feature_store["shapes"],
+            "per_asset": feature_store["per_asset"],
+            "causality": feature_store["causality"],
+            "tensor_sha256": feature_store["tensor_sha256"],
+            "research_only": True,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
     return summary
 
 
@@ -442,6 +472,20 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
             paths["autopilot_latest_cycle.json"] = last_cycle
     if autopilot_degradation.is_file():
         paths["autopilot_degradation_state.json"] = autopilot_degradation
+    feature_store_directory = (
+        settings.paths.lab_dir
+        / "feature_store"
+        / "portfolio_daily_v1"
+    )
+    feature_store_manifest = (
+        feature_store_directory / "latest.manifest.json"
+    )
+    feature_store_tensor = feature_store_directory / "latest.npz"
+    if feature_store_manifest.is_file() and feature_store_tensor.is_file():
+        paths["feature_store_latest.manifest.json"] = (
+            feature_store_manifest
+        )
+        paths["feature_store_latest.npz"] = feature_store_tensor
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -511,6 +555,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         autopilot_state=payloads.get("autopilot_state.json"),
         autopilot_degradation=payloads.get(
             "autopilot_degradation_state.json"
+        ),
+        feature_store=payloads.get(
+            "feature_store_latest.manifest.json"
         ),
     )
     evidence_hash = stable_hash(

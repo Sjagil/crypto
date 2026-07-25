@@ -63,6 +63,7 @@ def test_required_command_families_are_registered() -> None:
         ["lab", "campaign", "package", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "autopilot"],
         ["lab", "campaign", "autopilot", "--mode", "status"],
+        ["lab", "campaign", "autopilot", "--skip-feature-store"],
         [
             "lab",
             "campaign",

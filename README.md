@@ -562,6 +562,14 @@ manifest, and persists a cycle record below `output/lab/autopilot/`. Research
 is skipped when data is unchanged or the seven-day research interval has not
 elapsed. `--refresh-data` refreshes only the strict ALLOWED daily universe;
 `--mode continuous` is explicit and can be bounded with `--max-cycles`.
+Every normal cycle also builds or reuses
+`output/lab/feature_store/portfolio_daily_v1/latest.npz`: a point-in-time
+`time × asset × feature` tensor with separate listing, feature and target
+masks. Its 22 dimensionless/log-scaled features include returns, realized
+volatility, shifted Donchian distances, EMA distances, volume state, BTC
+relative momentum, cross-sectional rank and breadth. Targets are physically
+separate and become available only at the next asset candle. No full-sample
+normalization is permitted. `--skip-feature-store` exists only for diagnostics.
 `--mode task-install --yes` installs a least-privilege Windows task that runs
 the orderless refresh/research cycle daily at 00:15 local time, starts missed
 runs when available, ignores overlapping instances and records all evidence in

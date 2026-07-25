@@ -129,6 +129,7 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
         "last_completed_at": "2026-07-25T00:00:00Z",
         "last_data_fingerprint": "data-hash",
         "last_research_at": "2026-07-25T00:00:00Z",
+        "last_feature_store_dataset_id": "tensor-id",
         "research_ran": False,
         "research_reason": "DATA_UNCHANGED",
         "degradation": {"status": "INSUFFICIENT_FORWARD_DATA"},
@@ -140,6 +141,20 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
         "system_degraded": False,
         "status": "HEALTHY",
     }
+    values["feature_store"] = {
+        "schema_version": "portfolio_daily_causal_v1",
+        "dataset_id": "tensor-id",
+        "frequency": "1d",
+        "assets": ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"],
+        "feature_names": ["log_return_1"],
+        "shapes": {"features": [10, 4, 1]},
+        "per_asset": {},
+        "causality": {"closed_candles_only": True},
+        "tensor_sha256": "tensor-sha",
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
 
     summary = build_acceptance_summary(**values)
 
@@ -149,6 +164,8 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
         "system_degraded"
     ]
     assert summary["autopilot"]["orders_generated"] == 0
+    assert summary["feature_store"]["dataset_id"] == "tensor-id"
+    assert summary["feature_store"]["research_only"] is True
 
 
 def test_acceptance_summary_rejects_autopilot_live_permission() -> None:
@@ -160,4 +177,23 @@ def test_acceptance_summary_rejects_autopilot_live_permission() -> None:
     }
 
     with pytest.raises(ValueError, match="live permission"):
+        build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_rejects_feature_store_identity_mismatch() -> None:
+    values = _inputs()
+    values["autopilot_state"] = {
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+        "last_feature_store_dataset_id": "expected",
+    }
+    values["feature_store"] = {
+        "dataset_id": "different",
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+    with pytest.raises(ValueError, match="identity mismatch"):
         build_acceptance_summary(**values)
