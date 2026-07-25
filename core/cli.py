@@ -3321,36 +3321,22 @@ def _rotation_campaign_path(
         "cross_sectional_institutional_v2.json"
         if institutional
         else (
-            "cross_sectional_ensemble_v1.json"
-            if ensemble
-            else "cross_sectional_rotation_v1.json"
+            "cross_sectional_ensemble_v1.json" if ensemble else "cross_sectional_rotation_v1.json"
         )
     )
     return settings.paths.lab_dir / "reports" / name
 
 
 def _capital_utilization_campaign_path(settings: Settings) -> Path:
-    return (
-        settings.paths.lab_dir
-        / "reports"
-        / "capital_utilization_campaign_v1.json"
-    )
+    return settings.paths.lab_dir / "reports" / "capital_utilization_campaign_v1.json"
 
 
 def _diversified_rotation_campaign_path(settings: Settings) -> Path:
-    return (
-        settings.paths.lab_dir
-        / "reports"
-        / "diversified_rotation_campaign_v1.json"
-    )
+    return settings.paths.lab_dir / "reports" / "diversified_rotation_campaign_v1.json"
 
 
 def _breakout_portfolio_campaign_path(settings: Settings) -> Path:
-    return (
-        settings.paths.lab_dir
-        / "reports"
-        / "portfolio_breakout_campaign_v1.json"
-    )
+    return settings.paths.lab_dir / "reports" / "portfolio_breakout_campaign_v1.json"
 
 
 def _portfolio_storm_paths(
@@ -3364,6 +3350,428 @@ def _portfolio_storm_paths(
     )
 
 
+def _signal_synthesis_storm_paths(
+    settings: Settings,
+) -> tuple[Path, Path, Path]:
+    reports = settings.paths.lab_dir / "reports"
+    return (
+        reports / "signal_synthesis_storm_plan_v2.json",
+        reports / "signal_synthesis_storm_report_v2.json",
+        reports / "signal_synthesis_storm_returns_v2.npz",
+    )
+
+
+def _signal_synthesis_data_paths(
+    settings: Settings,
+) -> dict[str, dict[str, Path]]:
+    from research.combinatorial_lab import LabRunner
+    from research.signal_synthesis_storm import (
+        SIGNAL_STORM_MARKETS,
+        SIGNAL_STORM_TIMEFRAMES,
+    )
+
+    runner = LabRunner(settings)
+    paths = {
+        timeframe: {market: runner._data_path(market, timeframe) for market in SIGNAL_STORM_MARKETS}
+        for timeframe in SIGNAL_STORM_TIMEFRAMES
+    }
+    missing = [
+        str(path)
+        for by_market in paths.values()
+        for path in by_market.values()
+        if not path.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"signal synthesis source data is missing: {missing}")
+    return paths
+
+
+def _signal_synthesis_storm_plan_payload(
+    settings: Settings,
+    *,
+    trial_count: int,
+) -> dict[str, Any]:
+    from research.features import feature_registry
+    from research.signal_synthesis_storm import (
+        SIGNAL_STORM_SEED,
+        signal_storm_plan,
+    )
+
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    frozen = read_json(frozen_path)
+    paths = _signal_synthesis_data_paths(settings)
+    payload = signal_storm_plan(
+        trial_count=trial_count,
+        seed=SIGNAL_STORM_SEED,
+    )
+    return {
+        **payload,
+        "source_candidate_identity": frozen["immutable_identity"],
+        "source_candidate_sha256": sha256_file(frozen_path),
+        "feature_registry_hash": stable_hash(
+            feature_registry(),
+            length=64,
+        ),
+        "data_hashes": {
+            timeframe: {market: sha256_file(path) for market, path in by_market.items()}
+            for timeframe, by_market in paths.items()
+        },
+    }
+
+
+def _run_signal_synthesis_storm_campaign(
+    settings: Settings,
+    *,
+    maximum_trials: int | None = None,
+    artifact_directory: Path | None = None,
+    prior_known_trials_override: int | None = None,
+    epoch_id: str | None = None,
+) -> dict[str, Any]:
+    """Run one immutable, broad signal-DNA screen without promotion."""
+
+    from research.combinatorial_lab import LabRunner
+    from research.signal_synthesis_storm import (
+        SIGNAL_STORM_MARKETS,
+        SIGNAL_STORM_TIMEFRAMES,
+        SIGNAL_STORM_TRIAL_COUNT,
+        SignalSynthesisDNA,
+        run_signal_synthesis_storm,
+    )
+
+    if artifact_directory is None:
+        plan_path, report_path, matrix_path = _signal_synthesis_storm_paths(settings)
+    else:
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        plan_path = artifact_directory / "plan.json"
+        report_path = artifact_directory / "report.json"
+        matrix_path = artifact_directory / "returns.npz"
+    trial_count = maximum_trials or SIGNAL_STORM_TRIAL_COUNT
+    if trial_count < 2 or trial_count > SIGNAL_STORM_TRIAL_COUNT:
+        raise ValueError(
+            f"signal synthesis storm trial count must be in [2, {SIGNAL_STORM_TRIAL_COUNT}]"
+        )
+    expected = _signal_synthesis_storm_plan_payload(
+        settings,
+        trial_count=trial_count,
+    )
+    if plan_path.is_file():
+        plan = read_json(plan_path)
+        immutable_fields = (
+            "search_space_hash",
+            "trial_count",
+            "seed",
+            "source_candidate_identity",
+            "source_candidate_sha256",
+            "feature_registry_hash",
+            "data_hashes",
+        )
+        mismatches = [field for field in immutable_fields if plan.get(field) != expected.get(field)]
+        if mismatches:
+            raise RuntimeError(f"SIGNAL_SYNTHESIS_STORM_PLAN_IDENTITY_MISMATCH:{mismatches}")
+    else:
+        plan = expected
+        atomic_write_json(plan_path, _json_ready(plan))
+    dna = tuple(SignalSynthesisDNA.from_dict(values) for values in plan["strategy_dna"])
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
+    frozen_sha_before = sha256_file(frozen_path)
+    runner = LabRunner(settings)
+    frames_by_timeframe: dict[
+        str,
+        dict[str, pd.DataFrame],
+    ] = {}
+    feature_data_hashes: dict[str, str] = {}
+    feature_provenance: dict[str, Any] = {}
+    for timeframe in SIGNAL_STORM_TIMEFRAMES:
+        frames, data_hash, provenance = runner._frames(
+            markets=SIGNAL_STORM_MARKETS,
+            timeframe=timeframe,
+            rows=None,
+            data_mode="real",
+        )
+        frames_by_timeframe[timeframe] = frames
+        feature_data_hashes[timeframe] = data_hash
+        feature_provenance[timeframe] = provenance
+    prior_signal_report = (
+        settings.paths.lab_dir / "reports" / "signal_synthesis_storm_report_v1.json"
+    )
+    portfolio_report = _portfolio_storm_paths(settings)[1]
+    prior_known_trials = (
+        int(prior_known_trials_override) if prior_known_trials_override is not None else 6_312
+    )
+    if prior_known_trials_override is None and portfolio_report.is_file():
+        prior_known_trials = int(
+            read_json(portfolio_report).get(
+                "total_known_trials",
+                prior_known_trials,
+            )
+        )
+    if prior_known_trials_override is None and prior_signal_report.is_file():
+        prior_known_trials = max(
+            prior_known_trials,
+            int(
+                read_json(prior_signal_report).get(
+                    "total_known_trials",
+                    prior_known_trials,
+                )
+            ),
+        )
+    report, matrix, timestamps = run_signal_synthesis_storm(
+        frames_by_timeframe,
+        dna,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        prior_known_trials=prior_known_trials,
+    )
+    _audit_signal_storm_survivors_exact(
+        settings,
+        frames_by_timeframe=frames_by_timeframe,
+        report=report,
+        timestamps=timestamps,
+    )
+    temporary_matrix = matrix_path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        temporary_matrix,
+        weekly_returns=matrix,
+        timestamps=np.asarray(
+            [str(timestamp) for timestamp in timestamps],
+            dtype="U40",
+        ),
+        strategy_dna_hashes=np.asarray(
+            [row.dna_hash for row in dna],
+            dtype="U64",
+        ),
+    )
+    os.replace(temporary_matrix, matrix_path)
+    report.update(
+        {
+            "plan_path": str(plan_path),
+            "plan_sha256": sha256_file(plan_path),
+            "source_candidate_identity": plan["source_candidate_identity"],
+            "epoch_id": epoch_id,
+            "returns_matrix_path": str(matrix_path),
+            "returns_matrix_sha256": sha256_file(matrix_path),
+            "returns_matrix_shape": list(matrix.shape),
+            "data_hashes": plan["data_hashes"],
+            "feature_data_hashes": feature_data_hashes,
+            "feature_provenance": feature_provenance,
+            "frozen_candidate_sha256_before": frozen_sha_before,
+            "frozen_candidate_sha256_after": sha256_file(frozen_path),
+            "frozen_candidate_unchanged": (frozen_sha_before == sha256_file(frozen_path)),
+        }
+    )
+    atomic_write_json(report_path, _json_ready(report))
+    return {
+        "status": report["status"],
+        "campaign": report["campaign"],
+        "epoch_id": epoch_id,
+        "trial_count": report["trial_count"],
+        "total_known_trials": report["total_known_trials"],
+        "pareto_survivor_count": report["pareto_survivor_count"],
+        "positive_validation_survivors": report["positive_validation_survivors"],
+        "positive_confirmation_survivors": report["positive_confirmation_survivors"],
+        "pbo": report["multiple_testing"]["probability_of_backtest_overfitting"],
+        "white_reality_check_pvalue": report["multiple_testing"]["white_reality_check_pvalue"],
+        "hansen_spa_pvalue": report["multiple_testing"]["hansen_spa_pvalue"],
+        "frozen_candidate_unchanged": report["frozen_candidate_unchanged"],
+        "plan": str(plan_path),
+        "report": str(report_path),
+        "returns_matrix": str(matrix_path),
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
+def _audit_signal_storm_survivors_exact(
+    settings: Settings,
+    *,
+    frames_by_timeframe: Mapping[
+        str,
+        Mapping[str, pd.DataFrame],
+    ],
+    report: dict[str, Any],
+    timestamps: pd.DatetimeIndex,
+) -> None:
+    """Canonically audit screen survivors with positive confirmation only."""
+
+    from research.backtest import BacktestConfig, BacktestEngine
+    from research.combinatorial_lab import (
+        CombinationState,
+        CombinatorialStrategy,
+        LogicMode,
+        StrategyCombination,
+        signal_block_registry,
+    )
+    from research.signal_synthesis_storm import SignalSynthesisDNA
+
+    split = report["split"]
+    development_end = int(split["development_observations"])
+    validation_end = development_end + int(split["validation_observations"])
+    development_boundary = pd.Timestamp(timestamps[development_end - 1])
+    validation_boundary = pd.Timestamp(timestamps[validation_end - 1])
+    registry = signal_block_registry()
+    normal_config = BacktestConfig.from_settings(settings)
+    stressed_config = replace(
+        normal_config,
+        costs=replace(normal_config.costs, multiplier=2.0),
+        bootstrap_samples=min(
+            1_000,
+            normal_config.bootstrap_samples,
+        ),
+        monte_carlo_runs=min(
+            1_000,
+            normal_config.monte_carlo_runs,
+        ),
+    )
+    audited = 0
+    passed = 0
+    errors = 0
+    for survivor in report["pareto_survivors"]:
+        if float(survivor["confirmation"]["net_return"]) <= 0.0:
+            survivor["canonical_exact_status"] = "NOT_TRIGGERED_NONPOSITIVE_SCREEN_CONFIRMATION"
+            continue
+        row = SignalSynthesisDNA.from_dict(survivor["parameters"])
+        blocks = [registry[block_id] for block_id in row.block_ids]
+        combination = StrategyCombination(
+            combination_id=f"signal-storm-{row.dna_hash[:20]}",
+            strategy_dna_hash=row.dna_hash,
+            combination_size=len(row.block_ids),
+            block_ids=row.block_ids,
+            families=tuple(sorted({block.family for block in blocks})),
+            roles=tuple(sorted({block.role.value for block in blocks})),
+            redundancy_score=0.0,
+            logic_mode=LogicMode(row.logic_mode),
+            default_parameters=row.block_parameters,
+            parameter_space_size=math.prod(block.parameter_space_size for block in blocks),
+            estimated_computational_cost=sum(
+                {"LOW": 1, "MEDIUM": 3, "HIGH": 8}[block.computational_cost_class]
+                for block in blocks
+            ),
+            eligibility_status=CombinationState.GENERATED,
+            generated_at=utc_now(),
+            requested_timeframes=(row.timeframe,),
+            common_supported_timeframes=(row.timeframe,),
+            excluded_timeframes=(),
+        )
+        strategy = CombinatorialStrategy(
+            combination,
+            registry,
+            block_parameters=row.block_parameters,
+        )
+        parameters = {
+            "exit__profile": row.exit_profile,
+            "exit__stop_atr": row.stop_atr,
+            "exit__target_atr": row.target_atr,
+            "exit__trailing_atr": row.trailing_atr,
+            "exit__maximum_holding_bars": (row.maximum_holding_bars),
+            "logic__vote_threshold": row.vote_threshold,
+        }
+        selected_frames = {
+            market: frames_by_timeframe[row.timeframe][market] for market in row.asset_pair
+        }
+        audited += 1
+        try:
+            normal = BacktestEngine(
+                normal_config,
+                settings=settings,
+            ).run(
+                selected_frames,
+                strategy,
+                parameters=parameters,
+            )
+            stressed = BacktestEngine(
+                stressed_config,
+                settings=settings,
+            ).run(
+                selected_frames,
+                strategy,
+                parameters=parameters,
+            )
+            equity = normal.equity_curve["equity"].astype(float)
+            stressed_equity = stressed.equity_curve["equity"].astype(float)
+
+            def value_at(
+                values: pd.Series,
+                boundary: pd.Timestamp,
+            ) -> float:
+                selected = values.loc[values.index <= boundary]
+                if selected.empty:
+                    raise ValueError("exact audit boundary precedes equity")
+                return float(selected.iloc[-1])
+
+            development_equity = value_at(
+                equity,
+                development_boundary,
+            )
+            validation_equity = value_at(
+                equity,
+                validation_boundary,
+            )
+            stressed_development = value_at(
+                stressed_equity,
+                development_boundary,
+            )
+            stressed_validation = value_at(
+                stressed_equity,
+                validation_boundary,
+            )
+            validation_return = validation_equity / development_equity - 1.0
+            confirmation_return = float(equity.iloc[-1]) / validation_equity - 1.0
+            stressed_validation_return = stressed_validation / stressed_development - 1.0
+            stressed_confirmation_return = (
+                float(stressed_equity.iloc[-1]) / stressed_validation - 1.0
+            )
+            exact_pass = (
+                validation_return > 0.0
+                and confirmation_return > 0.0
+                and stressed_confirmation_return > 0.0
+            )
+            passed += int(exact_pass)
+            survivor["canonical_exact_status"] = (
+                "ECONOMICALLY_POSITIVE_NOT_STATISTICALLY_APPROVED"
+                if exact_pass
+                else "FAILED_CANONICAL_EXACT_AUDIT"
+            )
+            survivor["canonical_exact"] = {
+                "engine": "BacktestEngine",
+                "next_open_execution": True,
+                "normal_metrics": normal.metrics,
+                "double_cost_metrics": stressed.metrics,
+                "validation_net_return": validation_return,
+                "confirmation_net_return": confirmation_return,
+                "double_cost_validation_net_return": (stressed_validation_return),
+                "double_cost_confirmation_net_return": (stressed_confirmation_return),
+                "economic_pass": exact_pass,
+                "statistical_pass": False,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+        except Exception as exc:
+            errors += 1
+            survivor["canonical_exact_status"] = "BLOCKED_CANONICAL_EXACT_ERROR"
+            survivor["canonical_exact"] = {
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "economic_pass": False,
+                "statistical_pass": False,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+    report["canonical_exact_audit"] = {
+        "trigger": "POSITIVE_SCREEN_CONFIRMATION_ONLY",
+        "audited_survivors": audited,
+        "economic_passes": passed,
+        "errors": errors,
+        "selection_changed": False,
+        "white_spa_pbo_recomputed": False,
+        "research_pass": False,
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 def _portfolio_storm_plan_payload(
     settings: Settings,
     *,
@@ -3371,18 +3779,10 @@ def _portfolio_storm_plan_payload(
 ) -> dict[str, Any]:
     from research.portfolio_storm import STORM_SEED, storm_plan
 
-    frozen_path = (
-        settings.paths.lab_dir
-        / "candidates"
-        / "rotation_research_lead_v1.json"
-    )
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
     frozen, _, markets, paths, frames = _frozen_rotation_inputs(settings)
     payload = storm_plan(trial_count=trial_count, seed=STORM_SEED)
-    common_index = sorted(
-        set.intersection(
-            *[set(frame.index) for frame in frames.values()]
-        )
-    )
+    common_index = sorted(set.intersection(*[set(frame.index) for frame in frames.values()]))
     return {
         **payload,
         "source_candidate_identity": frozen["immutable_identity"],
@@ -3392,9 +3792,7 @@ def _portfolio_storm_plan_payload(
         "common_history_start": str(common_index[0]),
         "common_history_end": str(common_index[-1]),
         "common_history_observations": len(common_index),
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
     }
 
 
@@ -3415,9 +3813,7 @@ def _run_portfolio_storm_campaign(
     )
 
     if artifact_directory is None:
-        plan_path, report_path, matrix_path = _portfolio_storm_paths(
-            settings
-        )
+        plan_path, report_path, matrix_path = _portfolio_storm_paths(settings)
     else:
         artifact_directory.mkdir(parents=True, exist_ok=True)
         plan_path = artifact_directory / "plan.json"
@@ -3425,9 +3821,7 @@ def _run_portfolio_storm_campaign(
         matrix_path = artifact_directory / "returns.npz"
     trial_count = maximum_trials or STORM_TRIAL_COUNT
     if trial_count < 2 or trial_count > STORM_TRIAL_COUNT:
-        raise ValueError(
-            f"portfolio storm trial count must be in [2, {STORM_TRIAL_COUNT}]"
-        )
+        raise ValueError(f"portfolio storm trial count must be in [2, {STORM_TRIAL_COUNT}]")
     expected = _portfolio_storm_plan_payload(
         settings,
         trial_count=trial_count,
@@ -3442,36 +3836,20 @@ def _run_portfolio_storm_campaign(
             "source_candidate_sha256",
             "data_hashes",
         )
-        mismatches = [
-            field
-            for field in immutable_fields
-            if plan.get(field) != expected.get(field)
-        ]
+        mismatches = [field for field in immutable_fields if plan.get(field) != expected.get(field)]
         if mismatches:
-            raise RuntimeError(
-                "PORTFOLIO_STORM_PLAN_IDENTITY_MISMATCH:"
-                f"{mismatches}"
-            )
+            raise RuntimeError(f"PORTFOLIO_STORM_PLAN_IDENTITY_MISMATCH:{mismatches}")
     else:
         plan = expected
         atomic_write_json(plan_path, _json_ready(plan))
 
-    dna = tuple(
-        PortfolioStormDNA(**values)
-        for values in plan["strategy_dna"]
-    )
-    frozen_path = (
-        settings.paths.lab_dir
-        / "candidates"
-        / "rotation_research_lead_v1.json"
-    )
+    dna = tuple(PortfolioStormDNA(**values) for values in plan["strategy_dna"])
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
     frozen_sha_before = sha256_file(frozen_path)
     _, _, _, source_paths, frames = _frozen_rotation_inputs(settings)
     breakout_path = _breakout_portfolio_campaign_path(settings)
     prior_known_trials = (
-        int(prior_known_trials_override)
-        if prior_known_trials_override is not None
-        else 1_312
+        int(prior_known_trials_override) if prior_known_trials_override is not None else 1_312
     )
     if prior_known_trials_override is None and breakout_path.is_file():
         prior_known_trials = int(
@@ -3506,22 +3884,15 @@ def _run_portfolio_storm_campaign(
         {
             "plan_path": str(plan_path),
             "plan_sha256": sha256_file(plan_path),
-            "source_candidate_identity": plan[
-                "source_candidate_identity"
-            ],
+            "source_candidate_identity": plan["source_candidate_identity"],
             "epoch_id": epoch_id,
             "returns_matrix_path": str(matrix_path),
             "returns_matrix_sha256": sha256_file(matrix_path),
             "returns_matrix_shape": list(matrix.shape),
-            "data_hashes": {
-                market: sha256_file(path)
-                for market, path in source_paths.items()
-            },
+            "data_hashes": {market: sha256_file(path) for market, path in source_paths.items()},
             "frozen_candidate_sha256_before": frozen_sha_before,
             "frozen_candidate_sha256_after": sha256_file(frozen_path),
-            "frozen_candidate_unchanged": (
-                frozen_sha_before == sha256_file(frozen_path)
-            ),
+            "frozen_candidate_unchanged": (frozen_sha_before == sha256_file(frozen_path)),
         }
     )
     atomic_write_json(report_path, _json_ready(report))
@@ -3532,15 +3903,9 @@ def _run_portfolio_storm_campaign(
         "trial_count": report["trial_count"],
         "total_known_trials": report["total_known_trials"],
         "pareto_survivor_count": report["pareto_survivor_count"],
-        "pbo": report["multiple_testing"][
-            "probability_of_backtest_overfitting"
-        ],
-        "white_spa_status": report["multiple_testing"][
-            "white_spa_status"
-        ],
-        "frozen_candidate_unchanged": report[
-            "frozen_candidate_unchanged"
-        ],
+        "pbo": report["multiple_testing"]["probability_of_backtest_overfitting"],
+        "white_spa_status": report["multiple_testing"]["white_spa_status"],
+        "frozen_candidate_unchanged": report["frozen_candidate_unchanged"],
         "plan": str(plan_path),
         "report": str(report_path),
         "returns_matrix": str(matrix_path),
@@ -3578,10 +3943,7 @@ def _run_autopilot_storm_epoch(
     )
     epochs = list(index.get("epochs") or [])
     _, _, _, source_paths, _ = _frozen_rotation_inputs(settings)
-    current_data_hashes = {
-        market: sha256_file(path)
-        for market, path in source_paths.items()
-    }
+    current_data_hashes = {market: sha256_file(path) for market, path in source_paths.items()}
     canonical_report_path = _portfolio_storm_paths(settings)[1]
     if not epochs and canonical_report_path.is_file():
         canonical = read_json(canonical_report_path)
@@ -3592,25 +3954,17 @@ def _run_autopilot_storm_epoch(
                 "source": "CANONICAL_PORTFOLIO_STORM_V1",
                 "engine_version": STORM_ENGINE_VERSION,
                 "new_trial_count": 0,
-                "total_known_trials": int(
-                    canonical["total_known_trials"]
-                ),
+                "total_known_trials": int(canonical["total_known_trials"]),
                 "report": str(canonical_report_path),
                 "completed_at": utc_now(),
             }
             epochs.append(canonical_epoch)
             index["epochs"] = epochs
             index["last_epoch_id"] = canonical_epoch["epoch_id"]
-            index["total_known_trials"] = canonical_epoch[
-                "total_known_trials"
-            ]
+            index["total_known_trials"] = canonical_epoch["total_known_trials"]
             atomic_write_json(index_path, _json_ready(index))
     existing = next(
-        (
-            row
-            for row in epochs
-            if row.get("data_fingerprint") == data_fingerprint
-        ),
+        (row for row in epochs if row.get("data_fingerprint") == data_fingerprint),
         None,
     )
     if existing is not None:
@@ -3632,10 +3986,7 @@ def _run_autopilot_storm_epoch(
         },
         length=20,
     )
-    prior_known_trials = max(
-        [int(row.get("total_known_trials") or 0) for row in epochs]
-        or [1_312]
-    )
+    prior_known_trials = max([int(row.get("total_known_trials") or 0) for row in epochs] or [1_312])
     epoch_directory = root / epoch_id
     result = _run_portfolio_storm_campaign(
         settings,
@@ -3652,9 +4003,7 @@ def _run_autopilot_storm_epoch(
         "new_trial_count": STORM_TRIAL_COUNT,
         "prior_known_trials": prior_known_trials,
         "total_known_trials": int(result["total_known_trials"]),
-        "pareto_survivor_count": int(
-            result["pareto_survivor_count"]
-        ),
+        "pareto_survivor_count": int(result["pareto_survivor_count"]),
         "pbo": result["pbo"],
         "white_spa_status": result["white_spa_status"],
         "report": result["report"],
@@ -3676,13 +4025,127 @@ def _run_autopilot_storm_epoch(
     }
 
 
+def _run_autopilot_signal_storm_epoch(
+    settings: Settings,
+    *,
+    data_fingerprint: str,
+) -> dict[str, Any]:
+    """Run or reuse one immutable signal-storm data epoch."""
+
+    from research.signal_synthesis_storm import (
+        SIGNAL_STORM_ENGINE_VERSION,
+        SIGNAL_STORM_TRIAL_COUNT,
+    )
+
+    root = settings.paths.lab_dir / "signal_storm_epochs"
+    index_path = root / "index.json"
+    index = (
+        read_json(index_path)
+        if index_path.is_file()
+        else {
+            "schema_version": "signal_storm_epoch_index_v1",
+            "campaign": "SIGNAL_SYNTHESIS_STORM_V1",
+            "epochs": [],
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+    )
+    epochs = list(index.get("epochs") or [])
+    current_data_hashes = {
+        timeframe: {market: sha256_file(path) for market, path in by_market.items()}
+        for timeframe, by_market in (_signal_synthesis_data_paths(settings).items())
+    }
+    canonical_report_path = _signal_synthesis_storm_paths(settings)[1]
+    if not epochs and canonical_report_path.is_file():
+        canonical = read_json(canonical_report_path)
+        if canonical.get("data_hashes") == current_data_hashes:
+            canonical_epoch = {
+                "epoch_id": "CANONICAL_INITIAL_SIGNAL_STORM",
+                "data_fingerprint": data_fingerprint,
+                "source": "CANONICAL_SIGNAL_SYNTHESIS_STORM_V1",
+                "engine_version": SIGNAL_STORM_ENGINE_VERSION,
+                "new_trial_count": 0,
+                "total_known_trials": int(canonical["total_known_trials"]),
+                "report": str(canonical_report_path),
+                "completed_at": utc_now(),
+            }
+            epochs.append(canonical_epoch)
+            index["epochs"] = epochs
+            index["last_epoch_id"] = canonical_epoch["epoch_id"]
+            index["total_known_trials"] = canonical_epoch["total_known_trials"]
+            atomic_write_json(index_path, _json_ready(index))
+    existing = next(
+        (row for row in epochs if row.get("data_fingerprint") == data_fingerprint),
+        None,
+    )
+    if existing is not None:
+        return {
+            "status": "REUSED_EXISTING_SIGNAL_STORM_EPOCH",
+            **existing,
+            "index": str(index_path),
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+    epoch_id = stable_hash(
+        {
+            "campaign": "SIGNAL_SYNTHESIS_STORM_V1",
+            "engine_version": SIGNAL_STORM_ENGINE_VERSION,
+            "data_fingerprint": data_fingerprint,
+            "data_hashes": current_data_hashes,
+        },
+        length=20,
+    )
+    prior_known_trials = max(
+        [int(row.get("total_known_trials") or 0) for row in epochs] or [16_312]
+    )
+    epoch_directory = root / epoch_id
+    result = _run_signal_synthesis_storm_campaign(
+        settings,
+        maximum_trials=SIGNAL_STORM_TRIAL_COUNT,
+        artifact_directory=epoch_directory,
+        prior_known_trials_override=prior_known_trials,
+        epoch_id=epoch_id,
+    )
+    epoch = {
+        "epoch_id": epoch_id,
+        "data_fingerprint": data_fingerprint,
+        "source": "AUTOPILOT_NEW_DATA_EPOCH",
+        "engine_version": SIGNAL_STORM_ENGINE_VERSION,
+        "new_trial_count": SIGNAL_STORM_TRIAL_COUNT,
+        "prior_known_trials": prior_known_trials,
+        "total_known_trials": int(result["total_known_trials"]),
+        "pareto_survivor_count": int(result["pareto_survivor_count"]),
+        "pbo": result["pbo"],
+        "white_reality_check_pvalue": result["white_reality_check_pvalue"],
+        "hansen_spa_pvalue": result["hansen_spa_pvalue"],
+        "report": result["report"],
+        "returns_matrix": result["returns_matrix"],
+        "completed_at": utc_now(),
+    }
+    epochs.append(epoch)
+    index["epochs"] = epochs
+    index["last_epoch_id"] = epoch_id
+    index["total_known_trials"] = epoch["total_known_trials"]
+    atomic_write_json(index_path, _json_ready(index))
+    return {
+        "status": "COMPLETED_NEW_SIGNAL_STORM_EPOCH",
+        **epoch,
+        "index": str(index_path),
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
 def _autopilot_data_stage(
     settings: Settings,
     *,
     refresh: bool,
     refresh_timeout_seconds: float,
 ) -> dict[str, Any]:
-    """Audit local research data and optionally refresh the strict 1d universe."""
+    """Audit or refresh the strict 1h/4h/1d research universe."""
 
     from core.autopilot import AutopilotOrchestrator
 
@@ -3701,7 +4164,7 @@ def _autopilot_data_stage(
             "4",
             "--allowed-universe",
             "--timeframes",
-            "1d",
+            "1h,4h,1d",
             "--minimum-rows",
             "2000",
             "--force",
@@ -3722,22 +4185,20 @@ def _autopilot_data_stage(
             "stderr_tail": completed.stderr[-4_000:],
         }
         if completed.returncode != 0:
-            raise RuntimeError(
-                f"AUTOPILOT_DATA_REFRESH_FAILED:{completed.returncode}"
-            )
+            raise RuntimeError(f"AUTOPILOT_DATA_REFRESH_FAILED:{completed.returncode}")
 
     strict_markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
     normalized = settings.paths.data_dir / "normalized"
+    signal_timeframes = ("1h", "4h", "1d")
     required = [
-        normalized / f"{market}_1d.parquet"
+        normalized / f"{market}_{timeframe}.parquet"
         for market in strict_markets
+        for timeframe in signal_timeframes
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
-        raise FileNotFoundError(
-            f"AUTOPILOT_STRICT_DAILY_DATA_MISSING:{missing}"
-        )
-    data_files = sorted(
+        raise FileNotFoundError(f"AUTOPILOT_STRICT_SIGNAL_DATA_MISSING:{missing}")
+    daily_files = sorted(
         {
             path
             for market in strict_markets
@@ -3745,6 +4206,16 @@ def _autopilot_data_stage(
             if path.is_file()
         }
     )
+    signal_files = sorted(
+        {
+            path
+            for market in strict_markets
+            for timeframe in signal_timeframes
+            for path in normalized.glob(f"{market}_{timeframe}.parquet*")
+            if path.is_file()
+        }
+    )
+    data_files = signal_files
     latest_modified = max(
         (path.stat().st_mtime for path in data_files),
         default=0.0,
@@ -3752,16 +4223,14 @@ def _autopilot_data_stage(
     return {
         "status": "DATA_REFRESHED" if refresh else "DATA_AUDITED",
         "strict_markets": list(strict_markets),
-        "timeframes": ["1d"],
+        "timeframes": list(signal_timeframes),
         "file_count": len(data_files),
         "latest_modified_utc": (
-            datetime.fromtimestamp(latest_modified, tz=UTC).isoformat()
-            if latest_modified
-            else None
+            datetime.fromtimestamp(latest_modified, tz=UTC).isoformat() if latest_modified else None
         ),
-        "data_fingerprint": AutopilotOrchestrator.fingerprint_files(
-            data_files
-        ),
+        "data_fingerprint": AutopilotOrchestrator.fingerprint_files(data_files),
+        "daily_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(daily_files)),
+        "signal_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(signal_files)),
         "refresh": refresh_result,
         "orders_generated": 0,
         "paper_candidate_permitted": False,
@@ -3787,17 +4256,13 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
 
     report_path = _breakout_portfolio_campaign_path(settings)
     if not report_path.is_file():
-        raise FileNotFoundError(
-            "portfolio-breakout-v1 report is required before autopilot"
-        )
+        raise FileNotFoundError("portfolio-breakout-v1 report is required before autopilot")
     report = read_json(report_path)
     assert_orderless_research_payload(report)
     manifests = dict(report.get("observer_manifests") or {})
     if not manifests:
         raise RuntimeError("AUTOPILOT_OBSERVER_MANIFESTS_MISSING")
-    frozen, _, markets, source_paths, frames = _frozen_rotation_inputs(
-        settings
-    )
+    frozen, _, markets, source_paths, frames = _frozen_rotation_inputs(settings)
     policy = _strict_rotation_portfolio_policy(
         settings,
         markets=markets,
@@ -3827,18 +4292,12 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         observer = read_json(path)
         assert_orderless_research_payload(observer)
         if observer.get("status") != "FROZEN_FORWARD_RESEARCH":
-            raise RuntimeError(
-                f"AUTOPILOT_OBSERVER_NOT_FROZEN:{policy_name}"
-            )
+            raise RuntimeError(f"AUTOPILOT_OBSERVER_NOT_FROZEN:{policy_name}")
         if bool(observer.get("candidate_promotion_implied", False)):
-            raise RuntimeError(
-                f"AUTOPILOT_OBSERVER_PROMOTION_IMPLIED:{policy_name}"
-            )
+            raise RuntimeError(f"AUTOPILOT_OBSERVER_PROMOTION_IMPLIED:{policy_name}")
         parameters = parameters_by_name.get(str(policy_name))
         if parameters is None:
-            raise RuntimeError(
-                f"AUTOPILOT_UNKNOWN_BREAKOUT_POLICY:{policy_name}"
-            )
+            raise RuntimeError(f"AUTOPILOT_UNKNOWN_BREAKOUT_POLICY:{policy_name}")
         result = backtest_breakout_portfolio(
             frames,
             parameters,
@@ -3851,36 +4310,16 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             result,
             frames,
             forward_start=forward_start,
-            minimum_observations=int(
-                observer[
-                    "minimum_forward_closed_daily_observations"
-                ]
-            ),
-            minimum_rebalances=int(
-                observer["minimum_forward_rebalances"]
-            ),
+            minimum_observations=int(observer["minimum_forward_closed_daily_observations"]),
+            minimum_rebalances=int(observer["minimum_forward_rebalances"]),
             performance_policy=ForwardPerformanceGatePolicy(
-                minimum_profit_factor=(
-                    settings.research.minimum_profit_factor
-                ),
-                minimum_stressed_profit_factor=(
-                    settings.research.minimum_stressed_profit_factor
-                ),
-                maximum_drawdown=(
-                    settings.research.maximum_drawdown
-                ),
-                minimum_effective_sample_size=(
-                    settings.research.minimum_effective_sample_size
-                ),
-                stressed_cost_multiplier=(
-                    settings.costs.stressed_cost_multiplier
-                ),
-                bootstrap_samples=(
-                    settings.research.multiple_testing_bootstrap_samples
-                ),
-                bootstrap_block_size=(
-                    settings.research.multiple_testing_block_size
-                ),
+                minimum_profit_factor=(settings.research.minimum_profit_factor),
+                minimum_stressed_profit_factor=(settings.research.minimum_stressed_profit_factor),
+                maximum_drawdown=(settings.research.maximum_drawdown),
+                minimum_effective_sample_size=(settings.research.minimum_effective_sample_size),
+                stressed_cost_multiplier=(settings.costs.stressed_cost_multiplier),
+                bootstrap_samples=(settings.research.multiple_testing_bootstrap_samples),
+                bootstrap_block_size=(settings.research.multiple_testing_block_size),
                 bootstrap_seed=settings.app.random_seed,
             ),
         )
@@ -3890,46 +4329,32 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             evidence,
             source_candidate_identity=frozen["immutable_identity"],
             strategy_dna_hash=parameters.dna_hash,
-            execution_identity=current_snapshot[
-                "execution_identity"
-            ],
+            execution_identity=current_snapshot["execution_identity"],
             forward_start=forward_start,
         )
         observer["data_hashes"] = {
-            market: sha256_file(source_path)
-            for market, source_path in source_paths.items()
+            market: sha256_file(source_path) for market, source_path in source_paths.items()
         }
         atomic_write_json(path, _json_ready(observer))
         assert_orderless_research_payload(observer)
-        identities[str(policy_name)] = str(
-            observer.get("strategy_dna_hash") or ""
-        )
+        identities[str(policy_name)] = str(observer.get("strategy_dna_hash") or "")
         summaries[str(policy_name)] = observer["forward_summary"]
         if observer.get("degradation_observation") is not None:
-            degradation_observations[str(policy_name)] = observer[
-                "degradation_observation"
-            ]
+            degradation_observations[str(policy_name)] = observer["degradation_observation"]
     total_forward_observations = sum(
-        int(summary["closed_daily_observations"])
-        for summary in summaries.values()
+        int(summary["closed_daily_observations"]) for summary in summaries.values()
     )
     all_sample_requirements_met = bool(summaries) and all(
-        all(bool(value) for value in summary["checks"].values())
-        for summary in summaries.values()
+        all(bool(value) for value in summary["checks"].values()) for summary in summaries.values()
     )
     all_forward_performance_pass = bool(summaries) and all(
-        bool(summary.get("forward_performance_pass", False))
-        for summary in summaries.values()
+        bool(summary.get("forward_performance_pass", False)) for summary in summaries.values()
     )
     capital_result = _run_capital_utilization_campaign(settings)
     assert_orderless_research_payload(capital_result)
-    capital_report = read_json(
-        _capital_utilization_campaign_path(settings)
-    )
+    capital_report = read_json(_capital_utilization_campaign_path(settings))
     assert_orderless_research_payload(capital_report)
-    capital_forward_summaries = dict(
-        capital_report.get("forward_summaries") or {}
-    )
+    capital_forward_summaries = dict(capital_report.get("forward_summaries") or {})
     capital_forward_observations = sum(
         int(summary.get("closed_daily_observations") or 0)
         for summary in capital_forward_summaries.values()
@@ -3937,47 +4362,34 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
-        "forward_observer_schema_version": (
-            FORWARD_OBSERVER_SCHEMA_VERSION
-        ),
+        "forward_observer_schema_version": (FORWARD_OBSERVER_SCHEMA_VERSION),
         "observer_count": len(manifests),
         "observer_dna_hashes": identities,
         "forward_summaries": summaries,
         "degradation_observations": degradation_observations,
         "total_forward_observations": total_forward_observations,
         "all_sample_requirements_met": all_sample_requirements_met,
-        "all_forward_performance_pass": (
-            all_forward_performance_pass
-        ),
+        "all_forward_performance_pass": (all_forward_performance_pass),
         "parallel_capital_utilization_observers": {
             "campaign": "CAPITAL_UTILIZATION_V1",
             "observer_count": len(capital_forward_summaries),
             "forward_summaries": capital_forward_summaries,
-            "total_forward_observations": (
-                capital_forward_observations
-            ),
+            "total_forward_observations": (capital_forward_observations),
             "paper_candidate_permitted": False,
             "live_ready": False,
         },
         "total_forward_observations_all_campaigns": (
-            total_forward_observations
-            + capital_forward_observations
+            total_forward_observations + capital_forward_observations
         ),
-        "source_candidate_identity": report.get(
-            "source_candidate_identity"
-        ),
-        "frozen_candidate_unchanged": bool(
-            report.get("frozen_candidate_unchanged")
-        ),
+        "source_candidate_identity": report.get("source_candidate_identity"),
+        "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
         "orders_generated": 0,
         "orders_submitted": 0,
         "paper_candidate_permitted": False,
         "live_ready": False,
     }
     forward_report = (
-        settings.paths.lab_dir
-        / "reports"
-        / "portfolio_breakout_forward_observer_v1.json"
+        settings.paths.lab_dir / "reports" / "portfolio_breakout_forward_observer_v1.json"
     )
     atomic_write_json(forward_report, _json_ready(aggregate))
     return {**aggregate, "report": str(forward_report)}
@@ -3993,14 +4405,11 @@ def _autopilot_feature_store_stage(settings: Settings) -> dict[str, Any]:
 
     normalized = settings.paths.data_dir / "normalized"
     source_paths = {
-        market: normalized / f"{market}_1d.parquet"
-        for market in STRICT_PORTFOLIO_MARKETS
+        market: normalized / f"{market}_1d.parquet" for market in STRICT_PORTFOLIO_MARKETS
     }
     return build_and_persist_feature_store(
         source_paths,
-        settings.paths.lab_dir
-        / "feature_store"
-        / "portfolio_daily_v1",
+        settings.paths.lab_dir / "feature_store" / "portfolio_daily_v1",
     )
 
 
@@ -4047,9 +4456,13 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         refresh=False,
         refresh_timeout_seconds=1.0,
     )
-    storm_epoch = _run_autopilot_storm_epoch(
+    portfolio_storm_epoch = _run_autopilot_storm_epoch(
         settings,
-        data_fingerprint=str(data_audit["data_fingerprint"]),
+        data_fingerprint=str(data_audit["daily_data_fingerprint"]),
+    )
+    signal_storm_epoch = _run_autopilot_signal_storm_epoch(
+        settings,
+        data_fingerprint=str(data_audit["signal_data_fingerprint"]),
     )
     total_trials = int(result["total_known_trials"])
     parameters_tested = int(result["parameters_tested"])
@@ -4064,19 +4477,13 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             )
         ),
         "total_known_trials": total_trials,
-        "economic_research_lead_count": result[
-            "economic_research_lead_count"
-        ],
-        "statistically_qualified_count": result[
-            "statistically_qualified_count"
-        ],
-        "frozen_candidate_unchanged": result[
-            "frozen_candidate_unchanged"
-        ],
-        "portfolio_storm_epoch": storm_epoch,
-        "portfolio_storm_total_known_trials": int(
-            storm_epoch["total_known_trials"]
-        ),
+        "economic_research_lead_count": result["economic_research_lead_count"],
+        "statistically_qualified_count": result["statistically_qualified_count"],
+        "frozen_candidate_unchanged": result["frozen_candidate_unchanged"],
+        "portfolio_storm_epoch": portfolio_storm_epoch,
+        "portfolio_storm_total_known_trials": int(portfolio_storm_epoch["total_known_trials"]),
+        "signal_synthesis_storm_epoch": signal_storm_epoch,
+        "signal_synthesis_total_known_trials": int(signal_storm_epoch["total_known_trials"]),
         "paper_candidates": result["paper_candidates"],
         "live_orders": result["live_orders"],
         "paper_candidate_permitted": False,
@@ -4115,9 +4522,7 @@ def _autopilot_task_xml(settings: Settings) -> str:
         microsecond=0,
     )
     start_boundary = start.isoformat(timespec="seconds")
-    arguments = (
-        f'"{main}" lab campaign autopilot --run-research --refresh-data'
-    )
+    arguments = f'"{main}" lab campaign autopilot --run-research --refresh-data'
     return (
         '<?xml version="1.0" encoding="UTF-16"?>'
         '<Task version="1.4" '
@@ -4188,9 +4593,7 @@ def _autopilot_task_command(
         ]
         if dry_run or not confirmed:
             return (0 if dry_run else 2), {
-                "status": (
-                    "DRY_RUN" if dry_run else "CONFIRMATION_REQUIRED"
-                ),
+                "status": ("DRY_RUN" if dry_run else "CONFIRMATION_REQUIRED"),
                 "task_name": task_name,
                 "command": command,
                 "xml": xml,
@@ -4222,9 +4625,7 @@ def _autopilot_task_command(
     return (
         0 if completed.returncode == 0 else 2,
         {
-            "status": (
-                "PASSED" if completed.returncode == 0 else "FAILED"
-            ),
+            "status": ("PASSED" if completed.returncode == 0 else "FAILED"),
             "task_name": task_name,
             "mode": mode,
             "return_code": completed.returncode,
@@ -4232,9 +4633,7 @@ def _autopilot_task_command(
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "schedule": (
-                "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE"
-                if mode == "task-install"
-                else None
+                "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE" if mode == "task-install" else None
             ),
             "orders_generated": 0,
             "paper_candidate_permitted": False,
@@ -4286,19 +4685,14 @@ def _run_rotation_campaign(
 
     markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
     paths = {
-        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
-        for market in markets
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet" for market in markets
     }
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing normalized 1d rotation datasets: {missing}")
     frames = {market: pd.read_parquet(path) for market, path in paths.items()}
     ensemble_mode = ensemble or institutional
-    grid_factory = (
-        ensemble_rotation_parameter_grid
-        if ensemble_mode
-        else rotation_parameter_grid
-    )
+    grid_factory = ensemble_rotation_parameter_grid if ensemble_mode else rotation_parameter_grid
     portfolio_policy: RotationPortfolioPolicy | None = None
     if institutional:
         portfolio_policy = _strict_rotation_portfolio_policy(
@@ -4424,12 +4818,9 @@ def _run_rotation_campaign(
         stressed = backtest_rotation(
             frames,
             result.parameters,
-            fee_rate=settings.costs.default_fee
-            * settings.costs.stressed_cost_multiplier,
-            slippage_bps=settings.costs.slippage_bps
-            * settings.costs.stressed_cost_multiplier,
-            spread_bps=settings.costs.spread_bps
-            * settings.costs.stressed_cost_multiplier,
+            fee_rate=settings.costs.default_fee * settings.costs.stressed_cost_multiplier,
+            slippage_bps=settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier,
+            spread_bps=settings.costs.spread_bps * settings.costs.stressed_cost_multiplier,
             portfolio_policy=portfolio_policy,
         )
         stressed_confirmation, _ = rotation_period_metrics(
@@ -4447,9 +4838,7 @@ def _run_rotation_campaign(
             settings.research.walk_forward_folds,
         )
         positive_folds = sum(
-            float(np.prod(1.0 + fold) - 1.0) > 0
-            for fold in fold_returns
-            if len(fold)
+            float(np.prod(1.0 + fold) - 1.0) > 0 for fold in fold_returns if len(fold)
         )
         ci_lower = _rotation_return_ci_lower(
             confirmation_returns,
@@ -4459,15 +4848,9 @@ def _run_rotation_campaign(
         )
         dsr = float(multiple.deflated_sharpe_probabilities.get(dna_hash, 0.0))
         checks = {
-            "development_positive": (
-                float(row["periods"]["development"]["net_return"]) > 0
-            ),
-            "validation_positive": (
-                float(row["periods"]["validation"]["net_return"]) > 0
-            ),
-            "confirmation_positive": (
-                float(row["periods"]["confirmation"]["net_return"]) > 0
-            ),
+            "development_positive": (float(row["periods"]["development"]["net_return"]) > 0),
+            "validation_positive": (float(row["periods"]["validation"]["net_return"]) > 0),
+            "confirmation_positive": (float(row["periods"]["confirmation"]["net_return"]) > 0),
             "normal_profit_factor": (
                 float(row["periods"]["validation"]["daily_profit_factor"])
                 >= settings.research.minimum_profit_factor
@@ -4478,27 +4861,21 @@ def _run_rotation_campaign(
                 >= settings.research.minimum_stressed_profit_factor
             ),
             "minimum_rebalances": (
-                int(result.metrics["rebalance_count"])
-                >= settings.research.minimum_trades
+                int(result.metrics["rebalance_count"]) >= settings.research.minimum_trades
             ),
             "minimum_effective_sample": (
                 int(row["periods"]["confirmation"]["effective_sample_size"])
                 >= settings.research.minimum_effective_sample_size
             ),
-            "positive_fold_gate": (
-                positive_folds >= settings.research.minimum_positive_folds
-            ),
+            "positive_fold_gate": (positive_folds >= settings.research.minimum_positive_folds),
             "confidence_interval_lower_positive": ci_lower > 0,
-            "deflated_sharpe_gate": (
-                dsr >= settings.research.minimum_deflated_sharpe_probability
-            ),
+            "deflated_sharpe_gate": (dsr >= settings.research.minimum_deflated_sharpe_probability),
             "white_reality_check_gate": (
                 multiple.white_reality_check_pvalue
                 <= settings.research.maximum_white_reality_check_pvalue
             ),
             "hansen_spa_gate": (
-                multiple.hansen_spa_pvalue
-                <= settings.research.maximum_hansen_spa_pvalue
+                multiple.hansen_spa_pvalue <= settings.research.maximum_hansen_spa_pvalue
             ),
             "pbo_gate": (
                 multiple.probability_of_backtest_overfitting is not None
@@ -4526,20 +4903,15 @@ def _run_rotation_campaign(
             "stressed_confirmation": stressed_confirmation,
             "all_numeric_gates_passed": all(checks.values()),
             "economic_gates_passed": all(
-                passed
-                for name, passed in checks.items()
-                if name not in statistical_checks
+                passed for name, passed in checks.items() if name not in statistical_checks
             ),
-            "statistical_gates_passed": all(
-                checks[name] for name in statistical_checks
-            ),
+            "statistical_gates_passed": all(checks[name] for name in statistical_checks),
             "paper_candidate_permitted": False,
             "holdout_status": "CONTAMINATED_BY_PRIOR_EXPLORATION",
         }
 
     positive_all_periods = sum(
-        all(float(row["periods"][period]["net_return"]) > 0 for period in periods)
-        for row in rows
+        all(float(row["periods"][period]["net_return"]) > 0 for period in periods) for row in rows
     )
     economic_research_leads = [
         row for row in survivors if row["robustness"]["economic_gates_passed"]
@@ -4581,9 +4953,7 @@ def _run_rotation_campaign(
         "top_development_rows": rows[:25],
         "paper_candidates": 0,
         "live_orders": 0,
-        "portfolio_policy": (
-            asdict(portfolio_policy) if portfolio_policy is not None else None
-        ),
+        "portfolio_policy": (asdict(portfolio_policy) if portfolio_policy is not None else None),
         "portfolio_policy_hash": (
             portfolio_policy.policy_hash if portfolio_policy is not None else None
         ),
@@ -4649,12 +5019,9 @@ def _run_rotation_campaign(
                             "strategy_dna_hash": lead["strategy_dna_hash"],
                             "parameters": lead["parameters"],
                             "data_hashes": {
-                                market: sha256_file(path)
-                                for market, path in paths.items()
+                                market: sha256_file(path) for market, path in paths.items()
                             },
-                            "portfolio_policy_hash": (
-                                lead_result.portfolio_policy.policy_hash
-                            ),
+                            "portfolio_policy_hash": (lead_result.portfolio_policy.policy_hash),
                         },
                         length=64,
                     ),
@@ -4727,8 +5094,7 @@ def _run_rotation_forward_validation(settings: Settings) -> dict[str, Any]:
 
     markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
     paths = {
-        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
-        for market in markets
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet" for market in markets
     }
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
@@ -4744,9 +5110,7 @@ def _run_rotation_forward_validation(settings: Settings) -> dict[str, Any]:
     closed_observations = int((btc_index >= forward_start).sum())
     minimum_observations = int(frozen["minimum_forward_closed_daily_observations"])
     minimum_rebalances = int(frozen["minimum_forward_rebalances"])
-    report_path = (
-        settings.paths.lab_dir / "reports" / "rotation_forward_validation_v1.json"
-    )
+    report_path = settings.paths.lab_dir / "reports" / "rotation_forward_validation_v1.json"
     base = {
         "candidate_identity": frozen["immutable_identity"],
         "strategy_dna_hash": frozen["strategy_dna_hash"],
@@ -4767,9 +5131,7 @@ def _run_rotation_forward_validation(settings: Settings) -> dict[str, Any]:
         "parameter_reselection_permitted": False,
         "paper_candidate_permitted": False,
         "live_ready": False,
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
     }
     if closed_observations < 30:
         payload = base | {
@@ -4824,8 +5186,7 @@ def _run_rotation_forward_validation(settings: Settings) -> dict[str, Any]:
         "minimum_rebalances": rebalances >= minimum_rebalances,
         "net_positive": float(normal_metrics["net_return"]) > 0,
         "profit_factor": (
-            float(normal_metrics["daily_profit_factor"])
-            >= settings.research.minimum_profit_factor
+            float(normal_metrics["daily_profit_factor"]) >= settings.research.minimum_profit_factor
         ),
         "stressed_net_positive": float(stressed_metrics["net_return"]) > 0,
         "stressed_profit_factor": (
@@ -4901,8 +5262,7 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
     all_paths: dict[str, Path] = {}
     for view, (markets, benchmark) in views.items():
         paths = {
-            market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
-            for market in markets
+            market: settings.paths.processed_data_dir / f"{market}_1d.parquet" for market in markets
         }
         missing = [str(path) for path in paths.values() if not path.is_file()]
         if missing:
@@ -4920,12 +5280,9 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
         stressed = backtest_rotation(
             frames,
             parameters,
-            fee_rate=settings.costs.default_fee
-            * settings.costs.stressed_cost_multiplier,
-            slippage_bps=settings.costs.slippage_bps
-            * settings.costs.stressed_cost_multiplier,
-            spread_bps=settings.costs.spread_bps
-            * settings.costs.stressed_cost_multiplier,
+            fee_rate=settings.costs.default_fee * settings.costs.stressed_cost_multiplier,
+            slippage_bps=settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier,
+            spread_bps=settings.costs.spread_bps * settings.costs.stressed_cost_multiplier,
             benchmark_market=benchmark,
         )
         normal_metrics, returns = rotation_period_metrics(
@@ -4969,8 +5326,7 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
         checks = {
             "net_positive": float(normal["net_return"]) > 0,
             "normal_profit_factor": (
-                float(normal["daily_profit_factor"])
-                >= settings.research.minimum_profit_factor
+                float(normal["daily_profit_factor"]) >= settings.research.minimum_profit_factor
             ),
             "stressed_net_positive": float(stressed["net_return"]) > 0,
             "stressed_profit_factor": (
@@ -4982,15 +5338,10 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
                 >= settings.research.minimum_effective_sample_size
             ),
             "maximum_drawdown": (
-                abs(float(normal["maximum_drawdown"]))
-                <= settings.research.maximum_drawdown
+                abs(float(normal["maximum_drawdown"])) <= settings.research.maximum_drawdown
             ),
-            "confidence_interval_lower_positive": (
-                float(result["mean_return_ci_lower_95"]) > 0
-            ),
-            "deflated_sharpe": (
-                dsr >= settings.research.minimum_deflated_sharpe_probability
-            ),
+            "confidence_interval_lower_positive": (float(result["mean_return_ci_lower_95"]) > 0),
+            "deflated_sharpe": (dsr >= settings.research.minimum_deflated_sharpe_probability),
         }
         result["deflated_sharpe_probability"] = dsr
         result["checks"] = checks
@@ -5017,10 +5368,7 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
             multiple.white_reality_check_pvalue
             <= settings.research.maximum_white_reality_check_pvalue
         ),
-        "hansen_spa": (
-            multiple.hansen_spa_pvalue
-            <= settings.research.maximum_hansen_spa_pvalue
-        ),
+        "hansen_spa": (multiple.hansen_spa_pvalue <= settings.research.maximum_hansen_spa_pvalue),
         "pbo": (
             multiple.probability_of_backtest_overfitting is not None
             and multiple.probability_of_backtest_overfitting
@@ -5050,22 +5398,15 @@ def _run_rotation_external_validation(settings: Settings) -> dict[str, Any]:
         "views": results,
         "multiple_testing": asdict(multiple),
         "global_checks": global_checks,
-        "known_family_trials_before_external_validation": frozen[
-            "known_family_trials_accounted"
-        ],
+        "known_family_trials_before_external_validation": frozen["known_family_trials_accounted"],
         "total_known_trials_after_external_validation": (
             int(frozen["known_family_trials_accounted"]) + len(views)
         ),
-        "data_hashes": {
-            market: sha256_file(path)
-            for market, path in sorted(all_paths.items())
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in sorted(all_paths.items())},
         "paper_candidate_permitted": False,
         "live_ready": False,
     }
-    report_path = (
-        settings.paths.lab_dir / "reports" / "rotation_external_holdouts_v1.json"
-    )
+    report_path = settings.paths.lab_dir / "reports" / "rotation_external_holdouts_v1.json"
     atomic_write_json(report_path, _json_ready(payload))
     return {
         "status": payload["status"],
@@ -5122,8 +5463,7 @@ def _frozen_rotation_inputs(
         raise ValueError("frozen rotation DNA does not match its parameters")
     markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
     paths = {
-        market: settings.paths.processed_data_dir / f"{market}_1d.parquet"
-        for market in markets
+        market: settings.paths.processed_data_dir / f"{market}_1d.parquet" for market in markets
     }
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
@@ -5159,10 +5499,8 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         frames,
         parameters,
         fee_rate=settings.costs.default_fee * settings.costs.stressed_cost_multiplier,
-        slippage_bps=settings.costs.slippage_bps
-        * settings.costs.stressed_cost_multiplier,
-        spread_bps=settings.costs.spread_bps
-        * settings.costs.stressed_cost_multiplier,
+        slippage_bps=settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier,
+        spread_bps=settings.costs.spread_bps * settings.costs.stressed_cost_multiplier,
         portfolio_policy=policy,
     )
     periods = dict(source_report["periods"])
@@ -5190,37 +5528,27 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
     checks = {
         "source_universe_allowed_only": tuple(source_report["markets"]) == markets,
         "all_periods_net_positive": all(
-            float(metrics["net_return"]) > 0
-            for metrics in period_results.values()
+            float(metrics["net_return"]) > 0 for metrics in period_results.values()
         ),
         "all_periods_stressed_net_positive": all(
-            float(metrics["net_return"]) > 0
-            for metrics in stressed_period_results.values()
+            float(metrics["net_return"]) > 0 for metrics in stressed_period_results.values()
         ),
         "full_sample_net_positive": float(normal.metrics["net_return"]) > 0,
-        "full_sample_stressed_net_positive": (
-            float(stressed.metrics["net_return"]) > 0
-        ),
+        "full_sample_stressed_net_positive": (float(stressed.metrics["net_return"]) > 0),
         "portfolio_period_ess": (
             int(normal.metrics["portfolio_period_effective_sample_size"])
             >= settings.research.minimum_effective_sample_size
         ),
-        "minimum_holding_episodes": (
-            int(normal.metrics["closed_position_episodes"]) >= 30
-        ),
+        "minimum_holding_episodes": (int(normal.metrics["closed_position_episodes"]) >= 30),
         "minimum_rebalance_opportunities": (
             int(normal.metrics["scheduled_rebalance_opportunities"])
             >= settings.research.minimum_trades
         ),
         "maximum_total_exposure": normal.integrity["maximum_exposure_respected"],
-        "maximum_position_exposure": normal.integrity[
-            "maximum_position_exposure_respected"
-        ],
+        "maximum_position_exposure": normal.integrity["maximum_position_exposure_respected"],
         "minimum_cash": normal.integrity["minimum_cash_respected"],
         "asset_pnl_reconciled": normal.integrity["asset_pnl_reconciled"],
-        "next_open_execution": normal.integrity[
-            "decision_at_close_execution_next_open"
-        ],
+        "next_open_execution": normal.integrity["decision_at_close_execution_next_open"],
         "terminal_liquidation": normal.integrity["terminal_liquidation_recorded"],
     }
     economic_pass = all(checks.values())
@@ -5249,9 +5577,7 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
             "hard_maximum_total_exposure": policy.maximum_total_exposure,
             "hard_maximum_position_exposure": policy.maximum_position_exposure,
             "hard_minimum_cash": policy.minimum_cash,
-            "maximum_observed_total_exposure": float(
-                normal.executed_weights.sum(axis=1).max()
-            ),
+            "maximum_observed_total_exposure": float(normal.executed_weights.sum(axis=1).max()),
             "maximum_observed_position_exposure": normal.metrics[
                 "maximum_position_exposure_observed"
             ],
@@ -5265,33 +5591,24 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         "asset_pnl_attribution": normal.metrics["asset_pnl_attribution"],
         "benchmarks_and_ablations": benchmarks,
         "historical_multiple_testing": source_report["multiple_testing"],
-        "historical_statistical_gates_passed": frozen["robustness"][
-            "statistical_gates_passed"
-        ],
+        "historical_statistical_gates_passed": frozen["robustness"]["statistical_gates_passed"],
         "statistical_recalculation_note": (
             "The original 160-strategy multiple-testing matrix already used only "
             "BTC-EUR, ETH-EUR, SOL-EUR and LINK-EUR. This fixed-policy reproduction "
             "does not create a new search family and cannot manufacture a new DSR."
         ),
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
         "paper_candidate_permitted": False,
         "live_ready": False,
         "live_orders": 0,
     }
-    report_path = (
-        settings.paths.lab_dir / "reports" / "rotation_institutional_audit_v2.json"
-    )
+    report_path = settings.paths.lab_dir / "reports" / "rotation_institutional_audit_v2.json"
     atomic_write_json(report_path, _json_ready(payload))
     benchmark_csv = report_path.with_suffix(".csv")
     pd.DataFrame(
         [
             {"name": "strict_rotation", **normal.metrics},
-            *[
-                {"name": name, **metrics}
-                for name, metrics in benchmarks["benchmarks"].items()
-            ],
+            *[{"name": name, **metrics} for name, metrics in benchmarks["benchmarks"].items()],
         ]
     ).to_csv(benchmark_csv, index=False)
     return {
@@ -5343,15 +5660,11 @@ def _run_rotation_forward_observer(settings: Settings) -> dict[str, Any]:
         forward_decisions,
         minimum_per_state=5,
     )
-    report_path = (
-        settings.paths.lab_dir / "reports" / "rotation_forward_observer_v2.json"
-    )
+    report_path = settings.paths.lab_dir / "reports" / "rotation_forward_observer_v2.json"
     existing_observations: list[dict[str, Any]] = []
     if report_path.is_file():
         existing_observations = list(read_json(report_path).get("observations") or [])
-    by_decision_at = {
-        str(item["decision_at"]): item for item in existing_observations
-    }
+    by_decision_at = {str(item["decision_at"]): item for item in existing_observations}
     if pd.Timestamp(snapshot["decision_at"]) >= forward_start:
         by_decision_at[snapshot["decision_at"]] = snapshot
     observations = [by_decision_at[key] for key in sorted(by_decision_at)]
@@ -5368,9 +5681,7 @@ def _run_rotation_forward_observer(settings: Settings) -> dict[str, Any]:
         "observations": observations,
         "forward_decision_count": len(forward_decisions),
         "regime_coverage": coverage,
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
         "orders_generated": 0,
         "orders_submitted": 0,
         "shadow_candidate": False,
@@ -5411,9 +5722,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         rotation_period_metrics,
     )
 
-    frozen_path = (
-        settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
-    )
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
     frozen_sha_before = sha256_file(frozen_path)
     frozen, parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
     policies = capital_utilization_policy_set()
@@ -5462,18 +5771,9 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         stressed = backtest_rotation(
             frames,
             parameters,
-            fee_rate=(
-                settings.costs.default_fee
-                * settings.costs.stressed_cost_multiplier
-            ),
-            slippage_bps=(
-                settings.costs.slippage_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
-            spread_bps=(
-                settings.costs.spread_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
+            fee_rate=(settings.costs.default_fee * settings.costs.stressed_cost_multiplier),
+            slippage_bps=(settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier),
+            spread_bps=(settings.costs.spread_bps * settings.costs.stressed_cost_multiplier),
             portfolio_policy=portfolio_policy,
             capital_utilization_policy=allocation,
         )
@@ -5491,16 +5791,13 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 end=bounds[1],
             )
         normal_results[allocation.name] = normal
-        daily_returns[allocation.name] = normal.equity_curve.pct_change(
-            fill_method=None
-        ).dropna()
+        daily_returns[allocation.name] = normal.equity_curve.pct_change(fill_method=None).dropna()
         current_operational_compatible = (
             allocation.maximum_total_exposure
             <= settings.operational.maximum_portfolio_exposure + 1e-12
             and allocation.maximum_position_exposure
             <= settings.operational.maximum_position_fraction + 1e-12
-            and allocation.minimum_cash
-            >= settings.operational.reserve_cash_fraction - 1e-12
+            and allocation.minimum_cash >= settings.operational.reserve_cash_fraction - 1e-12
         )
         snapshot = rotation_decision_snapshot(
             frames,
@@ -5520,9 +5817,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             "minimum_forward_rebalances": 30,
             "regime_coverage_required": True,
             "latest_historical_snapshot": snapshot,
-            "current_operational_limits_compatible": (
-                current_operational_compatible
-            ),
+            "current_operational_limits_compatible": (current_operational_compatible),
             "orders_generated": 0,
             "orders_submitted": 0,
             "paper_candidate_permitted": False,
@@ -5534,11 +5829,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             / "capital_utilization_v1"
             / f"{allocation.name.lower()}.json"
         )
-        existing_observer = (
-            read_json(observer_path)
-            if observer_path.is_file()
-            else {}
-        )
+        existing_observer = read_json(observer_path) if observer_path.is_file() else {}
         evidence = build_rotation_forward_evidence(
             normal,
             frames,
@@ -5546,25 +5837,13 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             minimum_observations=365,
             minimum_rebalances=30,
             performance_policy=ForwardPerformanceGatePolicy(
-                minimum_profit_factor=(
-                    settings.research.minimum_profit_factor
-                ),
-                minimum_stressed_profit_factor=(
-                    settings.research.minimum_stressed_profit_factor
-                ),
+                minimum_profit_factor=(settings.research.minimum_profit_factor),
+                minimum_stressed_profit_factor=(settings.research.minimum_stressed_profit_factor),
                 maximum_drawdown=settings.research.maximum_drawdown,
-                minimum_effective_sample_size=(
-                    settings.research.minimum_effective_sample_size
-                ),
-                stressed_cost_multiplier=(
-                    settings.costs.stressed_cost_multiplier
-                ),
-                bootstrap_samples=(
-                    settings.research.multiple_testing_bootstrap_samples
-                ),
-                bootstrap_block_size=(
-                    settings.research.multiple_testing_block_size
-                ),
+                minimum_effective_sample_size=(settings.research.minimum_effective_sample_size),
+                stressed_cost_multiplier=(settings.costs.stressed_cost_multiplier),
+                bootstrap_samples=(settings.research.multiple_testing_bootstrap_samples),
+                bootstrap_block_size=(settings.research.multiple_testing_block_size),
                 bootstrap_seed=settings.app.random_seed,
             ),
         )
@@ -5592,16 +5871,12 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 "same_frozen_signal_dna": (
                     normal.parameters.dna_hash == frozen["strategy_dna_hash"]
                 ),
-                "current_operational_limits_compatible": (
-                    current_operational_compatible
-                ),
+                "current_operational_limits_compatible": (current_operational_compatible),
                 "normal": normal.summary(),
                 "stressed": stressed.summary(),
                 "periods": period_metrics,
                 "stressed_periods": stressed_period_metrics,
-                "cash_reason_attribution": normal.metrics[
-                    "cash_reason_attribution_average"
-                ],
+                "cash_reason_attribution": normal.metrics["cash_reason_attribution_average"],
                 "forward_summary": observer_payload["forward_summary"],
                 "observer_manifest": str(observer_path),
             }
@@ -5630,60 +5905,45 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             seed=settings.app.random_seed + index,
         )
         incremental_exposure = float(
-            candidate.metrics["average_exposure"]
-            - control.metrics["average_exposure"]
+            candidate.metrics["average_exposure"] - control.metrics["average_exposure"]
         )
-        incremental_return = float(
-            candidate.metrics["net_return"] - control.metrics["net_return"]
-        )
+        incremental_return = float(candidate.metrics["net_return"] - control.metrics["net_return"])
         paired[allocation.name]["incremental_net_return"] = incremental_return
-        paired[allocation.name]["incremental_average_exposure"] = (
-            incremental_exposure
-        )
+        paired[allocation.name]["incremental_average_exposure"] = incremental_exposure
         paired[allocation.name]["incremental_return_per_incremental_exposure"] = (
-            incremental_return / incremental_exposure
-            if abs(incremental_exposure) > 1e-12
-            else 0.0
+            incremental_return / incremental_exposure if abs(incremental_exposure) > 1e-12 else 0.0
         )
         paired[allocation.name]["incremental_maximum_drawdown_depth"] = float(
-            abs(candidate.metrics["maximum_drawdown"])
-            - abs(control.metrics["maximum_drawdown"])
+            abs(candidate.metrics["maximum_drawdown"]) - abs(control.metrics["maximum_drawdown"])
         )
         paired[allocation.name]["incremental_daily_cvar_95_depth"] = float(
-            abs(candidate.metrics["daily_cvar_95"])
-            - abs(control.metrics["daily_cvar_95"])
+            abs(candidate.metrics["daily_cvar_95"]) - abs(control.metrics["daily_cvar_95"])
         )
 
     for row in rows:
         name = str(row["policy_name"])
         normal = normal_results[name]
-        dsr = float(
-            multiple.deflated_sharpe_probabilities.get(name, 0.0)
-        )
+        dsr = float(multiple.deflated_sharpe_probabilities.get(name, 0.0))
         economic_checks = {
             "all_periods_positive": all(
-                float(row["periods"][period]["net_return"]) > 0
-                for period in periods
+                float(row["periods"][period]["net_return"]) > 0 for period in periods
             ),
             "all_stressed_periods_positive": all(
-                float(row["stressed_periods"][period]["net_return"]) > 0
-                for period in periods
+                float(row["stressed_periods"][period]["net_return"]) > 0 for period in periods
             ),
             "minimum_effective_sample": (
                 int(normal.metrics["portfolio_period_effective_sample_size"])
                 >= settings.research.minimum_effective_sample_size
             ),
             "minimum_rebalances": (
-                int(normal.metrics["rebalance_count"])
-                >= settings.research.minimum_trades
+                int(normal.metrics["rebalance_count"]) >= settings.research.minimum_trades
             ),
             "profit_factor": (
                 float(normal.metrics["portfolio_period_profit_factor"])
                 >= settings.research.minimum_profit_factor
             ),
             "maximum_drawdown": (
-                abs(float(normal.metrics["maximum_drawdown"]))
-                <= settings.research.maximum_drawdown
+                abs(float(normal.metrics["maximum_drawdown"])) <= settings.research.maximum_drawdown
             ),
             "exposure_limits_respected": bool(
                 normal.integrity["maximum_exposure_respected"]
@@ -5695,16 +5955,13 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             "source_historical_statistical_gates": bool(
                 frozen["robustness"]["statistical_gates_passed"]
             ),
-            "deflated_sharpe": (
-                dsr >= settings.research.minimum_deflated_sharpe_probability
-            ),
+            "deflated_sharpe": (dsr >= settings.research.minimum_deflated_sharpe_probability),
             "white_reality_check": (
                 multiple.white_reality_check_pvalue
                 <= settings.research.maximum_white_reality_check_pvalue
             ),
             "hansen_spa": (
-                multiple.hansen_spa_pvalue
-                <= settings.research.maximum_hansen_spa_pvalue
+                multiple.hansen_spa_pvalue <= settings.research.maximum_hansen_spa_pvalue
             ),
             "pbo": (
                 multiple.probability_of_backtest_overfitting is not None
@@ -5744,9 +6001,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         "status": "COMPLETED_NOT_PROMOTED",
         "campaign": "CAPITAL_UTILIZATION_V1",
         "result_type": "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON",
-        "capital_utilization_metrics_version": (
-            CAPITAL_UTILIZATION_METRICS_VERSION
-        ),
+        "capital_utilization_metrics_version": (CAPITAL_UTILIZATION_METRICS_VERSION),
         "source_candidate_identity": frozen["immutable_identity"],
         "strategy_dna_hash": parameters.dna_hash,
         "signal_dna_frozen": True,
@@ -5763,15 +6018,10 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         "benchmarks": benchmarks,
         "policy_results": rows,
         "observer_manifests": observer_paths,
-        "forward_summaries": {
-            str(row["policy_name"]): row["forward_summary"]
-            for row in rows
-        },
+        "forward_summaries": {str(row["policy_name"]): row["forward_summary"] for row in rows},
         "frozen_candidate_sha256_before": frozen_sha_before,
         "frozen_candidate_sha256_after": sha256_file(frozen_path),
-        "frozen_candidate_unchanged": (
-            frozen_sha_before == sha256_file(frozen_path)
-        ),
+        "frozen_candidate_unchanged": (frozen_sha_before == sha256_file(frozen_path)),
         "selection_note": (
             "This campaign compares a pre-registered allocation layer only. "
             "It does not reselect momentum horizons, assets, ranks, filters, "
@@ -5785,9 +6035,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         "paper_candidates": 0,
         "live_orders": 0,
         "live_ready": False,
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
     }
     report_path = _capital_utilization_campaign_path(settings)
     atomic_write_json(report_path, _json_ready(payload))
@@ -5801,24 +6049,16 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 "sharpe": row["normal"]["metrics"]["sharpe"],
                 "sortino": row["normal"]["metrics"]["sortino"],
                 "omega": row["normal"]["metrics"]["omega"],
-                "maximum_drawdown": row["normal"]["metrics"][
-                    "maximum_drawdown"
-                ],
+                "maximum_drawdown": row["normal"]["metrics"]["maximum_drawdown"],
                 "daily_cvar_95": row["normal"]["metrics"]["daily_cvar_95"],
-                "average_exposure": row["normal"]["metrics"][
-                    "average_exposure"
-                ],
-                "average_cash": row["normal"]["metrics"][
-                    "cash_fraction_average"
-                ],
+                "average_exposure": row["normal"]["metrics"]["average_exposure"],
+                "average_cash": row["normal"]["metrics"]["cash_fraction_average"],
                 "return_per_average_exposure": row["normal"]["metrics"][
                     "return_per_average_exposure"
                 ],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
-                "operational_compatible": row[
-                    "current_operational_limits_compatible"
-                ],
+                "operational_compatible": row["current_operational_limits_compatible"],
                 "paper_candidate": False,
                 "live_ready": False,
             }
@@ -5857,13 +6097,9 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         rotation_period_metrics,
     )
 
-    frozen_path = (
-        settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
-    )
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
     frozen_sha_before = sha256_file(frozen_path)
-    frozen, frozen_parameters, markets, paths, frames = _frozen_rotation_inputs(
-        settings
-    )
+    frozen, frozen_parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
     diversified_path = _diversified_rotation_campaign_path(settings)
     if not diversified_path.is_file():
         raise FileNotFoundError(
@@ -5882,9 +6118,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         spread_bps=settings.costs.spread_bps,
         portfolio_policy=policy,
     )
-    control_returns = frozen_control.equity_curve.pct_change(
-        fill_method=None
-    ).dropna()
+    control_returns = frozen_control.equity_curve.pct_change(fill_method=None).dropna()
     results: dict[str, Any] = {}
     daily_returns: dict[str, pd.Series] = {}
     rows: list[dict[str, Any]] = []
@@ -5908,18 +6142,9 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         stressed = backtest_breakout_portfolio(
             frames,
             parameters,
-            fee_rate=(
-                settings.costs.default_fee
-                * settings.costs.stressed_cost_multiplier
-            ),
-            slippage_bps=(
-                settings.costs.slippage_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
-            spread_bps=(
-                settings.costs.spread_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
+            fee_rate=(settings.costs.default_fee * settings.costs.stressed_cost_multiplier),
+            slippage_bps=(settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier),
+            spread_bps=(settings.costs.spread_bps * settings.costs.stressed_cost_multiplier),
             portfolio_policy=policy,
         )
         period_metrics: dict[str, Any] = {}
@@ -5942,20 +6167,14 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         )
         results[policy_name] = normal
         returns = normal.equity_curve.pct_change(fill_method=None).dropna()
-        daily_returns[policy_name] = returns[
-            ~returns.index.duplicated(keep="last")
-        ]
+        daily_returns[policy_name] = returns[~returns.index.duplicated(keep="last")]
         observer_path = (
             settings.paths.lab_dir
             / "observers"
             / "portfolio_breakout_v1"
             / f"{policy_name.lower()}.json"
         )
-        existing_observer = (
-            read_json(observer_path)
-            if observer_path.is_file()
-            else {}
-        )
+        existing_observer = read_json(observer_path) if observer_path.is_file() else {}
         snapshot = breakout_observer_snapshot(normal)
         preserved_forward = _preserved_breakout_forward_fields(
             existing_observer,
@@ -5974,10 +6193,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
             "minimum_forward_closed_daily_observations": 365,
             "minimum_forward_rebalances": 30,
             "forward_observations": [],
-            "data_hashes": {
-                market: sha256_file(path)
-                for market, path in paths.items()
-            },
+            "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
             **preserved_forward,
             "paper_candidate_permitted": False,
             "live_ready": False,
@@ -5992,15 +6208,11 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
             seed=settings.app.random_seed + parameter_index,
         )
         fold_returns = np.array_split(
-            normal.equity_curve.pct_change(
-                fill_method=None
-            ).dropna().to_numpy(dtype=float),
+            normal.equity_curve.pct_change(fill_method=None).dropna().to_numpy(dtype=float),
             settings.research.walk_forward_folds,
         )
         positive_folds = sum(
-            float(np.prod(1.0 + fold) - 1.0) > 0
-            for fold in fold_returns
-            if len(fold)
+            float(np.prod(1.0 + fold) - 1.0) > 0 for fold in fold_returns if len(fold)
         )
         _, confirmation_returns = rotation_period_metrics(
             normal.equity_curve,
@@ -6055,41 +6267,29 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         name = str(row["policy_name"])
         result = results[name]
         economic_checks = {
-            "development_positive": (
-                float(row["periods"]["development"]["net_return"]) > 0
-            ),
-            "validation_positive": (
-                float(row["periods"]["validation"]["net_return"]) > 0
-            ),
-            "confirmation_positive": (
-                float(row["periods"]["confirmation"]["net_return"]) > 0
-            ),
+            "development_positive": (float(row["periods"]["development"]["net_return"]) > 0),
+            "validation_positive": (float(row["periods"]["validation"]["net_return"]) > 0),
+            "confirmation_positive": (float(row["periods"]["confirmation"]["net_return"]) > 0),
             "all_stressed_periods_positive": all(
-                float(row["stressed_periods"][period]["net_return"]) > 0
-                for period in periods
+                float(row["stressed_periods"][period]["net_return"]) > 0 for period in periods
             ),
             "minimum_effective_sample": (
                 int(result.metrics["portfolio_period_effective_sample_size"])
                 >= settings.research.minimum_effective_sample_size
             ),
             "minimum_rebalances": (
-                int(result.metrics["rebalance_count"])
-                >= settings.research.minimum_trades
+                int(result.metrics["rebalance_count"]) >= settings.research.minimum_trades
             ),
-            "minimum_closed_episodes": (
-                int(result.metrics["closed_position_episodes"]) >= 30
-            ),
+            "minimum_closed_episodes": (int(result.metrics["closed_position_episodes"]) >= 30),
             "profit_factor": (
                 float(result.metrics["portfolio_period_profit_factor"])
                 >= settings.research.minimum_profit_factor
             ),
             "maximum_drawdown": (
-                abs(float(result.metrics["maximum_drawdown"]))
-                <= settings.research.maximum_drawdown
+                abs(float(result.metrics["maximum_drawdown"])) <= settings.research.maximum_drawdown
             ),
             "positive_fold_gate": (
-                int(row["positive_folds"])
-                >= settings.research.minimum_positive_folds
+                int(row["positive_folds"]) >= settings.research.minimum_positive_folds
             ),
             "exposure_limits_respected": bool(
                 result.integrity["maximum_exposure_respected"]
@@ -6102,9 +6302,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
                 float(row["confirmation_mean_return_ci_lower_95"]) > 0.0
             ),
             "deflated_sharpe": (
-                float(
-                    multiple.deflated_sharpe_probabilities.get(name, 0.0)
-                )
+                float(multiple.deflated_sharpe_probabilities.get(name, 0.0))
                 >= settings.research.minimum_deflated_sharpe_probability
             ),
             "white_reality_check": (
@@ -6112,8 +6310,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
                 <= settings.research.maximum_white_reality_check_pvalue
             ),
             "hansen_spa": (
-                multiple.hansen_spa_pvalue
-                <= settings.research.maximum_hansen_spa_pvalue
+                multiple.hansen_spa_pvalue <= settings.research.maximum_hansen_spa_pvalue
             ),
             "pbo": (
                 multiple.probability_of_backtest_overfitting is not None
@@ -6154,8 +6351,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         spread_bps=settings.costs.spread_bps,
         allowed_markets=markets,
         exposure_matches={
-            name: float(result.metrics["average_exposure"])
-            for name, result in results.items()
+            name: float(result.metrics["average_exposure"]) for name, result in results.items()
         },
     )
     payload = {
@@ -6177,9 +6373,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         "return_path_audit": {
             "declared_trial_count": len(parameters_set),
             "unique_return_path_count": len(return_path_groups),
-            "structural_redundancy_detected": (
-                len(return_path_groups) < len(parameters_set)
-            ),
+            "structural_redundancy_detected": (len(return_path_groups) < len(parameters_set)),
             "groups": [
                 {
                     "return_path_hash": path_hash,
@@ -6201,16 +6395,12 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         "observer_manifests": observer_paths,
         "frozen_candidate_sha256_before": frozen_sha_before,
         "frozen_candidate_sha256_after": sha256_file(frozen_path),
-        "frozen_candidate_unchanged": (
-            frozen_sha_before == sha256_file(frozen_path)
-        ),
+        "frozen_candidate_unchanged": (frozen_sha_before == sha256_file(frozen_path)),
         "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
         "paper_candidates": 0,
         "live_orders": 0,
         "live_ready": False,
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
     }
     report_path = _breakout_portfolio_campaign_path(settings)
     atomic_write_json(report_path, _json_ready(payload))
@@ -6225,18 +6415,10 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
                 "cagr": row["normal"]["metrics"]["annualized_return"],
                 "sharpe": row["normal"]["metrics"]["sharpe"],
                 "sortino": row["normal"]["metrics"]["sortino"],
-                "maximum_drawdown": row["normal"]["metrics"][
-                    "maximum_drawdown"
-                ],
-                "average_exposure": row["normal"]["metrics"][
-                    "average_exposure"
-                ],
-                "profit_factor": row["normal"]["metrics"][
-                    "portfolio_period_profit_factor"
-                ],
-                "closed_episodes": row["normal"]["metrics"][
-                    "closed_position_episodes"
-                ],
+                "maximum_drawdown": row["normal"]["metrics"]["maximum_drawdown"],
+                "average_exposure": row["normal"]["metrics"]["average_exposure"],
+                "profit_factor": row["normal"]["metrics"]["portfolio_period_profit_factor"],
+                "closed_episodes": row["normal"]["metrics"]["closed_position_episodes"],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
                 "paper_candidate": False,
@@ -6278,13 +6460,9 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         rotation_period_metrics,
     )
 
-    frozen_path = (
-        settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
-    )
+    frozen_path = settings.paths.lab_dir / "candidates" / "rotation_research_lead_v1.json"
     frozen_sha_before = sha256_file(frozen_path)
-    frozen, frozen_parameters, markets, paths, frames = _frozen_rotation_inputs(
-        settings
-    )
+    frozen, frozen_parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
     policies = diversified_rotation_policy_set()
     capital_path = _capital_utilization_campaign_path(settings)
     if not capital_path.is_file():
@@ -6306,9 +6484,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         spread_bps=settings.costs.spread_bps,
         portfolio_policy=control_policy,
     )
-    control_returns = control.equity_curve.pct_change(
-        fill_method=None
-    ).dropna()
+    control_returns = control.equity_curve.pct_change(fill_method=None).dropna()
     results: dict[str, Any] = {}
     daily_returns: dict[str, pd.Series] = {}
     rows: list[dict[str, Any]] = []
@@ -6330,9 +6506,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         portfolio_policy = RotationPortfolioPolicy(
             allowed_markets=markets,
             maximum_total_exposure=diversification.maximum_total_exposure,
-            maximum_position_exposure=(
-                diversification.maximum_position_exposure
-            ),
+            maximum_position_exposure=(diversification.maximum_position_exposure),
             minimum_cash=diversification.minimum_cash,
             minimum_history_observations=90,
         )
@@ -6348,18 +6522,9 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         stressed = backtest_rotation(
             frames,
             parameters,
-            fee_rate=(
-                settings.costs.default_fee
-                * settings.costs.stressed_cost_multiplier
-            ),
-            slippage_bps=(
-                settings.costs.slippage_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
-            spread_bps=(
-                settings.costs.spread_bps
-                * settings.costs.stressed_cost_multiplier
-            ),
+            fee_rate=(settings.costs.default_fee * settings.costs.stressed_cost_multiplier),
+            slippage_bps=(settings.costs.slippage_bps * settings.costs.stressed_cost_multiplier),
+            spread_bps=(settings.costs.spread_bps * settings.costs.stressed_cost_multiplier),
             portfolio_policy=portfolio_policy,
             diversification_policy=diversification,
         )
@@ -6377,9 +6542,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 end=bounds[1],
             )
         results[diversification.name] = normal
-        policy_returns = normal.equity_curve.pct_change(
-            fill_method=None
-        ).dropna()
+        policy_returns = normal.equity_curve.pct_change(fill_method=None).dropna()
         daily_returns[diversification.name] = policy_returns[
             ~policy_returns.index.duplicated(keep="last")
         ]
@@ -6433,16 +6596,11 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 "strategy_dna_hash": parameters.dna_hash,
                 "parameters": asdict(parameters),
                 "signal_horizons_and_filters_preserved": (
-                    parameters.momentum_lookbacks
-                    == frozen_parameters.momentum_lookbacks
-                    and parameters.rebalance_days
-                    == frozen_parameters.rebalance_days
-                    and parameters.asset_ema_period
-                    == frozen_parameters.asset_ema_period
-                    and parameters.btc_ema_period
-                    == frozen_parameters.btc_ema_period
-                    and parameters.continuous_regime
-                    == frozen_parameters.continuous_regime
+                    parameters.momentum_lookbacks == frozen_parameters.momentum_lookbacks
+                    and parameters.rebalance_days == frozen_parameters.rebalance_days
+                    and parameters.asset_ema_period == frozen_parameters.asset_ema_period
+                    and parameters.btc_ema_period == frozen_parameters.btc_ema_period
+                    and parameters.continuous_regime == frozen_parameters.continuous_regime
                 ),
                 "normal": normal.summary(),
                 "stressed": stressed.summary(),
@@ -6467,32 +6625,26 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         paired = row["paired_block_bootstrap_vs_frozen_control"]
         economic_checks = {
             "all_periods_positive": all(
-                float(row["periods"][period]["net_return"]) > 0
-                for period in periods
+                float(row["periods"][period]["net_return"]) > 0 for period in periods
             ),
             "all_stressed_periods_positive": all(
-                float(row["stressed_periods"][period]["net_return"]) > 0
-                for period in periods
+                float(row["stressed_periods"][period]["net_return"]) > 0 for period in periods
             ),
             "minimum_effective_sample": (
                 int(result.metrics["portfolio_period_effective_sample_size"])
                 >= settings.research.minimum_effective_sample_size
             ),
             "minimum_rebalances": (
-                int(result.metrics["rebalance_count"])
-                >= settings.research.minimum_trades
+                int(result.metrics["rebalance_count"]) >= settings.research.minimum_trades
             ),
             "profit_factor": (
                 float(result.metrics["portfolio_period_profit_factor"])
                 >= settings.research.minimum_profit_factor
             ),
             "maximum_drawdown": (
-                abs(float(result.metrics["maximum_drawdown"]))
-                <= settings.research.maximum_drawdown
+                abs(float(result.metrics["maximum_drawdown"])) <= settings.research.maximum_drawdown
             ),
-            "paired_incremental_ci_positive": (
-                float(paired["ci_lower_95"]) > 0.0
-            ),
+            "paired_incremental_ci_positive": (float(paired["ci_lower_95"]) > 0.0),
             "exposure_limits_respected": bool(
                 result.integrity["maximum_exposure_respected"]
                 and result.integrity["maximum_position_exposure_respected"]
@@ -6504,9 +6656,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 frozen["robustness"]["statistical_gates_passed"]
             ),
             "deflated_sharpe": (
-                float(
-                    multiple.deflated_sharpe_probabilities.get(name, 0.0)
-                )
+                float(multiple.deflated_sharpe_probabilities.get(name, 0.0))
                 >= settings.research.minimum_deflated_sharpe_probability
             ),
             "white_reality_check": (
@@ -6514,8 +6664,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 <= settings.research.maximum_white_reality_check_pvalue
             ),
             "hansen_spa": (
-                multiple.hansen_spa_pvalue
-                <= settings.research.maximum_hansen_spa_pvalue
+                multiple.hansen_spa_pvalue <= settings.research.maximum_hansen_spa_pvalue
             ),
             "pbo": (
                 multiple.probability_of_backtest_overfitting is not None
@@ -6545,8 +6694,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         spread_bps=settings.costs.spread_bps,
         allowed_markets=markets,
         exposure_matches={
-            name: float(result.metrics["average_exposure"])
-            for name, result in results.items()
+            name: float(result.metrics["average_exposure"]) for name, result in results.items()
         },
     )
     rows.sort(
@@ -6583,16 +6731,12 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         "observer_manifests": observer_paths,
         "frozen_candidate_sha256_before": frozen_sha_before,
         "frozen_candidate_sha256_after": sha256_file(frozen_path),
-        "frozen_candidate_unchanged": (
-            frozen_sha_before == sha256_file(frozen_path)
-        ),
+        "frozen_candidate_unchanged": (frozen_sha_before == sha256_file(frozen_path)),
         "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
         "paper_candidates": 0,
         "live_orders": 0,
         "live_ready": False,
-        "data_hashes": {
-            market: sha256_file(path) for market, path in paths.items()
-        },
+        "data_hashes": {market: sha256_file(path) for market, path in paths.items()},
     }
     report_path = _diversified_rotation_campaign_path(settings)
     atomic_write_json(report_path, _json_ready(payload))
@@ -6603,23 +6747,15 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 "policy": row["policy_name"],
                 "top_n": row["parameters"]["top_n"],
                 "weighting": row["parameters"]["weighting"],
-                "target_volatility": row["diversification_policy"][
-                    "target_annualized_volatility"
-                ],
+                "target_volatility": row["diversification_policy"]["target_annualized_volatility"],
                 "net_return": row["normal"]["metrics"]["net_return"],
                 "cagr": row["normal"]["metrics"]["annualized_return"],
                 "sharpe": row["normal"]["metrics"]["sharpe"],
                 "sortino": row["normal"]["metrics"]["sortino"],
-                "maximum_drawdown": row["normal"]["metrics"][
-                    "maximum_drawdown"
-                ],
+                "maximum_drawdown": row["normal"]["metrics"]["maximum_drawdown"],
                 "daily_cvar_95": row["normal"]["metrics"]["daily_cvar_95"],
-                "average_exposure": row["normal"]["metrics"][
-                    "average_exposure"
-                ],
-                "average_cash": row["normal"]["metrics"][
-                    "cash_fraction_average"
-                ],
+                "average_exposure": row["normal"]["metrics"]["average_exposure"],
+                "average_cash": row["normal"]["metrics"]["cash_fraction_average"],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
                 "paper_candidate": False,
@@ -7039,9 +7175,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 interval_seconds=args.interval_seconds,
                 research_interval_seconds=args.research_interval_seconds,
                 degradation_z_threshold=args.degradation_z_threshold,
-                minimum_degradation_observations=(
-                    args.minimum_degradation_observations
-                ),
+                minimum_degradation_observations=(args.minimum_degradation_observations),
                 stale_lock_seconds=args.stale_lock_seconds,
             )
             orchestrator = AutopilotOrchestrator(
@@ -7056,9 +7190,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     emit(
                         {
                             "status": "CONFIRMATION_REQUIRED",
-                            "reason": (
-                                "PERSISTENT_KILL_SWITCH_RESET_REQUIRES_REVIEW"
-                            ),
+                            "reason": ("PERSISTENT_KILL_SWITCH_RESET_REQUIRES_REVIEW"),
                             "orders_generated": 0,
                             "paper_candidate_permitted": False,
                             "live_ready": False,
@@ -7073,46 +7205,30 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 )
                 return 0
 
-            degradation_observation = (
-                _autopilot_degradation_observation(
-                    args.degradation_input
-                )
-            )
+            degradation_observation = _autopilot_degradation_observation(args.degradation_input)
 
             def cycle() -> dict[str, Any]:
                 return orchestrator.run_once(
                     data_stage=lambda: _autopilot_data_stage(
                         settings,
                         refresh=args.refresh_data,
-                        refresh_timeout_seconds=(
-                            args.refresh_timeout_seconds
-                        ),
+                        refresh_timeout_seconds=(args.refresh_timeout_seconds),
                     ),
                     feature_store_stage=(
-                        (
-                            lambda: _autopilot_feature_store_stage(
-                                settings
-                            )
-                        )
+                        (lambda: _autopilot_feature_store_stage(settings))
                         if not args.skip_feature_store
                         else None
                     ),
                     research_stage=(
-                        (lambda: _autopilot_research_stage(settings))
-                        if args.run_research
-                        else None
+                        (lambda: _autopilot_research_stage(settings)) if args.run_research else None
                     ),
-                    observer_stage=lambda: _autopilot_observer_stage(
-                        settings
-                    ),
+                    observer_stage=lambda: _autopilot_observer_stage(settings),
                     degradation_observation=degradation_observation,
                     force_research=args.force_research,
                 )
 
             if args.mode == "continuous":
-                max_cycles = (
-                    None if args.max_cycles == 0 else args.max_cycles
-                )
+                max_cycles = None if args.max_cycles == 0 else args.max_cycles
                 results = await asyncio.to_thread(
                     orchestrator.run_loop,
                     cycle,
@@ -7129,11 +7245,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             else:
                 payload = await asyncio.to_thread(cycle)
             emit(payload)
-            return (
-                3
-                if payload.get("status") == "SYSTEM_DEGRADED"
-                else 0
-            )
+            return 3 if payload.get("status") == "SYSTEM_DEGRADED" else 0
         campaign_name = getattr(
             args,
             "name",
@@ -7146,21 +7258,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         diversified_rotation_campaign = campaign_name == "diversified-rotation-v1"
         breakout_portfolio_campaign = campaign_name == "portfolio-breakout-v1"
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
+        signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
             "cross-sectional-rotation",
             "cross-sectional-ensemble",
             "institutional-rotation-v2",
         }
         campaign_timeframes = (
-            ("1d",)
-            if (
-                rotation_campaign
-                or capital_utilization_campaign
-                or diversified_rotation_campaign
-                or breakout_portfolio_campaign
-                or portfolio_storm_campaign
+            ("1h", "4h", "1d")
+            if signal_synthesis_storm_campaign
+            else (
+                ("1d",)
+                if (
+                    rotation_campaign
+                    or capital_utilization_campaign
+                    or diversified_rotation_campaign
+                    or breakout_portfolio_campaign
+                    or portfolio_storm_campaign
+                )
+                else (("1h",) if formal_campaign else ("5m", "15m"))
             )
-            else (("1h",) if formal_campaign else ("5m", "15m"))
         )
         campaign_label = (
             (
@@ -7181,8 +7298,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             if portfolio_storm_campaign
                             else "PORTFOLIO_BREAKOUT_V1"
                         )
-                        if breakout_portfolio_campaign
-                        or portfolio_storm_campaign
+                        if breakout_portfolio_campaign or portfolio_storm_campaign
                         else "DIVERSIFIED_ROTATION_V1"
                     )
                     if (
@@ -7205,6 +7321,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 )
             )
         )
+        if signal_synthesis_storm_campaign:
+            campaign_label = "SIGNAL_SYNTHESIS_STORM_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -7256,9 +7374,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 )
                 return 0
             if not ensemble_campaign:
-                raise ValueError(
-                    "forward observer is available only for cross-sectional-ensemble"
-                )
+                raise ValueError("forward observer is available only for cross-sectional-ensemble")
             emit(await asyncio.to_thread(_run_rotation_forward_observer, settings))
             return 0
         if campaign_action == "package":
@@ -7276,6 +7392,47 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action in {"plan", "estimate"}:
+            if signal_synthesis_storm_campaign:
+                from research.signal_synthesis_storm import (
+                    SIGNAL_STORM_TRIAL_COUNT,
+                )
+
+                trial_count = min(
+                    args.storm_trials,
+                    SIGNAL_STORM_TRIAL_COUNT,
+                )
+                payload = _signal_synthesis_storm_plan_payload(
+                    settings,
+                    trial_count=trial_count,
+                )
+                plan_path, _, _ = _signal_synthesis_storm_paths(settings)
+                if campaign_action == "plan":
+                    if plan_path.is_file():
+                        existing = read_json(plan_path)
+                        if existing.get("search_space_hash") != payload.get("search_space_hash"):
+                            raise RuntimeError(
+                                "SIGNAL_SYNTHESIS_STORM_PLAN_ALREADY_EXISTS_DIFFERENT"
+                            )
+                    else:
+                        atomic_write_json(
+                            plan_path,
+                            _json_ready(payload),
+                        )
+                public_plan = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"strategy_dna", "strategy_dna_hashes"}
+                }
+                emit(
+                    {
+                        **public_plan,
+                        "status": (
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "plan_path": str(plan_path),
+                    }
+                )
+                return 0
             if portfolio_storm_campaign:
                 from research.portfolio_storm import STORM_TRIAL_COUNT
 
@@ -7292,12 +7449,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 if campaign_action == "plan":
                     if plan_path.is_file():
                         existing = read_json(plan_path)
-                        if existing.get("search_space_hash") != payload.get(
-                            "search_space_hash"
-                        ):
-                            raise RuntimeError(
-                                "PORTFOLIO_STORM_PLAN_ALREADY_EXISTS_DIFFERENT"
-                            )
+                        if existing.get("search_space_hash") != payload.get("search_space_hash"):
+                            raise RuntimeError("PORTFOLIO_STORM_PLAN_ALREADY_EXISTS_DIFFERENT")
                     else:
                         atomic_write_json(plan_path, _json_ready(payload))
                 public_plan = {
@@ -7309,9 +7462,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     {
                         **public_plan,
                         "status": (
-                            "CAMPAIGN_PLAN"
-                            if campaign_action == "plan"
-                            else "CAMPAIGN_ESTIMATE"
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
                         ),
                         "plan_path": str(plan_path),
                     }
@@ -7326,15 +7477,11 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "status": (
-                            "CAMPAIGN_PLAN"
-                            if campaign_action == "plan"
-                            else "CAMPAIGN_ESTIMATE"
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
                         ),
                         "campaign": campaign_label,
                         "result_type": "PRE_REGISTERED_ECONOMIC_ALPHA_FAMILY",
-                        "economic_hypothesis": (
-                            "MULTI_ASSET_TIME_SERIES_BREAKOUT"
-                        ),
+                        "economic_hypothesis": ("MULTI_ASSET_TIME_SERIES_BREAKOUT"),
                         "source_frozen_lead_mutated": False,
                         "parameters": [asdict(row) for row in parameters],
                         "parameter_trials": len(parameters),
@@ -7365,14 +7512,10 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "status": (
-                            "CAMPAIGN_PLAN"
-                            if campaign_action == "plan"
-                            else "CAMPAIGN_ESTIMATE"
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
                         ),
                         "campaign": campaign_label,
-                        "result_type": (
-                            "PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"
-                        ),
+                        "result_type": ("PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"),
                         "source_frozen_lead_mutated": False,
                         "policies": [asdict(policy) for policy in policies],
                         "diversification_policy_trials": len(policies),
@@ -7400,14 +7543,10 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "status": (
-                            "CAMPAIGN_PLAN"
-                            if campaign_action == "plan"
-                            else "CAMPAIGN_ESTIMATE"
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
                         ),
                         "campaign": campaign_label,
-                        "result_type": (
-                            "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"
-                        ),
+                        "result_type": ("PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"),
                         "signal_dna_frozen": True,
                         "signal_parameters_changed": False,
                         "policies": [asdict(policy) for policy in policies],
@@ -7435,9 +7574,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
 
                 ensemble_mode = ensemble_campaign or institutional_campaign
                 grid_factory = (
-                    ensemble_rotation_parameter_grid
-                    if ensemble_mode
-                    else rotation_parameter_grid
+                    ensemble_rotation_parameter_grid if ensemble_mode else rotation_parameter_grid
                 )
                 campaign_exposure = (
                     settings.operational.maximum_portfolio_exposure
@@ -7480,32 +7617,24 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "status": (
-                            "CAMPAIGN_PLAN"
-                            if campaign_action == "plan"
-                            else "CAMPAIGN_ESTIMATE"
+                            "CAMPAIGN_PLAN" if campaign_action == "plan" else "CAMPAIGN_ESTIMATE"
                         ),
                         "campaign": campaign_label,
                         "strategy_family": "CROSS_SECTIONAL_MOMENTUM_ROTATION",
                         "result_type": "JOINT_PARAMETER_SCREEN",
-                        "joint_parameter_trials": len(
-                            grid_factory(**grid_arguments)
-                        ),
+                        "joint_parameter_trials": len(grid_factory(**grid_arguments)),
                         "markets": ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"],
                         "timeframes": ["1d"],
                         "selection_basis": "DEVELOPMENT_ONLY",
                         "maximum_positions": settings.operational.maximum_positions,
-                        "maximum_exposure": (
-                            campaign_exposure
-                        ),
+                        "maximum_exposure": (campaign_exposure),
                         "minimum_cash": campaign_minimum_cash,
                         "maximum_position_exposure": (
                             settings.operational.maximum_position_fraction
                             if institutional_campaign
                             else None
                         ),
-                        "prior_trials_accounted": (
-                            1_245 if institutional_campaign else None
-                        ),
+                        "prior_trials_accounted": (1_245 if institutional_campaign else None),
                         "closed_candles_only": True,
                         "next_open_execution": True,
                         "live_orders": 0,
@@ -7559,6 +7688,25 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "run":
+            if signal_synthesis_storm_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "parameter_trials": args.storm_trials,
+                            "reason_code": ("LARGE_PREREGISTERED_SIGNAL_DNA_STORM"),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_signal_synthesis_storm_campaign,
+                        settings,
+                        maximum_trials=args.storm_trials,
+                    )
+                )
+                return 0
             if portfolio_storm_campaign:
                 if not args.yes:
                     emit(
@@ -7566,9 +7714,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             "status": "CONFIRMATION_REQUIRED",
                             "campaign": campaign_label,
                             "parameter_trials": args.storm_trials,
-                            "reason_code": (
-                                "LARGE_PREREGISTERED_MULTI_OBJECTIVE_STORM"
-                            ),
+                            "reason_code": ("LARGE_PREREGISTERED_MULTI_OBJECTIVE_STORM"),
                         }
                     )
                     return 2
@@ -7587,9 +7733,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             "status": "CONFIRMATION_REQUIRED",
                             "campaign": campaign_label,
                             "parameter_trials": 8,
-                            "reason_code": (
-                                "PRE_REGISTERED_ECONOMIC_ALPHA_FAMILY"
-                            ),
+                            "reason_code": ("PRE_REGISTERED_ECONOMIC_ALPHA_FAMILY"),
                         }
                     )
                     return 2
@@ -7607,9 +7751,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             "status": "CONFIRMATION_REQUIRED",
                             "campaign": campaign_label,
                             "diversification_policy_trials": 6,
-                            "reason_code": (
-                                "PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"
-                            ),
+                            "reason_code": ("PRE_REGISTERED_DIVERSIFICATION_CONTINUATION"),
                         }
                     )
                     return 2
@@ -7627,9 +7769,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                             "status": "CONFIRMATION_REQUIRED",
                             "campaign": campaign_label,
                             "allocation_policy_trials": 5,
-                            "reason_code": (
-                                "PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"
-                            ),
+                            "reason_code": ("PRE_REGISTERED_ALLOCATION_POLICY_COMPARISON"),
                         }
                     )
                     return 2
@@ -7729,12 +7869,16 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
+            if signal_synthesis_storm_campaign:
+                _, report_path, _ = _signal_synthesis_storm_paths(settings)
+                if not report_path.is_file():
+                    raise FileNotFoundError("signal-synthesis-storm-v1 report does not exist")
+                emit(read_json(report_path))
+                return 0
             if portfolio_storm_campaign:
                 _, report_path, _ = _portfolio_storm_paths(settings)
                 if not report_path.is_file():
-                    raise FileNotFoundError(
-                        "portfolio-storm-v1 report does not exist"
-                    )
+                    raise FileNotFoundError("portfolio-storm-v1 report does not exist")
                 emit(read_json(report_path))
                 return 0
             if breakout_portfolio_campaign:
@@ -7793,18 +7937,34 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 {
                     "campaign": campaign_label,
                     "leaderboards": store.export_leaderboards(),
-                    "report": store.generate_report(
-                        run_id=getattr(args, "run_id", None)
-                    ),
+                    "report": store.generate_report(run_id=getattr(args, "run_id", None)),
                     "status": runner.status(),
                 }
             )
             return 0
         if campaign_action == "status":
-            if portfolio_storm_campaign:
-                plan_path, report_path, matrix_path = (
-                    _portfolio_storm_paths(settings)
+            if signal_synthesis_storm_campaign:
+                plan_path, report_path, matrix_path = _signal_synthesis_storm_paths(settings)
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "PLANNED_NOT_RUN"
+                            if plan_path.is_file()
+                            else "NOT_PLANNED"
+                        ),
+                        "plan": str(plan_path),
+                        "plan_exists": plan_path.is_file(),
+                        "report": str(report_path),
+                        "report_exists": report_path.is_file(),
+                        "returns_matrix_exists": (matrix_path.is_file()),
+                    }
                 )
+                return 0
+            if portfolio_storm_campaign:
+                plan_path, report_path, matrix_path = _portfolio_storm_paths(settings)
                 emit(
                     {
                         "campaign": campaign_label,
@@ -7828,9 +7988,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "campaign": campaign_label,
-                        "status": (
-                            "COMPLETED" if report_path.is_file() else "NOT_RUN"
-                        ),
+                        "status": ("COMPLETED" if report_path.is_file() else "NOT_RUN"),
                         "report": str(report_path),
                         "live_orders": 0,
                     }
@@ -7841,9 +7999,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "campaign": campaign_label,
-                        "status": (
-                            "COMPLETED" if report_path.is_file() else "NOT_RUN"
-                        ),
+                        "status": ("COMPLETED" if report_path.is_file() else "NOT_RUN"),
                         "report": str(report_path),
                         "live_orders": 0,
                     }
@@ -7854,9 +8010,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     {
                         "campaign": campaign_label,
-                        "status": (
-                            "COMPLETED" if report_path.is_file() else "NOT_RUN"
-                        ),
+                        "status": ("COMPLETED" if report_path.is_file() else "NOT_RUN"),
                         "report": str(report_path),
                         "live_orders": 0,
                     }
@@ -8486,21 +8640,17 @@ async def _operational_cycle(
         closed_candles = [record for record in candle_records if record.closed]
         latest_closed = closed_candles[-1] if closed_candles else None
         interval_seconds = TIMEFRAME_SECONDS[profile["execution_timeframe"]]
-        grace_seconds = settings.market_data.candle_close_grace_for(
-            profile["execution_timeframe"]
-        )
+        grace_seconds = settings.market_data.candle_close_grace_for(profile["execution_timeframe"])
         trusted_epoch = cycle_at.timestamp() - grace_seconds
         expected_open_epoch = (
-            math.floor(trusted_epoch / interval_seconds) * interval_seconds
-            - interval_seconds
+            math.floor(trusted_epoch / interval_seconds) * interval_seconds - interval_seconds
         )
         expected_latest_closed_open = datetime.fromtimestamp(
             expected_open_epoch,
             tz=UTC,
         )
         candle_fresh = bool(
-            latest_closed
-            and latest_closed.timestamp >= expected_latest_closed_open
+            latest_closed and latest_closed.timestamp >= expected_latest_closed_open
         )
         ticker = await loader.download_ticker(
             provider="bitvavo", market=market, persist=True, mode=mode
@@ -8613,9 +8763,7 @@ async def _operational_cycle(
                     "STALE_OR_MISSING_CLOSED_CANDLE"
                     if not candle_fresh
                     else (
-                        "IDLE_NO_APPROVED_CANDIDATE"
-                        if candidate_id is None
-                        else "NO_ENTRY_SIGNAL"
+                        "IDLE_NO_APPROVED_CANDIDATE" if candidate_id is None else "NO_ENTRY_SIGNAL"
                     )
                 ),
             },
@@ -8682,9 +8830,7 @@ async def _operational_cycle(
                     "STALE_OR_MISSING_CLOSED_CANDLE"
                     if not candle_fresh
                     else (
-                        "IDLE_NO_APPROVED_CANDIDATE"
-                        if candidate_id is None
-                        else "NO_ENTRY_SIGNAL"
+                        "IDLE_NO_APPROVED_CANDIDATE" if candidate_id is None else "NO_ENTRY_SIGNAL"
                     )
                 ),
             }
@@ -8693,15 +8839,11 @@ async def _operational_cycle(
             {
                 "market": market,
                 "ticker": ticker.values,
-                "latest_closed_candle": (
-                    latest_closed.timestamp if latest_closed else None
-                ),
+                "latest_closed_candle": (latest_closed.timestamp if latest_closed else None),
                 "closed_candle_freshness": {
                     "status": "FRESH" if candle_fresh else "STALE",
                     "expected_latest_open": expected_latest_closed_open,
-                    "observed_latest_open": (
-                        latest_closed.timestamp if latest_closed else None
-                    ),
+                    "observed_latest_open": (latest_closed.timestamp if latest_closed else None),
                     "grace_seconds": grace_seconds,
                 },
                 "trade_count": len(trades),
@@ -8801,8 +8943,7 @@ def _operational_status(
             interval_seconds = TIMEFRAME_SECONDS[timeframe]
             grace_seconds = settings.market_data.candle_close_grace_for(timeframe)
             expected_epoch = (
-                math.floor((now.timestamp() - grace_seconds) / interval_seconds)
-                * interval_seconds
+                math.floor((now.timestamp() - grace_seconds) / interval_seconds) * interval_seconds
                 - interval_seconds
             )
             expected = datetime.fromtimestamp(expected_epoch, tz=UTC)
@@ -8821,9 +8962,7 @@ def _operational_status(
             heartbeat_age = (utc_now() - _parse_utc_datetime(heartbeat_at)).total_seconds()
         uptime = None
         if heartbeat.get("started_at"):
-            uptime = (
-                utc_now() - _parse_utc_datetime(heartbeat["started_at"])
-            ).total_seconds()
+            uptime = (utc_now() - _parse_utc_datetime(heartbeat["started_at"])).total_seconds()
         heartbeat_state = heartbeat.get("state")
         service_state = (
             "IDLE_NO_APPROVED_CANDIDATE"
@@ -9095,11 +9234,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
         )
         database.migrate()
         try:
-            emit(
-                database.signal_identity_audit(
-                    apply=bool(getattr(args, "apply", False))
-                )
-            )
+            emit(database.signal_identity_audit(apply=bool(getattr(args, "apply", False))))
         finally:
             database.close()
         return 0
@@ -9877,6 +10012,7 @@ def build_parser() -> argparse.ArgumentParser:
         "diversified-rotation-v1",
         "portfolio-breakout-v1",
         "portfolio-storm-v1",
+        "signal-synthesis-storm-v1",
     )
     campaign_plan = campaign.add_parser("plan")
     campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])

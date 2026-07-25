@@ -50,9 +50,7 @@ def _quality_evidence(project_root: Path) -> dict[str, Any]:
     }.items():
         completed = _run(arguments, cwd=project_root, check=False)
         output = "\n".join(
-            value.strip()
-            for value in (completed.stdout, completed.stderr)
-            if value.strip()
+            value.strip() for value in (completed.stdout, completed.stderr) if value.strip()
         )
         results[name] = {
             "passed": completed.returncode == 0,
@@ -90,6 +88,7 @@ def build_acceptance_summary(
     diversified_rotation: dict[str, Any] | None = None,
     portfolio_breakout: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
+    signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
     autopilot_degradation: dict[str, Any] | None = None,
     feature_store: dict[str, Any] | None = None,
@@ -120,10 +119,7 @@ def build_acceptance_summary(
     if diversified_rotation is not None:
         if diversified_rotation.get("source_candidate_identity") != identity:
             raise ValueError("diversified rotation candidate identity mismatch")
-        if (
-            diversified_rotation.get("source_frozen_strategy_dna_hash")
-            != dna_hash
-        ):
+        if diversified_rotation.get("source_frozen_strategy_dna_hash") != dna_hash:
             raise ValueError("diversified rotation source DNA mismatch")
     if portfolio_breakout is not None:
         if portfolio_breakout.get("source_candidate_identity") != identity:
@@ -139,6 +135,15 @@ def build_acceptance_summary(
             raise ValueError("portfolio storm contains generated orders")
         if bool(portfolio_storm.get("live_ready", False)):
             raise ValueError("portfolio storm contains live permission")
+    if signal_synthesis_storm is not None:
+        if signal_synthesis_storm.get("status") != "COMPLETED_SCREENING_NOT_PROMOTED":
+            raise ValueError("signal synthesis storm is incomplete")
+        if signal_synthesis_storm.get("source_candidate_identity") != identity:
+            raise ValueError("signal synthesis storm candidate identity mismatch")
+        if int(signal_synthesis_storm.get("orders_generated") or 0) != 0:
+            raise ValueError("signal synthesis storm contains generated orders")
+        if bool(signal_synthesis_storm.get("live_ready", False)):
+            raise ValueError("signal synthesis storm contains live permission")
     if autopilot_state is not None:
         if int(autopilot_state.get("orders_generated") or 0) != 0:
             raise ValueError("autopilot state contains generated orders")
@@ -153,34 +158,23 @@ def build_acceptance_summary(
             raise ValueError("feature store contains paper permission")
         if bool(feature_store.get("live_ready", False)):
             raise ValueError("feature store contains live permission")
-        if (
-            autopilot_state is not None
-            and autopilot_state.get("last_feature_store_dataset_id")
-            != feature_store.get("dataset_id")
-        ):
+        if autopilot_state is not None and autopilot_state.get(
+            "last_feature_store_dataset_id"
+        ) != feature_store.get("dataset_id"):
             raise ValueError("autopilot feature store identity mismatch")
     if breakout_forward_observers is not None:
         for name, observer_payload in breakout_forward_observers.items():
-            if (
-                observer_payload.get("source_candidate_identity")
-                != identity
-            ):
-                raise ValueError(
-                    f"breakout forward observer identity mismatch: {name}"
-                )
+            if observer_payload.get("source_candidate_identity") != identity:
+                raise ValueError(f"breakout forward observer identity mismatch: {name}")
             if int(observer_payload.get("orders_generated") or 0) != 0:
-                raise ValueError(
-                    f"breakout forward observer contains orders: {name}"
-                )
+                raise ValueError(f"breakout forward observer contains orders: {name}")
             if bool(
                 observer_payload.get(
                     "paper_candidate_permitted",
                     False,
                 )
             ) or bool(observer_payload.get("live_ready", False)):
-                raise ValueError(
-                    f"breakout forward observer contains permission: {name}"
-                )
+                raise ValueError(f"breakout forward observer contains permission: {name}")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -255,19 +249,13 @@ def build_acceptance_summary(
         "continuation_family": {
             "status": continuation["status"],
             "joint_parameter_trials": continuation["joint_parameter_trials"],
-            "prior_trials_accounted": continuation[
-                "prior_exploratory_trials_accounted"
-            ],
+            "prior_trials_accounted": continuation["prior_exploratory_trials_accounted"],
             "total_known_trials": continuation["total_known_family_trials"],
             "positive_all_three_periods_descriptive_only": continuation[
                 "positive_all_three_periods_descriptive_only"
             ],
-            "economic_research_lead_count": continuation[
-                "economic_research_lead_count"
-            ],
-            "statistically_qualified_count": continuation[
-                "statistically_qualified_count"
-            ],
+            "economic_research_lead_count": continuation["economic_research_lead_count"],
+            "statistically_qualified_count": continuation["statistically_qualified_count"],
         },
         "validation": {
             "economic_gates_passed": economic_pass,
@@ -279,9 +267,7 @@ def build_acceptance_summary(
             "forward_status": forward["status"],
             "forward_reason_code": forward.get("reason_code"),
             "forward_requirements": {
-                "closed_daily_observations": forward[
-                    "required_closed_daily_observations"
-                ],
+                "closed_daily_observations": forward["required_closed_daily_observations"],
                 "rebalances": forward["required_rebalances"],
                 "regime_coverage": forward["required_regime_coverage"],
             },
@@ -308,9 +294,7 @@ def build_acceptance_summary(
             "status": capital_utilization["status"],
             "campaign": capital_utilization["campaign"],
             "policies_tested": capital_utilization["policies_tested"],
-            "prior_trials_accounted": capital_utilization[
-                "prior_trials_accounted"
-            ],
+            "prior_trials_accounted": capital_utilization["prior_trials_accounted"],
             "total_known_trials": capital_utilization["total_known_trials"],
             "multiple_testing": capital_utilization["multiple_testing"],
             "paired_block_bootstrap_vs_frozen_control": capital_utilization[
@@ -336,9 +320,7 @@ def build_acceptance_summary(
             "status": diversified_rotation["status"],
             "campaign": diversified_rotation["campaign"],
             "policies_tested": diversified_rotation["policies_tested"],
-            "prior_trials_accounted": diversified_rotation[
-                "prior_trials_accounted"
-            ],
+            "prior_trials_accounted": diversified_rotation["prior_trials_accounted"],
             "total_known_trials": diversified_rotation["total_known_trials"],
             "multiple_testing": diversified_rotation["multiple_testing"],
             "policy_results": [
@@ -359,18 +341,12 @@ def build_acceptance_summary(
             "status": portfolio_breakout["status"],
             "campaign": portfolio_breakout["campaign"],
             "parameters_tested": portfolio_breakout["parameters_tested"],
-            "prior_trials_accounted": portfolio_breakout[
-                "prior_trials_accounted"
-            ],
+            "prior_trials_accounted": portfolio_breakout["prior_trials_accounted"],
             "total_known_trials": portfolio_breakout["total_known_trials"],
             "multiple_testing": portfolio_breakout["multiple_testing"],
             "return_path_audit": portfolio_breakout["return_path_audit"],
-            "economic_research_lead_count": portfolio_breakout[
-                "economic_research_lead_count"
-            ],
-            "statistically_qualified_count": portfolio_breakout[
-                "statistically_qualified_count"
-            ],
+            "economic_research_lead_count": portfolio_breakout["economic_research_lead_count"],
+            "statistically_qualified_count": portfolio_breakout["statistically_qualified_count"],
             "policy_results": [
                 {
                     "policy_name": row["policy_name"],
@@ -389,18 +365,35 @@ def build_acceptance_summary(
             "status": portfolio_storm["status"],
             "campaign": portfolio_storm["campaign"],
             "trial_count": portfolio_storm["trial_count"],
-            "prior_known_trials": portfolio_storm[
-                "prior_known_trials"
-            ],
-            "total_known_trials": portfolio_storm[
-                "total_known_trials"
-            ],
-            "pareto_survivor_count": portfolio_storm[
-                "pareto_survivor_count"
-            ],
-            "multiple_testing": portfolio_storm[
-                "multiple_testing"
-            ],
+            "prior_known_trials": portfolio_storm["prior_known_trials"],
+            "total_known_trials": portfolio_storm["total_known_trials"],
+            "pareto_survivor_count": portfolio_storm["pareto_survivor_count"],
+            "multiple_testing": portfolio_storm["multiple_testing"],
+            "research_pass": False,
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
+    if signal_synthesis_storm is not None:
+        summary["signal_synthesis_storm"] = {
+            "status": signal_synthesis_storm["status"],
+            "campaign": signal_synthesis_storm["campaign"],
+            "engine_version": signal_synthesis_storm["engine_version"],
+            "trial_count": signal_synthesis_storm["trial_count"],
+            "prior_known_trials": signal_synthesis_storm["prior_known_trials"],
+            "total_known_trials": signal_synthesis_storm["total_known_trials"],
+            "registered_signal_blocks": signal_synthesis_storm["registered_signal_blocks"],
+            "executable_signal_blocks": signal_synthesis_storm["executable_signal_blocks"],
+            "development_screen": signal_synthesis_storm["development_screen"],
+            "pareto_survivor_count": signal_synthesis_storm["pareto_survivor_count"],
+            "positive_validation_survivors": (
+                signal_synthesis_storm["positive_validation_survivors"]
+            ),
+            "positive_confirmation_survivors": (
+                signal_synthesis_storm["positive_confirmation_survivors"]
+            ),
+            "canonical_exact_audit": signal_synthesis_storm.get("canonical_exact_audit"),
+            "multiple_testing": signal_synthesis_storm["multiple_testing"],
             "research_pass": False,
             "paper_candidates": 0,
             "orders_generated": 0,
@@ -411,19 +404,11 @@ def build_acceptance_summary(
             "status": autopilot_state["status"],
             "cycle_count": autopilot_state["cycle_count"],
             "last_cycle_id": autopilot_state.get("last_cycle_id"),
-            "last_completed_at": autopilot_state.get(
-                "last_completed_at"
-            ),
-            "last_data_fingerprint": autopilot_state.get(
-                "last_data_fingerprint"
-            ),
+            "last_completed_at": autopilot_state.get("last_completed_at"),
+            "last_data_fingerprint": autopilot_state.get("last_data_fingerprint"),
             "last_research_at": autopilot_state.get("last_research_at"),
-            "last_research_data_fingerprint": autopilot_state.get(
-                "last_research_data_fingerprint"
-            ),
-            "last_feature_store_dataset_id": autopilot_state.get(
-                "last_feature_store_dataset_id"
-            ),
+            "last_research_data_fingerprint": autopilot_state.get("last_research_data_fingerprint"),
+            "last_feature_store_dataset_id": autopilot_state.get("last_feature_store_dataset_id"),
             "research_ran": autopilot_state.get("research_ran"),
             "research_reason": autopilot_state.get("research_reason"),
             "degradation": autopilot_state.get("degradation"),
@@ -452,20 +437,14 @@ def build_acceptance_summary(
         per_policy = {
             str(payload.get("policy_name") or name): {
                 "strategy_dna_hash": payload["strategy_dna_hash"],
-                "forward_observer_schema_version": payload.get(
-                    "forward_observer_schema_version"
-                ),
+                "forward_observer_schema_version": payload.get("forward_observer_schema_version"),
                 "forward_summary": payload.get("forward_summary"),
-                "degradation_observation": payload.get(
-                    "degradation_observation"
-                ),
+                "degradation_observation": payload.get("degradation_observation"),
                 "orders_generated": 0,
                 "paper_candidate_permitted": False,
                 "live_ready": False,
             }
-            for name, payload in sorted(
-                breakout_forward_observers.items()
-            )
+            for name, payload in sorted(breakout_forward_observers.items())
         }
         summary["breakout_forward_observers"] = {
             "status": "FROZEN_FORWARD_RESEARCH",
@@ -491,70 +470,48 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     reports = settings.paths.lab_dir / "reports"
     candidates = settings.paths.lab_dir / "candidates"
     paths = {
-        "rotation_research_lead_v1.json": (
-            candidates / "rotation_research_lead_v1.json"
-        ),
-        "cross_sectional_ensemble_v1.json": (
-            reports / "cross_sectional_ensemble_v1.json"
-        ),
-        "cross_sectional_ensemble_v1.csv": (
-            reports / "cross_sectional_ensemble_v1.csv"
-        ),
-        "rotation_external_holdouts_v1.json": (
-            reports / "rotation_external_holdouts_v1.json"
-        ),
-        "rotation_forward_validation_v1.json": (
-            reports / "rotation_forward_validation_v1.json"
-        ),
-        "rotation_institutional_audit_v2.json": (
-            reports / "rotation_institutional_audit_v2.json"
-        ),
-        "rotation_institutional_audit_v2.csv": (
-            reports / "rotation_institutional_audit_v2.csv"
-        ),
+        "rotation_research_lead_v1.json": (candidates / "rotation_research_lead_v1.json"),
+        "cross_sectional_ensemble_v1.json": (reports / "cross_sectional_ensemble_v1.json"),
+        "cross_sectional_ensemble_v1.csv": (reports / "cross_sectional_ensemble_v1.csv"),
+        "rotation_external_holdouts_v1.json": (reports / "rotation_external_holdouts_v1.json"),
+        "rotation_forward_validation_v1.json": (reports / "rotation_forward_validation_v1.json"),
+        "rotation_institutional_audit_v2.json": (reports / "rotation_institutional_audit_v2.json"),
+        "rotation_institutional_audit_v2.csv": (reports / "rotation_institutional_audit_v2.csv"),
         "cross_sectional_institutional_v2.json": (
             reports / "cross_sectional_institutional_v2.json"
         ),
-        "cross_sectional_institutional_v2.csv": (
-            reports / "cross_sectional_institutional_v2.csv"
-        ),
-        "rotation_forward_observer_v2.json": (
-            reports / "rotation_forward_observer_v2.json"
-        ),
-        "capital_utilization_campaign_v1.json": (
-            reports / "capital_utilization_campaign_v1.json"
-        ),
-        "capital_utilization_campaign_v1.csv": (
-            reports / "capital_utilization_campaign_v1.csv"
-        ),
+        "cross_sectional_institutional_v2.csv": (reports / "cross_sectional_institutional_v2.csv"),
+        "rotation_forward_observer_v2.json": (reports / "rotation_forward_observer_v2.json"),
+        "capital_utilization_campaign_v1.json": (reports / "capital_utilization_campaign_v1.json"),
+        "capital_utilization_campaign_v1.csv": (reports / "capital_utilization_campaign_v1.csv"),
         "diversified_rotation_campaign_v1.json": (
             reports / "diversified_rotation_campaign_v1.json"
         ),
-        "diversified_rotation_campaign_v1.csv": (
-            reports / "diversified_rotation_campaign_v1.csv"
-        ),
-        "portfolio_breakout_campaign_v1.json": (
-            reports / "portfolio_breakout_campaign_v1.json"
-        ),
-        "portfolio_breakout_campaign_v1.csv": (
-            reports / "portfolio_breakout_campaign_v1.csv"
-        ),
+        "diversified_rotation_campaign_v1.csv": (reports / "diversified_rotation_campaign_v1.csv"),
+        "portfolio_breakout_campaign_v1.json": (reports / "portfolio_breakout_campaign_v1.json"),
+        "portfolio_breakout_campaign_v1.csv": (reports / "portfolio_breakout_campaign_v1.csv"),
         "portfolio_breakout_forward_observer_v1.json": (
             reports / "portfolio_breakout_forward_observer_v1.json"
         ),
-        "portfolio_storm_plan_v1.json": (
-            reports / "portfolio_storm_plan_v1.json"
+        "portfolio_storm_plan_v1.json": (reports / "portfolio_storm_plan_v1.json"),
+        "portfolio_storm_report_v1.json": (reports / "portfolio_storm_report_v1.json"),
+        "portfolio_storm_returns_v1.npz": (reports / "portfolio_storm_returns_v1.npz"),
+        "signal_synthesis_storm_plan_v1.json": (reports / "signal_synthesis_storm_plan_v1.json"),
+        "signal_synthesis_storm_report_v1.json": (
+            reports / "signal_synthesis_storm_report_v1.json"
         ),
-        "portfolio_storm_report_v1.json": (
-            reports / "portfolio_storm_report_v1.json"
+        "signal_synthesis_storm_returns_v1.npz": (
+            reports / "signal_synthesis_storm_returns_v1.npz"
         ),
-        "portfolio_storm_returns_v1.npz": (
-            reports / "portfolio_storm_returns_v1.npz"
+        "signal_synthesis_storm_plan_v2.json": (reports / "signal_synthesis_storm_plan_v2.json"),
+        "signal_synthesis_storm_report_v2.json": (
+            reports / "signal_synthesis_storm_report_v2.json"
+        ),
+        "signal_synthesis_storm_returns_v2.npz": (
+            reports / "signal_synthesis_storm_returns_v2.npz"
         ),
     }
-    observer_directory = (
-        settings.paths.lab_dir / "observers" / "capital_utilization_v1"
-    )
+    observer_directory = settings.paths.lab_dir / "observers" / "capital_utilization_v1"
     for observer in sorted(observer_directory.glob("*.json")):
         paths[f"capital_observer_{observer.name}"] = observer
     diversified_observer_directory = (
@@ -562,9 +519,7 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     )
     for observer in sorted(diversified_observer_directory.glob("*.json")):
         paths[f"diversified_observer_{observer.name}"] = observer
-    breakout_observer_directory = (
-        settings.paths.lab_dir / "observers" / "portfolio_breakout_v1"
-    )
+    breakout_observer_directory = settings.paths.lab_dir / "observers" / "portfolio_breakout_v1"
     for observer in sorted(breakout_observer_directory.glob("*.json")):
         paths[f"breakout_observer_{observer.name}"] = observer
     autopilot_directory = settings.paths.lab_dir / "autopilot"
@@ -578,25 +533,18 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
             paths["autopilot_latest_cycle.json"] = last_cycle
     if autopilot_degradation.is_file():
         paths["autopilot_degradation_state.json"] = autopilot_degradation
-    feature_store_directory = (
-        settings.paths.lab_dir
-        / "feature_store"
-        / "portfolio_daily_v1"
-    )
-    feature_store_manifest = (
-        feature_store_directory / "latest.manifest.json"
-    )
+    feature_store_directory = settings.paths.lab_dir / "feature_store" / "portfolio_daily_v1"
+    feature_store_manifest = feature_store_directory / "latest.manifest.json"
     feature_store_tensor = feature_store_directory / "latest.npz"
     if feature_store_manifest.is_file() and feature_store_tensor.is_file():
-        paths["feature_store_latest.manifest.json"] = (
-            feature_store_manifest
-        )
+        paths["feature_store_latest.manifest.json"] = feature_store_manifest
         paths["feature_store_latest.npz"] = feature_store_tensor
-    storm_epoch_index = (
-        settings.paths.lab_dir / "storm_epochs" / "index.json"
-    )
+    storm_epoch_index = settings.paths.lab_dir / "storm_epochs" / "index.json"
     if storm_epoch_index.is_file():
         paths["portfolio_storm_epoch_index.json"] = storm_epoch_index
+    signal_storm_epoch_index = settings.paths.lab_dir / "signal_storm_epochs" / "index.json"
+    if signal_storm_epoch_index.is_file():
+        paths["signal_storm_epoch_index.json"] = signal_storm_epoch_index
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -645,11 +593,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         raise RuntimeError("commit all source changes before acceptance packaging")
     paths = _artifact_paths(settings)
     quality = _quality_evidence(project_root)
-    payloads = {
-        name: read_json(path)
-        for name, path in paths.items()
-        if path.suffix == ".json"
-    }
+    payloads = {name: read_json(path) for name, path in paths.items() if path.suffix == ".json"}
     summary = build_acceptance_summary(
         source_commit=source_commit,
         lead=payloads["rotation_research_lead_v1.json"],
@@ -664,13 +608,10 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
         portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
+        signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
         autopilot_state=payloads.get("autopilot_state.json"),
-        autopilot_degradation=payloads.get(
-            "autopilot_degradation_state.json"
-        ),
-        feature_store=payloads.get(
-            "feature_store_latest.manifest.json"
-        ),
+        autopilot_degradation=payloads.get("autopilot_degradation_state.json"),
+        feature_store=payloads.get("feature_store_latest.manifest.json"),
         breakout_forward_observers={
             name: payload
             for name, payload in payloads.items()
@@ -680,17 +621,13 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
     evidence_hash = stable_hash(
         {
             "source_commit": source_commit,
-            "artifacts": {
-                name: sha256_file(path) for name, path in sorted(paths.items())
-            },
+            "artifacts": {name: sha256_file(path) for name, path in sorted(paths.items())},
         },
         length=12,
     )
     packages = settings.paths.output_dir / "packages"
     packages.mkdir(parents=True, exist_ok=True)
-    package_name = (
-        f"crypto_rotation_research_{source_commit[:7]}_{evidence_hash[:8]}"
-    )
+    package_name = f"crypto_rotation_research_{source_commit[:7]}_{evidence_hash[:8]}"
     target = packages / package_name
     archive = packages / f"{package_name}.zip"
     checksum = packages / f"{package_name}.zip.sha256"

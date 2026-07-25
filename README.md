@@ -481,6 +481,10 @@ python main.py lab campaign plan --name portfolio-storm-v1 --storm-trials 5000
 python main.py lab campaign run --name portfolio-storm-v1 --storm-trials 5000 --yes
 python main.py lab campaign status --name portfolio-storm-v1
 python main.py lab campaign report --name portfolio-storm-v1
+python main.py lab campaign plan --name signal-synthesis-storm-v1 --storm-trials 5000
+python main.py lab campaign run --name signal-synthesis-storm-v1 --storm-trials 5000 --yes
+python main.py lab campaign status --name signal-synthesis-storm-v1
+python main.py lab campaign report --name signal-synthesis-storm-v1
 python main.py lab campaign autopilot
 python main.py lab campaign autopilot --mode status
 python main.py lab campaign autopilot --run-research --refresh-data
@@ -578,18 +582,39 @@ block bootstrap runs in bounded batches. DSR uses the full known-trial
 denominator. Failed statistics or confirmation therefore prevent a research
 pass and the storm can never create a paper/live candidate directly.
 
+`signal-synthesis-storm-v1` reuses the canonical 134-block registry rather
+than inventing a second indicator engine. One unavailable high-impact-event
+block remains explicitly blocked until a timestamped point-in-time event feed
+provides its required source column; the other 133 blocks are covered across
+all 11 implemented families and seven roles. Exactly 5,000 immutable DNA paths
+are stratified over 1h/4h/1d, all six pairs from BTC/ETH/SOL/LINK, layered/all/
+majority/weighted-vote logic, min/default/max parameter alleles and fixed-R,
+trailing-trend or time-regime exits. Every path holds at most two 20% positions,
+keeps at least 60% cash, shifts signals to next open and pays every fill cost.
+The mark-to-market screen uses development-only PF/Ulcer/turnover objectives.
+A pre-Pareto gate rejects inactive fronts (at least 12 active development
+weeks, positive development return and PF above one), while all inactive and
+failed paths still remain in White, SPA, PBO and DSR accounting. Positive
+confirmation paths receive a second audit through the canonical event-driven
+backtester under normal and doubled costs. Screening or exact economic success
+cannot bypass the unchanged statistical, forward, manual-approval or live
+gates.
+
 `campaign autopilot` runs one bounded, orderless cycle by default. It audits a
 deterministic data fingerprint, schedules only the already preregistered
-breakout and storm families when `--run-research` is enabled, verifies every frozen observer
-manifest, and persists a cycle record below `output/lab/autopilot/`. Research
+breakout, portfolio-storm and signal-synthesis families when `--run-research`
+is enabled, verifies every frozen observer manifest, and persists a cycle
+record below `output/lab/autopilot/`. Research
 is skipped when data is unchanged or the seven-day research interval has not
-elapsed. `--refresh-data` refreshes only the strict ALLOWED daily universe;
+elapsed. `--refresh-data` refreshes only the strict ALLOWED universe;
 `--mode continuous` is explicit and can be bounded with `--max-cycles`.
 When new data and the weekly interval are both present, the research stage also
-creates or reuses an immutable 5,000-DNA storm epoch below
-`output/lab/storm_epochs/`. Repeated access to the same data fingerprint reuses
-the existing epoch; a genuinely new selection epoch conservatively adds all
-5,000 trials to the cumulative DSR denominator. Epochs remain research-only.
+creates or reuses immutable 5,000-DNA epochs below
+`output/lab/storm_epochs/` and `output/lab/signal_storm_epochs/`. Portfolio
+epochs fingerprint daily data; signal epochs fingerprint 1h, 4h and 1d data.
+Repeated access to either unchanged fingerprint reuses its existing epoch; a
+genuinely new selection epoch conservatively adds all 5,000 trials to the
+cumulative DSR denominator. Epochs remain research-only.
 Every normal cycle also builds or reuses
 `output/lab/feature_store/portfolio_daily_v1/latest.npz`: a point-in-time
 `time × asset × feature` tensor with separate listing, feature and target

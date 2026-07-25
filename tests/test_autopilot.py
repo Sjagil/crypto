@@ -103,10 +103,7 @@ def test_autopilot_cycle_is_orderless_and_research_is_scheduled(tmp_path):
     assert calls["research"] == 1
     assert calls["feature_store"] == 2
     assert orchestrator.state()["cycle_count"] == 2
-    assert (
-        orchestrator.state()["last_feature_store_dataset_id"]
-        == "causal-tensor-v1"
-    )
+    assert orchestrator.state()["last_feature_store_dataset_id"] == "causal-tensor-v1"
 
 
 def test_new_data_waits_for_research_interval_and_then_runs(tmp_path):
@@ -237,6 +234,8 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
         "_autopilot_data_stage",
         lambda settings, **kwargs: {
             "data_fingerprint": "strict-data-v1",
+            "daily_data_fingerprint": "strict-daily-v1",
+            "signal_data_fingerprint": "strict-signal-v1",
             "orders_generated": 0,
         },
     )
@@ -246,6 +245,17 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
         lambda settings, **kwargs: {
             "status": "REUSED_EXISTING_STORM_EPOCH",
             "total_known_trials": 6_312,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_autopilot_signal_storm_epoch",
+        lambda settings, **kwargs: {
+            "status": "REUSED_EXISTING_SIGNAL_STORM_EPOCH",
+            "total_known_trials": 16_312,
             "orders_generated": 0,
             "paper_candidate_permitted": False,
             "live_ready": False,
@@ -270,6 +280,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
     assert result["portfolio_storm_total_known_trials"] == 6_312
+    assert result["signal_synthesis_total_known_trials"] == 16_312
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 
