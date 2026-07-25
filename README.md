@@ -481,6 +481,9 @@ python main.py lab campaign autopilot
 python main.py lab campaign autopilot --mode status
 python main.py lab campaign autopilot --run-research --refresh-data
 python main.py lab campaign autopilot --mode continuous --run-research --refresh-data --max-cycles 7
+python main.py lab campaign autopilot --mode task-install --dry-run
+python main.py lab campaign autopilot --mode task-install --yes
+python main.py lab campaign autopilot --mode task-status
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -559,6 +562,11 @@ manifest, and persists a cycle record below `output/lab/autopilot/`. Research
 is skipped when data is unchanged or the seven-day research interval has not
 elapsed. `--refresh-data` refreshes only the strict ALLOWED daily universe;
 `--mode continuous` is explicit and can be bounded with `--max-cycles`.
+`--mode task-install --yes` installs a least-privilege Windows task that runs
+the orderless refresh/research cycle daily at 00:15 local time, starts missed
+runs when available, ignores overlapping instances and records all evidence in
+the same persistent state. Inspect installation first with `--dry-run`; status
+and removal use `task-status` and `task-remove --yes`.
 
 Forward-degradation evidence may be supplied with `--degradation-input` as JSON
 containing `live_return`, `cv_mean`, `cv_std` and `observation_count`. Fewer

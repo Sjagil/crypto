@@ -3548,6 +3548,147 @@ def _autopilot_degradation_observation(
     )
 
 
+def _autopilot_task_xml(settings: Settings) -> str:
+    """Build a least-privilege daily orderless research task."""
+
+    python = settings.paths.project_root / ".venv" / "Scripts" / "python.exe"
+    main = settings.paths.project_root / "main.py"
+    local_now = datetime.now().astimezone()
+    start = (local_now + timedelta(days=1)).replace(
+        hour=0,
+        minute=15,
+        second=0,
+        microsecond=0,
+    )
+    start_boundary = start.isoformat(timespec="seconds")
+    arguments = (
+        f'"{main}" lab campaign autopilot --run-research --refresh-data'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task version="1.4" '
+        'xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Triggers><CalendarTrigger>"
+        f"<StartBoundary>{html.escape(start_boundary)}</StartBoundary>"
+        "<Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval>"
+        "</ScheduleByDay></CalendarTrigger></Triggers>"
+        '<Principals><Principal id="Author">'
+        "<LogonType>InteractiveToken</LogonType>"
+        "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>"
+        "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+        "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+        "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+        "<StartWhenAvailable>true</StartWhenAvailable>"
+        "<ExecutionTimeLimit>PT4H</ExecutionTimeLimit>"
+        "<RestartOnFailure><Interval>PT5M</Interval><Count>3</Count>"
+        "</RestartOnFailure></Settings>"
+        '<Actions Context="Author"><Exec>'
+        f"<Command>{html.escape(str(python))}</Command>"
+        f"<Arguments>{html.escape(arguments)}</Arguments>"
+        f"<WorkingDirectory>{html.escape(str(settings.paths.project_root))}"
+        "</WorkingDirectory></Exec></Actions></Task>"
+    )
+
+
+def _autopilot_task_command(
+    settings: Settings,
+    *,
+    mode: str,
+    confirmed: bool,
+    dry_run: bool,
+) -> tuple[int, dict[str, Any]]:
+    """Install, inspect or remove the persistent Windows autopilot task."""
+
+    task_name = "CryptoResearchAutopilotOrderless"
+    if mode == "task-status":
+        command = [
+            "schtasks.exe",
+            "/Query",
+            "/TN",
+            task_name,
+            "/FO",
+            "LIST",
+            "/V",
+        ]
+    elif mode == "task-remove":
+        if not confirmed:
+            return 2, {
+                "status": "CONFIRMATION_REQUIRED",
+                "task_name": task_name,
+                "reason": "PERSISTENT_TASK_REMOVAL_REQUIRES_CONFIRMATION",
+                "orders_generated": 0,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+        command = ["schtasks.exe", "/Delete", "/TN", task_name, "/F"]
+    else:
+        xml = _autopilot_task_xml(settings)
+        command = [
+            "schtasks.exe",
+            "/Create",
+            "/TN",
+            task_name,
+            "/XML",
+            "<temporary-xml>",
+            "/F",
+        ]
+        if dry_run or not confirmed:
+            return (0 if dry_run else 2), {
+                "status": (
+                    "DRY_RUN" if dry_run else "CONFIRMATION_REQUIRED"
+                ),
+                "task_name": task_name,
+                "command": command,
+                "xml": xml,
+                "schedule": "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE",
+                "orders_generated": 0,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+        with tempfile.NamedTemporaryFile(
+            suffix=".xml",
+            mode="w",
+            encoding="utf-16",
+            delete=False,
+        ) as handle:
+            handle.write(xml)
+            xml_path = Path(handle.name)
+        command[-2] = str(xml_path)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=settings.paths.project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        if mode == "task-install" and "xml_path" in locals():
+            xml_path.unlink(missing_ok=True)
+    return (
+        0 if completed.returncode == 0 else 2,
+        {
+            "status": (
+                "PASSED" if completed.returncode == 0 else "FAILED"
+            ),
+            "task_name": task_name,
+            "mode": mode,
+            "return_code": completed.returncode,
+            "command": command,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "schedule": (
+                "DAILY_00:15_LOCAL_START_WHEN_AVAILABLE"
+                if mode == "task-install"
+                else None
+            ),
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+    )
+
+
 def _rotation_return_ci_lower(
     returns: pd.Series,
     *,
@@ -6254,6 +6395,19 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 AutopilotPolicy,
             )
 
+            if args.mode in {
+                "task-install",
+                "task-status",
+                "task-remove",
+            }:
+                return_code, payload = _autopilot_task_command(
+                    settings,
+                    mode=args.mode,
+                    confirmed=bool(args.yes),
+                    dry_run=bool(args.dry_run),
+                )
+                emit(payload)
+                return return_code
             policy = AutopilotPolicy(
                 interval_seconds=args.interval_seconds,
                 research_interval_seconds=args.research_interval_seconds,
@@ -9039,7 +9193,15 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_autopilot = campaign.add_parser("autopilot")
     campaign_autopilot.add_argument(
         "--mode",
-        choices=("once", "continuous", "status", "reset"),
+        choices=(
+            "once",
+            "continuous",
+            "status",
+            "reset",
+            "task-install",
+            "task-status",
+            "task-remove",
+        ),
         default="once",
     )
     campaign_autopilot.add_argument(
@@ -9082,6 +9244,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     campaign_autopilot.add_argument("--reason")
     campaign_autopilot.add_argument("--yes", action="store_true")
+    campaign_autopilot.add_argument("--dry-run", action="store_true")
     lab.add_parser("queue")
     lab.add_parser("workers")
     lab.add_parser("failures")

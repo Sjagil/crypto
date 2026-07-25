@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import core.cli as cli
+from config.settings import get_settings
 from core.autopilot import (
     AutopilotLockError,
     AutopilotOrchestrator,
@@ -233,3 +234,24 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert result["total_known_trials"] == 1_312
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
+
+
+def test_windows_autopilot_task_is_daily_orderless_and_dry_runnable():
+    settings = get_settings()
+    xml = cli._autopilot_task_xml(settings)
+    assert "<DaysInterval>1</DaysInterval>" in xml
+    assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
+    assert "lab campaign autopilot --run-research --refresh-data" in xml
+    assert "paper" not in xml.casefold()
+    assert "live" not in xml.casefold()
+
+    return_code, payload = cli._autopilot_task_command(
+        settings,
+        mode="task-install",
+        confirmed=False,
+        dry_run=True,
+    )
+    assert return_code == 0
+    assert payload["status"] == "DRY_RUN"
+    assert payload["orders_generated"] == 0
+    assert payload["live_ready"] is False
