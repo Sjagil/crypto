@@ -245,6 +245,50 @@ def _coverage(
     }
 
 
+def _diagnostic_milestones(
+    observation_count: int,
+    *,
+    formal_required: int,
+) -> dict[str, Any]:
+    """Track read-only 30/90/180-day diagnostics and the formal gate."""
+
+    days = tuple(
+        sorted({30, 90, 180, int(formal_required)})
+    )
+    milestones = [
+        {
+            "closed_daily_observations": day,
+            "reached": observation_count >= day,
+            "remaining": max(0, day - observation_count),
+            "purpose": (
+                "FORMAL_SAMPLE_GATE"
+                if day == formal_required
+                else "DIAGNOSTIC_ONLY"
+            ),
+        }
+        for day in days
+    ]
+    next_pending = next(
+        (
+            row["closed_daily_observations"]
+            for row in milestones
+            if not row["reached"]
+        ),
+        None,
+    )
+    return {
+        "closed_daily_observations": observation_count,
+        "formal_required": formal_required,
+        "progress_fraction": min(
+            1.0,
+            observation_count / max(1, formal_required),
+        ),
+        "milestones": milestones,
+        "next_pending_milestone": next_pending,
+        "diagnostic_milestones_authorize_promotion": False,
+    }
+
+
 def _degradation_evidence(
     *,
     forward_returns: list[float],
@@ -648,6 +692,10 @@ def _build_portfolio_forward_evidence(
             minimum_rebalances - rebalances,
         ),
         "forward_net_return": equity - 1.0,
+        "diagnostic_progress": _diagnostic_milestones(
+            len(observations),
+            formal_required=minimum_observations,
+        ),
         "regime_coverage": coverage,
         "checks": checks,
         "performance_gate_policy": {

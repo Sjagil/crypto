@@ -4404,6 +4404,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in capital_forward_summaries.values()
     )
+    absolute_result = _run_absolute_momentum_campaign(settings)
+    assert_orderless_research_payload(absolute_result)
+    absolute_report = read_json(
+        _absolute_momentum_campaign_path(settings)
+    )
+    assert_orderless_research_payload(absolute_report)
+    absolute_forward_summaries = dict(
+        absolute_report.get("forward_summaries") or {}
+    )
+    absolute_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in absolute_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4423,8 +4436,22 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "paper_candidate_permitted": False,
             "live_ready": False,
         },
+        "parallel_absolute_momentum_observers": {
+            "campaign": "ABSOLUTE_MOMENTUM_V1",
+            "status": absolute_result["status"],
+            "observer_count": len(absolute_forward_summaries),
+            "forward_summaries": absolute_forward_summaries,
+            "total_forward_observations": (
+                absolute_forward_observations
+            ),
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
-            total_forward_observations + capital_forward_observations
+            total_forward_observations
+            + capital_forward_observations
+            + absolute_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -10787,6 +10814,7 @@ def build_parser() -> argparse.ArgumentParser:
             "capital-utilization-v1",
             "diversified-rotation-v1",
             "portfolio-breakout-v1",
+            "absolute-momentum-v1",
         ),
         default="cross-sectional-ensemble",
     )

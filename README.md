@@ -679,7 +679,11 @@ execution. The primary 5% volatility-budget path is capped at 20% total and
 20% per asset with at least 80% cash. All 16,715 known formal, storm,
 development, ablation and risk-budget trials remain in the DSR denominator.
 Its observers are `FROZEN_FORWARD_RESEARCH`, generate no orders and cannot
-promote while PBO or the untouched-forward gate fails.
+promote while PBO or the untouched-forward gate fails. The daily orderless
+autopilot observer stage updates these ledgers independently of the slower
+research-search interval. Each append-only ledger reports read-only 30, 90 and
+180-day diagnostic milestones plus the mandatory 365-day formal sample gate;
+diagnostic milestones never authorize promotion.
 
 AI, neural-network and other machine-learning development is explicitly
 embargoed. `python main.py lab ai status` reports the fail-closed policy.

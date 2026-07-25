@@ -100,6 +100,15 @@ def test_forward_evidence_is_realized_next_open_orderless_and_costed():
     assert len(evidence.observations) == 69
     assert evidence.summary["closed_daily_observations"] == 69
     assert evidence.summary["remaining_closed_daily_observations"] == 296
+    progress = evidence.summary["diagnostic_progress"]
+    assert progress["next_pending_milestone"] == 90
+    assert progress["milestones"][0] == {
+        "closed_daily_observations": 30,
+        "reached": True,
+        "remaining": 0,
+        "purpose": "DIAGNOSTIC_ONLY",
+    }
+    assert progress["diagnostic_milestones_authorize_promotion"] is False
     assert evidence.summary["formal_performance_gates_evaluated"] is False
     assert evidence.summary["performance_metrics"] is None
     assert evidence.degradation_observation is not None
