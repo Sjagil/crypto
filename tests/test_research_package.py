@@ -164,6 +164,10 @@ def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
         "system_degraded"
     ]
     assert summary["autopilot"]["orders_generated"] == 0
+    assert (
+        summary["autopilot"]["last_feature_store_dataset_id"]
+        == "tensor-id"
+    )
     assert summary["feature_store"]["dataset_id"] == "tensor-id"
     assert summary["feature_store"]["research_only"] is True
 

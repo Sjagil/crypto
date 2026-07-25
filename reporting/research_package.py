@@ -366,6 +366,9 @@ def build_acceptance_summary(
             "last_research_data_fingerprint": autopilot_state.get(
                 "last_research_data_fingerprint"
             ),
+            "last_feature_store_dataset_id": autopilot_state.get(
+                "last_feature_store_dataset_id"
+            ),
             "research_ran": autopilot_state.get("research_ran"),
             "research_reason": autopilot_state.get("research_reason"),
             "degradation": autopilot_state.get("degradation"),
