@@ -91,6 +91,7 @@ def build_acceptance_summary(
     absolute_momentum_plateau: dict[str, Any] | None = None,
     volatility_contraction: dict[str, Any] | None = None,
     multi_alpha_ensemble: dict[str, Any] | None = None,
+    trend_pullback: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -312,6 +313,40 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "multi-alpha ensemble",
             [ensemble_primary],
+            container="gates",
+        )
+    if trend_pullback is not None:
+        if trend_pullback.get("campaign") != "TREND_PULLBACK_V1":
+            raise ValueError(
+                "trend pullback campaign identity mismatch"
+            )
+        if int(trend_pullback.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "trend pullback campaign contains orders"
+            )
+        if bool(trend_pullback.get("live_ready", False)):
+            raise ValueError(
+                "trend pullback campaign contains live permission"
+            )
+        pullback_registry = trend_pullback.get("trial_registry") or {}
+        if pullback_registry.get("status") != "PASSED":
+            raise ValueError(
+                "trend pullback registry audit failed"
+            )
+        if int(pullback_registry.get("unique_trial_count") or 0) != int(
+            trend_pullback.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "trend pullback trial count mismatch"
+            )
+        pullback_primary = trend_pullback.get("primary_result")
+        if not isinstance(pullback_primary, dict):
+            raise ValueError(
+                "trend pullback primary result missing"
+            )
+        require_stochastic_validation(
+            "trend pullback",
+            [pullback_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -685,6 +720,31 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if trend_pullback is not None:
+        summary["trend_pullback"] = {
+            "status": trend_pullback["status"],
+            "campaign": trend_pullback["campaign"],
+            "engine_version": trend_pullback["engine_version"],
+            "generated_trial_count": trend_pullback[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": trend_pullback[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": trend_pullback[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": trend_pullback[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": trend_pullback["multiple_testing"],
+            "trial_registry": trend_pullback["trial_registry"],
+            "primary_result": trend_pullback["primary_result"],
+            "holdout_status": trend_pullback["holdout_status"],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -850,6 +910,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "multi_alpha_ensemble_plan_v1.json": (
             reports / "multi_alpha_ensemble_plan_v1.json"
         ),
+        "trend_pullback_campaign_v1.json": (
+            reports / "trend_pullback_campaign_v1.json"
+        ),
+        "trend_pullback_campaign_v1.csv": (
+            reports / "trend_pullback_campaign_v1.csv"
+        ),
+        "trend_pullback_plan_v1.json": (
+            reports / "trend_pullback_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -954,6 +1023,25 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (ensemble_registry_directory / "records").glob("*.json")
     ):
         paths[f"multi_alpha_ensemble_trial_{record.name}"] = record
+    pullback_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "trend_pullback_v1"
+    )
+    for observer in sorted(pullback_observer_directory.glob("*.json")):
+        paths[f"trend_pullback_observer_{observer.name}"] = observer
+    pullback_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "trend_pullback_v1"
+    )
+    paths["trend_pullback_registry_index.json"] = (
+        pullback_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (pullback_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"trend_pullback_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1052,6 +1140,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         multi_alpha_ensemble=payloads[
             "multi_alpha_ensemble_campaign_v1.json"
         ],
+        trend_pullback=payloads["trend_pullback_campaign_v1.json"],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
         autopilot_state=payloads.get("autopilot_state.json"),

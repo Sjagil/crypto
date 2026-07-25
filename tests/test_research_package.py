@@ -373,3 +373,44 @@ def test_acceptance_summary_includes_rejected_multi_alpha_ensemble() -> None:
     assert not ensemble["primary_result"]["gates"]["statistical_pass"]
     assert ensemble["orders_generated"] == 0
     assert ensemble["live_ready"] is False
+
+
+def test_acceptance_summary_includes_rejected_trend_pullback() -> None:
+    values = _inputs()
+    values["trend_pullback"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "TREND_PULLBACK_V1",
+        "engine_version": "1.0.0",
+        "generated_trial_count": 12,
+        "registered_unique_trials": 12,
+        "total_known_trials": 16_861,
+        "primary_strategy_id": "TP_Z20_E15_EMA100",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.5571,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 12,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    pullback = summary["trend_pullback"]
+    assert pullback["registered_unique_trials"] == 12
+    assert not pullback["primary_result"]["gates"]["economic_pass"]
+    assert pullback["orders_generated"] == 0
+    assert pullback["live_ready"] is False

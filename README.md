@@ -724,6 +724,17 @@ gates failed. It is therefore a balanced research lead only: the immutable
 registry and orderless observer are retained, while paper/live promotion stays
 fail-closed.
 
+`python main.py lab campaign run --name trend-pullback-v1 --yes` evaluates a
+separate 12-DNA long-only mean-reversion family. Entries require a 10/20/40-day
+log-price z-score of -1.5 or -2.0 while both the asset and BTC remain above
+predeclared long-horizon EMAs; exits occur near the rolling mean or when either
+trend filter fails. Signals use completed daily closes and execute at the next
+open under normal and stressed costs, with the same 40% total, 20% per-asset
+and 60% minimum-cash limits. The development winner lost money in validation
+and under full-sample stressed costs, while DSR, White Reality Check, Hansen
+SPA, PBO and both stochastic gates failed. All 12 negative trials remain in
+the immutable cumulative denominator; no post-hoc variant is promoted.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before
