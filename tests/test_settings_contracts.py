@@ -133,3 +133,8 @@ def test_strict_research_defaults_match_formal_campaign_specification(
     assert research.maximum_white_reality_check_pvalue == 0.10
     assert research.maximum_hansen_spa_pvalue == 0.05
     assert research.multiple_testing_bootstrap_samples >= 2_000
+    assert research.monte_carlo_runs == 10_000
+    assert research.maximum_monte_carlo_probability_of_20pct_drawdown == 0.01
+    assert research.maximum_dirichlet_probability_of_loss == 0.05
+    assert research.minimum_stochastic_p05_total_return == 0.0
+    assert research.dirichlet_block_count == 12

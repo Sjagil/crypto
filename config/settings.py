@@ -466,7 +466,15 @@ class ResearchSettings(_SettingsBase):
     multiple_testing_block_size: int = Field(default=5, ge=1, le=1_000)
     maximum_drawdown: float = Field(default=0.20, gt=0.0, le=1.0)
     maximum_monte_carlo_probability_of_loss: float = Field(default=0.35, ge=0.0, le=1.0)
+    maximum_monte_carlo_probability_of_20pct_drawdown: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+    )
     maximum_probability_of_30pct_drawdown: float = Field(default=0.10, ge=0.0, le=1.0)
+    maximum_dirichlet_probability_of_loss: float = Field(default=0.05, ge=0.0, le=1.0)
+    minimum_stochastic_p05_total_return: float = Field(default=0.0, gt=-1.0)
+    dirichlet_block_count: int = Field(default=12, ge=4, le=100)
     maximum_symbol_profit_concentration: float = Field(default=0.60, gt=0.0, le=1.0)
     maximum_fold_profit_concentration: float = Field(default=0.50, gt=0.0, le=1.0)
     bootstrap_samples: int = Field(default=10_000, ge=100)

@@ -170,11 +170,7 @@ def robust_score(
 
 def _safe_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: (
-            value
-            if not isinstance(value, float) or math.isfinite(value)
-            else None
-        )
+        key: (value if not isinstance(value, float) or math.isfinite(value) else None)
         for key, value in metrics.items()
     }
 
@@ -268,9 +264,7 @@ def _run_candidates(
         if checkpoint_path is not None:
             append_jsonl(checkpoint_path, asdict(trial))
     successful = [
-        trial
-        for trial in trials.values()
-        if trial.status == "COMPLETE" and trial.score is not None
+        trial for trial in trials.values() if trial.status == "COMPLETE" and trial.score is not None
     ]
     if not successful:
         raise RuntimeError("no optimization trial completed successfully")
@@ -298,9 +292,7 @@ def grid_search(
     names = sorted(strategy.parameter_space)
     combinations = math.prod(len(strategy.parameter_space[name]) for name in names)
     if combinations > maximum_candidates:
-        raise ValueError(
-            f"grid has {combinations} candidates; maximum is {maximum_candidates}"
-        )
+        raise ValueError(f"grid has {combinations} candidates; maximum is {maximum_candidates}")
     candidates = [
         dict(zip(names, values, strict=True))
         for values in itertools.product(*(strategy.parameter_space[name] for name in names))
@@ -336,14 +328,11 @@ def random_search(
     names = sorted(strategy.parameter_space)
     seen: set[str] = set()
     candidates: list[dict[str, Any]] = []
-    maximum_unique = math.prod(
-        len(strategy.parameter_space[name]) for name in names
-    ) if names else 1
+    maximum_unique = (
+        math.prod(len(strategy.parameter_space[name]) for name in names) if names else 1
+    )
     while len(candidates) < min(trials, maximum_unique):
-        candidate = {
-            name: randomizer.choice(strategy.parameter_space[name])
-            for name in names
-        }
+        candidate = {name: randomizer.choice(strategy.parameter_space[name]) for name in names}
         key = stable_hash(candidate)
         if key not in seen:
             seen.add(key)
@@ -564,10 +553,9 @@ def combinatorial_purged_cross_validation(
         raise ValueError("invalid CPCV group configuration")
     if len(selected) < group_count * 2:
         raise ValueError("insufficient observations for CPCV")
-    horizons = (
-        [label_horizon_bars, indicator_lookback_bars, feature_availability_bars]
-        + [int(value) for value in holding_spans]
-    )
+    horizons = [label_horizon_bars, indicator_lookback_bars, feature_availability_bars] + [
+        int(value) for value in holding_spans
+    ]
     if any(value < 0 for value in horizons):
         raise ValueError("CPCV information horizons cannot be negative")
     information_horizon = max(horizons, default=0)
@@ -662,39 +650,25 @@ def deflated_sharpe_ratio(
     if not math.isfinite(scale) or scale <= 0:
         scale = 1.0
     raw_trials = np.asarray(
-        [
-            float(value) / scale
-            for value in trial_sharpes
-            if math.isfinite(float(value))
-        ],
+        [float(value) / scale for value in trial_sharpes if math.isfinite(float(value))],
         dtype=float,
     )
     trial_count = max(1, len(raw_trials), int(total_trials or 0))
-    trial_std = (
-        float(raw_trials.std(ddof=1))
-        if len(raw_trials) > 1
-        else 0.0
-    )
+    trial_std = float(raw_trials.std(ddof=1)) if len(raw_trials) > 1 else 0.0
     expected_maximum = 0.0
     if trial_count > 1 and trial_std > 0:
         normal = NormalDist()
         euler_gamma = 0.5772156649015329
         first = normal.inv_cdf(1.0 - 1.0 / trial_count)
         second = normal.inv_cdf(1.0 - 1.0 / (trial_count * math.e))
-        expected_maximum = trial_std * (
-            (1.0 - euler_gamma) * first + euler_gamma * second
-        )
+        expected_maximum = trial_std * ((1.0 - euler_gamma) * first + euler_gamma * second)
     skewness = float(selected.skew())
     kurtosis = float(selected.kurt()) + 3.0
     sample_size = min(
         len(selected),
         max(3, effective_sample_size or len(selected)),
     )
-    variance_adjustment = (
-        1.0
-        - skewness * raw_sharpe
-        + ((kurtosis - 1.0) / 4.0) * raw_sharpe**2
-    )
+    variance_adjustment = 1.0 - skewness * raw_sharpe + ((kurtosis - 1.0) / 4.0) * raw_sharpe**2
     if not math.isfinite(variance_adjustment) or variance_adjustment <= 0:
         return 0.0
     statistic = (
@@ -727,11 +701,7 @@ def probability_of_backtest_overfitting(
     logits: list[float] = []
     half = selected_groups // 2
     for train_groups in itertools.combinations(range(selected_groups), half):
-        test_groups = tuple(
-            index
-            for index in range(selected_groups)
-            if index not in train_groups
-        )
+        test_groups = tuple(index for index in range(selected_groups) if index not in train_groups)
         train_positions = np.concatenate([groups[index] for index in train_groups])
         test_positions = np.concatenate([groups[index] for index in test_groups])
         train = matrix.iloc[np.sort(train_positions)]
@@ -766,11 +736,7 @@ def multiple_testing_bootstrap(
         raise ValueError("multiple-testing bootstrap requires at least 100 samples")
     if block_size < 1:
         raise ValueError("bootstrap block size must be positive")
-    matrix = (
-        strategy_returns.replace([np.inf, -np.inf], np.nan)
-        .dropna(how="any")
-        .astype(float)
-    )
+    matrix = strategy_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any").astype(float)
     if matrix.empty or matrix.shape[1] < 1:
         raise ValueError("multiple-testing matrix is empty")
     values = matrix.to_numpy(dtype=float)
@@ -797,10 +763,7 @@ def multiple_testing_bootstrap(
         indices: list[int] = []
         while len(indices) < observations:
             start = int(randomizer.integers(0, observations))
-            indices.extend(
-                (start + offset) % observations
-                for offset in range(block_size)
-            )
+            indices.extend((start + offset) % observations for offset in range(block_size))
         sample = centered[np.asarray(indices[:observations], dtype=int)]
         sample_means = sample.mean(axis=0)
         white_statistic = math.sqrt(observations) * max(
@@ -869,9 +832,7 @@ def walk_forward_validate(
         train_end = initial_train + fold * test_size
         test_start = train_end + embargo_bars
         test_end = (
-            minimum_count
-            if fold == folds - 1
-            else min(minimum_count, test_start + test_size)
+            minimum_count if fold == folds - 1 else min(minimum_count, test_start + test_size)
         )
         train_start = 0 if mode == "anchored" else max(0, train_end - initial_train)
         effective_train_end = max(train_start + 1, train_end - purge_bars)
@@ -880,8 +841,7 @@ def walk_forward_validate(
             for market, frame in data_by_market.items()
         }
         test_slice = {
-            market: _slice(frame, test_start, test_end)
-            for market, frame in data_by_market.items()
+            market: _slice(frame, test_start, test_end) for market, frame in data_by_market.items()
         }
         # The train slice is intentionally materialized for auditability even
         # when parameters are fixed for validation.
@@ -917,8 +877,7 @@ def walk_forward_validate(
     positive = sum(fold.net_expectancy_r > 0 for fold in fold_results)
     positive_profit = sum(max(0.0, fold.net_pnl_eur) for fold in fold_results)
     concentration = (
-        max((max(0.0, fold.net_pnl_eur) for fold in fold_results), default=0.0)
-        / positive_profit
+        max((max(0.0, fold.net_pnl_eur) for fold in fold_results), default=0.0) / positive_profit
         if positive_profit > 0
         else 1.0
     )
@@ -960,9 +919,7 @@ def walk_forward_optimize(
         train_end = initial_train + fold * test_size
         validation_start = train_end + embargo_bars
         validation_end = (
-            minimum_count
-            if fold == folds - 1
-            else min(minimum_count, validation_start + test_size)
+            minimum_count if fold == folds - 1 else min(minimum_count, validation_start + test_size)
         )
         train_start = 0 if mode == "anchored" else max(0, train_end - initial_train)
         effective_train_end = max(train_start + 1, train_end - purge_bars)
@@ -1052,8 +1009,7 @@ def walk_forward_optimize(
     positive = sum(fold.net_expectancy_r > 0 for fold in fold_results)
     positive_profit = sum(max(0.0, fold.net_pnl_eur) for fold in fold_results)
     concentration = (
-        max((max(0.0, fold.net_pnl_eur) for fold in fold_results), default=0.0)
-        / positive_profit
+        max((max(0.0, fold.net_pnl_eur) for fold in fold_results), default=0.0) / positive_profit
         if positive_profit > 0
         else 1.0
     )
@@ -1180,6 +1136,7 @@ def acceptance_gate(
     repainting_safe: bool,
     deflated_sharpe_probability: float | None = None,
     promote_to_paper: bool = False,
+    stochastic_seed: int = 42,
 ) -> GateResult:
     checks: list[tuple[bool, ResearchStatus, str]] = [
         (
@@ -1207,44 +1164,37 @@ def acceptance_gate(
             "INSUFFICIENT_EFFECTIVE_SAMPLE",
         ),
         (
-            float(normal.metrics["net_expectancy_r"])
-            > research.minimum_net_expectancy_r
-            and float(holdout.metrics["net_expectancy_r"])
-            > research.minimum_net_expectancy_r,
+            float(normal.metrics["net_expectancy_r"]) > research.minimum_net_expectancy_r
+            and float(holdout.metrics["net_expectancy_r"]) > research.minimum_net_expectancy_r,
             ResearchStatus.REJECTED_EXPECTANCY,
             "NON_POSITIVE_EXPECTANCY",
         ),
         (
-            float(normal.metrics["profit_factor"])
-            >= research.minimum_profit_factor,
+            float(normal.metrics["profit_factor"]) >= research.minimum_profit_factor,
             ResearchStatus.REJECTED_PROFIT_FACTOR,
             "PROFIT_FACTOR_BELOW_GATE",
         ),
         (
-            float(stressed.metrics["profit_factor"])
-            >= research.minimum_stressed_profit_factor
+            float(stressed.metrics["profit_factor"]) >= research.minimum_stressed_profit_factor
             and float(stressed.metrics["net_expectancy_r"]) >= 0,
             ResearchStatus.REJECTED_STRESSED_COSTS,
             "STRESSED_COST_FAILURE",
         ),
         (
-            walk_forward.valid
-            and walk_forward.positive_folds >= research.minimum_positive_folds,
+            walk_forward.valid and walk_forward.positive_folds >= research.minimum_positive_folds,
             ResearchStatus.REJECTED_WALK_FORWARD,
             "WALK_FORWARD_FAILURE",
         ),
         (
             cpcv is not None
             and cpcv.final_holdout_excluded
-            and cpcv.path_consistency
-            >= research.minimum_cpcv_path_consistency,
+            and cpcv.path_consistency >= research.minimum_cpcv_path_consistency,
             ResearchStatus.REJECTED_WALK_FORWARD,
             "CPCV_PATH_CONSISTENCY_FAILURE",
         ),
         (
             deflated_sharpe_probability is not None
-            and deflated_sharpe_probability
-            >= research.minimum_deflated_sharpe_probability,
+            and deflated_sharpe_probability >= research.minimum_deflated_sharpe_probability,
             ResearchStatus.REJECTED_EXPECTANCY,
             "DEFLATED_SHARPE_FAILURE",
         ),
@@ -1284,27 +1234,57 @@ def acceptance_gate(
                 metrics={
                     "trade_count": int(normal.metrics["trade_count"]),
                     "net_expectancy_r": float(normal.metrics["net_expectancy_r"]),
-                    "holdout_net_expectancy_r": float(
-                        holdout.metrics["net_expectancy_r"]
-                    ),
+                    "holdout_net_expectancy_r": float(holdout.metrics["net_expectancy_r"]),
                     "profit_factor": float(normal.metrics["profit_factor"]),
-                    "stressed_profit_factor": float(
-                        stressed.metrics["profit_factor"]
-                    ),
+                    "stressed_profit_factor": float(stressed.metrics["profit_factor"]),
                     "maximum_drawdown": float(normal.metrics["maximum_drawdown"]),
-                    "cpcv_path_consistency": (
-                        cpcv.path_consistency if cpcv is not None else None
-                    ),
-                    "deflated_sharpe_probability": (
-                        deflated_sharpe_probability
-                    ),
+                    "cpcv_path_consistency": (cpcv.path_consistency if cpcv is not None else None),
+                    "deflated_sharpe_probability": (deflated_sharpe_probability),
                 },
             )
+    from research.stochastic_validation import (
+        policy_from_research_settings,
+        validate_strategy_return_paths,
+    )
+
+    stochastic_policy = policy_from_research_settings(
+        research,
+        seed=stochastic_seed,
+        expected_block_length=10,
+    )
+    stochastic = validate_strategy_return_paths(
+        normal.equity_curve["equity"].pct_change(fill_method=None).dropna().to_numpy(dtype=float),
+        stressed.equity_curve["equity"].pct_change(fill_method=None).dropna().to_numpy(dtype=float),
+        policy=stochastic_policy,
+    )
+    if not stochastic["passed"]:
+        return GateResult(
+            status=ResearchStatus.REJECTED_RISK_OF_RUIN,
+            passed=False,
+            reasons=("STOCHASTIC_ROBUSTNESS_GATES_FAILED",),
+            metrics={
+                "monte_carlo_gate": bool(
+                    stochastic["normal"]["monte_carlo"]["passed"]
+                    and stochastic["stressed"]["monte_carlo"]["passed"]
+                ),
+                "dirichlet_gate": bool(
+                    stochastic["normal"]["dirichlet"]["passed"]
+                    and stochastic["stressed"]["dirichlet"]["passed"]
+                ),
+                "stochastic_policy_hash": stochastic["policy_hash"],
+                "normal_drawdown_breach_probability": float(
+                    stochastic["normal"]["monte_carlo"].get(
+                        "maximum_drawdown_breach_probability",
+                        1.0,
+                    )
+                ),
+                "normal_dirichlet_pass": bool(stochastic["normal"]["dirichlet"]["passed"]),
+                "stressed_dirichlet_pass": bool(stochastic["stressed"]["dirichlet"]["passed"]),
+            },
+        )
     return GateResult(
         status=(
-            ResearchStatus.PAPER_CANDIDATE
-            if promote_to_paper
-            else ResearchStatus.RESEARCH_PASS
+            ResearchStatus.PAPER_CANDIDATE if promote_to_paper else ResearchStatus.RESEARCH_PASS
         ),
         passed=True,
         reasons=("ALL_RESEARCH_GATES_PASSED",),
@@ -1315,10 +1295,11 @@ def acceptance_gate(
             "profit_factor": float(normal.metrics["profit_factor"]),
             "stressed_profit_factor": float(stressed.metrics["profit_factor"]),
             "maximum_drawdown": float(normal.metrics["maximum_drawdown"]),
-            "cpcv_path_consistency": (
-                cpcv.path_consistency if cpcv is not None else None
-            ),
+            "cpcv_path_consistency": (cpcv.path_consistency if cpcv is not None else None),
             "deflated_sharpe_probability": deflated_sharpe_probability,
+            "monte_carlo_gate": True,
+            "dirichlet_gate": True,
+            "stochastic_policy_hash": stochastic["policy_hash"],
         },
     )
 
@@ -1436,12 +1417,10 @@ def run_research(
         minimum_trades=settings.research.minimum_trades,
     )
     lookahead_safe = all(
-        strategy_lookahead_test(frame, strategy, parameters)
-        for frame in data_by_market.values()
+        strategy_lookahead_test(frame, strategy, parameters) for frame in data_by_market.values()
     )
     repainting_safe = all(
-        strategy_repainting_test(frame, strategy, parameters)
-        for frame in data_by_market.values()
+        strategy_repainting_test(frame, strategy, parameters) for frame in data_by_market.values()
     )
     normal_returns = (
         normal_result.equity_curve["equity"]
@@ -1463,8 +1442,7 @@ def run_research(
     trial_sharpes = [
         float(trial.metrics["sharpe"])
         for trial in optimization.trials
-        if trial.metrics.get("sharpe") is not None
-        and math.isfinite(float(trial.metrics["sharpe"]))
+        if trial.metrics.get("sharpe") is not None and math.isfinite(float(trial.metrics["sharpe"]))
     ]
     deflated_sharpe_probability = deflated_sharpe_ratio(
         normal_returns,
@@ -1475,8 +1453,7 @@ def run_research(
         ),
     )
     eligibility_valid = all(
-        settings.shariah.eligibility(market).status.value == "ALLOWED"
-        for market in data_by_market
+        settings.shariah.eligibility(market).status.value == "ALLOWED" for market in data_by_market
     )
     gate = acceptance_gate(
         normal=normal_result,
@@ -1491,6 +1468,7 @@ def run_research(
         repainting_safe=repainting_safe,
         deflated_sharpe_probability=deflated_sharpe_probability,
         promote_to_paper=promote_to_paper,
+        stochastic_seed=settings.app.random_seed,
     )
     return ResearchOutcome(
         strategy_id=strategy.strategy_id,

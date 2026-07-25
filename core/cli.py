@@ -4150,9 +4150,7 @@ def _daily_snapshot_watermark(
     if current.tzinfo is None or current.utcoffset() is None:
         current = current.replace(tzinfo=UTC)
     current = current.astimezone(UTC)
-    expected = (
-        pd.Timestamp(current).floor("D") - pd.offsets.Day(1)
-    )
+    expected = pd.Timestamp(current).floor("D") - pd.offsets.Day(1)
     latest: dict[str, str | None] = {}
     checks: dict[str, bool] = {}
     for market, path in sorted(paths.items()):
@@ -4163,18 +4161,12 @@ def _daily_snapshot_watermark(
         else:
             index = index.tz_convert("UTC")
         latest_timestamp = index.max() if len(index) else pd.NaT
-        latest[market] = (
-            latest_timestamp.isoformat()
-            if not pd.isna(latest_timestamp)
-            else None
-        )
+        latest[market] = latest_timestamp.isoformat() if not pd.isna(latest_timestamp) else None
         checks[market] = bool(latest_timestamp == expected)
     complete = bool(checks) and all(checks.values())
     return {
         "status": (
-            "COMPLETE_DAILY_SNAPSHOT"
-            if complete
-            else "WAITING_FOR_COMPLETE_DAILY_SNAPSHOT"
+            "COMPLETE_DAILY_SNAPSHOT" if complete else "WAITING_FOR_COMPLETE_DAILY_SNAPSHOT"
         ),
         "complete_daily_snapshot": complete,
         "expected_last_closed_utc_day": expected.isoformat(),
@@ -4243,10 +4235,7 @@ def _autopilot_data_stage(
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"AUTOPILOT_STRICT_SIGNAL_DATA_MISSING:{missing}")
-    daily_source_paths = {
-        market: normalized / f"{market}_1d.parquet"
-        for market in strict_markets
-    }
+    daily_source_paths = {market: normalized / f"{market}_1d.parquet" for market in strict_markets}
     daily_watermark = _daily_snapshot_watermark(daily_source_paths)
     daily_files = sorted(
         {
@@ -4281,9 +4270,7 @@ def _autopilot_data_stage(
         "data_fingerprint": AutopilotOrchestrator.fingerprint_files(data_files),
         "daily_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(daily_files)),
         "signal_data_fingerprint": (AutopilotOrchestrator.fingerprint_files(signal_files)),
-        "complete_daily_snapshot": daily_watermark[
-            "complete_daily_snapshot"
-        ],
+        "complete_daily_snapshot": daily_watermark["complete_daily_snapshot"],
         "daily_watermark": daily_watermark,
         "refresh": refresh_result,
         "orders_generated": 0,
@@ -4653,9 +4640,7 @@ def _autopilot_task_command(
                 "command": command,
                 "xml": xml,
                 "schedule": "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE",
-                "utc_daily_close_grace": (
-                    "AT_LEAST_01:15_AFTER_UTC_MIDNIGHT"
-                ),
+                "utc_daily_close_grace": ("AT_LEAST_01:15_AFTER_UTC_MIDNIGHT"),
                 "orders_generated": 0,
                 "paper_candidate_permitted": False,
                 "live_ready": False,
@@ -4691,9 +4676,7 @@ def _autopilot_task_command(
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "schedule": (
-                "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE"
-                if mode == "task-install"
-                else None
+                "DAILY_03:15_LOCAL_START_WHEN_AVAILABLE" if mode == "task-install" else None
             ),
             "orders_generated": 0,
             "paper_candidate_permitted": False,
@@ -4721,6 +4704,35 @@ def _rotation_return_ci_lower(
             indices.extend((start + offset) % len(values) for offset in range(block_size))
         means[sample] = values[np.asarray(indices[: len(values)], dtype=int)].mean()
     return float(np.quantile(means, 0.025))
+
+
+def _portfolio_stochastic_validation(
+    settings: Settings,
+    *,
+    normal_equity: pd.Series,
+    stressed_equity: pd.Series,
+    seed_offset: int,
+) -> dict[str, Any]:
+    """Run immutable Monte Carlo and Dirichlet gates on two net return paths."""
+
+    from research.stochastic_validation import (
+        policy_from_research_settings,
+        validate_strategy_return_paths,
+    )
+
+    policy = policy_from_research_settings(
+        settings.research,
+        seed=settings.app.random_seed,
+        expected_block_length=10,
+    )
+    normal_returns = normal_equity.pct_change(fill_method=None).dropna().to_numpy(dtype=float)
+    stressed_returns = stressed_equity.pct_change(fill_method=None).dropna().to_numpy(dtype=float)
+    return validate_strategy_return_paths(
+        normal_returns,
+        stressed_returns,
+        policy=policy,
+        seed_offset=seed_offset,
+    )
 
 
 def _run_rotation_campaign(
@@ -4872,7 +4884,7 @@ def _run_rotation_campaign(
         if len(survivors) >= 12:
             break
 
-    for row in survivors:
+    for survivor_index, row in enumerate(survivors):
         dna_hash = str(row["strategy_dna_hash"])
         result = results[dna_hash]
         stressed = backtest_rotation(
@@ -4907,6 +4919,12 @@ def _run_rotation_campaign(
             seed=settings.app.random_seed,
         )
         dsr = float(multiple.deflated_sharpe_probabilities.get(dna_hash, 0.0))
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=result.equity_curve,
+            stressed_equity=stressed.equity_curve,
+            seed_offset=survivor_index * 10,
+        )
         checks = {
             "development_positive": (float(row["periods"]["development"]["net_return"]) > 0),
             "validation_positive": (float(row["periods"]["validation"]["net_return"]) > 0),
@@ -4942,6 +4960,14 @@ def _run_rotation_campaign(
                 and multiple.probability_of_backtest_overfitting
                 <= settings.research.maximum_probability_of_backtest_overfitting
             ),
+            "monte_carlo_gate": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet_gate": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
             "maximum_drawdown_gate": (
                 abs(float(row["full_sample"]["maximum_drawdown"]))
                 <= settings.research.maximum_drawdown
@@ -4953,6 +4979,8 @@ def _run_rotation_campaign(
             "white_reality_check_gate",
             "hansen_spa_gate",
             "pbo_gate",
+            "monte_carlo_gate",
+            "dirichlet_gate",
         }
         row["robustness"] = {
             "checks": checks,
@@ -4961,6 +4989,7 @@ def _run_rotation_campaign(
             "confirmation_mean_return_ci_lower_95": ci_lower,
             "deflated_sharpe_probability": dsr,
             "stressed_confirmation": stressed_confirmation,
+            "stochastic_validation": stochastic,
             "all_numeric_gates_passed": all(checks.values()),
             "economic_gates_passed": all(
                 passed for name, passed in checks.items() if name not in statistical_checks
@@ -5051,43 +5080,44 @@ def _run_rotation_campaign(
             )
         )
         lead_result = results[str(lead["strategy_dna_hash"])]
-        atomic_write_json(
-            frozen_path,
-            _json_ready(
-                {
-                    "status": "FROZEN_RESEARCH_LEAD",
-                    "candidate_type": "ECONOMIC_RESEARCH_LEAD_NOT_PAPER_APPROVED",
-                    "strategy_dna_hash": lead["strategy_dna_hash"],
-                    "execution_identity": lead_result.summary()["execution_identity"],
-                    "parameters": lead["parameters"],
-                    "portfolio_policy": asdict(lead_result.portfolio_policy),
-                    "portfolio_policy_hash": lead_result.portfolio_policy.policy_hash,
-                    "periods": lead["periods"],
-                    "full_sample": lead["full_sample"],
-                    "cost_breakdown": lead["cost_breakdown"],
-                    "robustness": lead["robustness"],
-                    "source_report": str(report_path),
-                    "known_family_trials_accounted": report["total_known_family_trials"],
-                    "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
-                    "forward_validation_start": "2026-07-25T00:00:00Z",
-                    "minimum_forward_closed_daily_observations": 365,
-                    "minimum_forward_rebalances": FAST_SCREEN_MINIMUM_TRADES,
-                    "paper_candidate_permitted": False,
-                    "live_ready": False,
-                    "immutable_identity": stable_hash(
-                        {
-                            "strategy_dna_hash": lead["strategy_dna_hash"],
-                            "parameters": lead["parameters"],
-                            "data_hashes": {
-                                market: sha256_file(path) for market, path in paths.items()
+        if not frozen_path.is_file():
+            atomic_write_json(
+                frozen_path,
+                _json_ready(
+                    {
+                        "status": "FROZEN_RESEARCH_LEAD",
+                        "candidate_type": "ECONOMIC_RESEARCH_LEAD_NOT_PAPER_APPROVED",
+                        "strategy_dna_hash": lead["strategy_dna_hash"],
+                        "execution_identity": lead_result.summary()["execution_identity"],
+                        "parameters": lead["parameters"],
+                        "portfolio_policy": asdict(lead_result.portfolio_policy),
+                        "portfolio_policy_hash": lead_result.portfolio_policy.policy_hash,
+                        "periods": lead["periods"],
+                        "full_sample": lead["full_sample"],
+                        "cost_breakdown": lead["cost_breakdown"],
+                        "robustness": lead["robustness"],
+                        "source_report": str(report_path),
+                        "known_family_trials_accounted": report["total_known_family_trials"],
+                        "selection_bias": "CONTAMINATED_BY_PRIOR_EXPLORATION",
+                        "forward_validation_start": "2026-07-25T00:00:00Z",
+                        "minimum_forward_closed_daily_observations": 365,
+                        "minimum_forward_rebalances": FAST_SCREEN_MINIMUM_TRADES,
+                        "paper_candidate_permitted": False,
+                        "live_ready": False,
+                        "immutable_identity": stable_hash(
+                            {
+                                "strategy_dna_hash": lead["strategy_dna_hash"],
+                                "parameters": lead["parameters"],
+                                "data_hashes": {
+                                    market: sha256_file(path) for market, path in paths.items()
+                                },
+                                "portfolio_policy_hash": (lead_result.portfolio_policy.policy_hash),
                             },
-                            "portfolio_policy_hash": (lead_result.portfolio_policy.policy_hash),
-                        },
-                        length=64,
-                    ),
-                }
-            ),
-        )
+                            length=64,
+                        ),
+                    }
+                ),
+            )
     csv_path = report_path.with_suffix(".csv")
     pd.DataFrame(
         [
@@ -5106,6 +5136,10 @@ def _run_rotation_campaign(
                 "confirmation_sharpe": row["periods"]["confirmation"]["sharpe"],
                 "full_maximum_drawdown": row["full_sample"]["maximum_drawdown"],
                 "full_rebalances": row["full_sample"]["rebalance_count"],
+                "monte_carlo_gate": row.get("robustness", {})
+                .get("checks", {})
+                .get("monte_carlo_gate"),
+                "dirichlet_gate": row.get("robustness", {}).get("checks", {}).get("dirichlet_gate"),
             }
             for row in rows
         ]
@@ -5801,6 +5835,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         "confirmation": ("2025-07-01", "2026-07-23"),
     }
     normal_results: dict[str, Any] = {}
+    stressed_results: dict[str, Any] = {}
     daily_returns: dict[str, pd.Series] = {}
     rows: list[dict[str, Any]] = []
     observer_paths: dict[str, str] = {}
@@ -5851,6 +5886,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 end=bounds[1],
             )
         normal_results[allocation.name] = normal
+        stressed_results[allocation.name] = stressed
         daily_returns[allocation.name] = normal.equity_curve.pct_change(fill_method=None).dropna()
         current_operational_compatible = (
             allocation.maximum_total_exposure
@@ -5980,10 +6016,17 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             abs(candidate.metrics["daily_cvar_95"]) - abs(control.metrics["daily_cvar_95"])
         )
 
-    for row in rows:
+    for row_index, row in enumerate(rows):
         name = str(row["policy_name"])
         normal = normal_results[name]
+        stressed = stressed_results[name]
         dsr = float(multiple.deflated_sharpe_probabilities.get(name, 0.0))
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=normal.equity_curve,
+            stressed_equity=stressed.equity_curve,
+            seed_offset=10_000 + row_index * 10,
+        )
         economic_checks = {
             "all_periods_positive": all(
                 float(row["periods"][period]["net_return"]) > 0 for period in periods
@@ -6028,11 +6071,20 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 and multiple.probability_of_backtest_overfitting
                 <= settings.research.maximum_probability_of_backtest_overfitting
             ),
+            "monte_carlo": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
         }
         row["gates"] = {
             "economic_checks": economic_checks,
             "statistical_checks": statistical_checks,
             "deflated_sharpe_probability": dsr,
+            "stochastic_validation": stochastic,
             "economic_pass": all(economic_checks.values()),
             "statistical_pass": all(statistical_checks.values()),
             "research_pass": False,
@@ -6118,6 +6170,8 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 ],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
+                "monte_carlo_gate": row["gates"]["statistical_checks"]["monte_carlo"],
+                "dirichlet_gate": row["gates"]["statistical_checks"]["dirichlet"],
                 "operational_compatible": row["current_operational_limits_compatible"],
                 "paper_candidate": False,
                 "live_ready": False,
@@ -6180,6 +6234,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
     )
     control_returns = frozen_control.equity_curve.pct_change(fill_method=None).dropna()
     results: dict[str, Any] = {}
+    stressed_results: dict[str, Any] = {}
     daily_returns: dict[str, pd.Series] = {}
     rows: list[dict[str, Any]] = []
     observer_paths: dict[str, str] = {}
@@ -6226,6 +6281,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
             f"_{parameters.weighting.upper()}"
         )
         results[policy_name] = normal
+        stressed_results[policy_name] = stressed
         returns = normal.equity_curve.pct_change(fill_method=None).dropna()
         daily_returns[policy_name] = returns[~returns.index.duplicated(keep="last")]
         observer_path = (
@@ -6323,9 +6379,16 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         seed=settings.app.random_seed,
         known_trial_count=prior_trials + len(parameters_set),
     )
-    for row in rows:
+    for row_index, row in enumerate(rows):
         name = str(row["policy_name"])
         result = results[name]
+        stressed_result = stressed_results[name]
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=result.equity_curve,
+            stressed_equity=stressed_result.equity_curve,
+            seed_offset=20_000 + row_index * 10,
+        )
         economic_checks = {
             "development_positive": (float(row["periods"]["development"]["net_return"]) > 0),
             "validation_positive": (float(row["periods"]["validation"]["net_return"]) > 0),
@@ -6377,6 +6440,14 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
                 and multiple.probability_of_backtest_overfitting
                 <= settings.research.maximum_probability_of_backtest_overfitting
             ),
+            "monte_carlo": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
         }
         row["gates"] = {
             "economic_checks": economic_checks,
@@ -6384,6 +6455,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
             "deflated_sharpe_probability": float(
                 multiple.deflated_sharpe_probabilities.get(name, 0.0)
             ),
+            "stochastic_validation": stochastic,
             "economic_pass": all(economic_checks.values()),
             "statistical_pass": all(statistical_checks.values()),
             "holdout_status": "CONTAMINATED_BY_PRIOR_EXPLORATION",
@@ -6481,6 +6553,8 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
                 "closed_episodes": row["normal"]["metrics"]["closed_position_episodes"],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
+                "monte_carlo_gate": row["gates"]["statistical_checks"]["monte_carlo"],
+                "dirichlet_gate": row["gates"]["statistical_checks"]["dirichlet"],
                 "paper_candidate": False,
                 "live_ready": False,
             }
@@ -6546,6 +6620,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
     )
     control_returns = control.equity_curve.pct_change(fill_method=None).dropna()
     results: dict[str, Any] = {}
+    stressed_results: dict[str, Any] = {}
     daily_returns: dict[str, pd.Series] = {}
     rows: list[dict[str, Any]] = []
     observer_paths: dict[str, str] = {}
@@ -6602,6 +6677,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 end=bounds[1],
             )
         results[diversification.name] = normal
+        stressed_results[diversification.name] = stressed
         policy_returns = normal.equity_curve.pct_change(fill_method=None).dropna()
         daily_returns[diversification.name] = policy_returns[
             ~policy_returns.index.duplicated(keep="last")
@@ -6679,10 +6755,17 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
         seed=settings.app.random_seed,
         known_trial_count=prior_trials + len(policies),
     )
-    for row in rows:
+    for row_index, row in enumerate(rows):
         name = str(row["policy_name"])
         result = results[name]
+        stressed_result = stressed_results[name]
         paired = row["paired_block_bootstrap_vs_frozen_control"]
+        stochastic = _portfolio_stochastic_validation(
+            settings,
+            normal_equity=result.equity_curve,
+            stressed_equity=stressed_result.equity_curve,
+            seed_offset=30_000 + row_index * 10,
+        )
         economic_checks = {
             "all_periods_positive": all(
                 float(row["periods"][period]["net_return"]) > 0 for period in periods
@@ -6731,6 +6814,14 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 and multiple.probability_of_backtest_overfitting
                 <= settings.research.maximum_probability_of_backtest_overfitting
             ),
+            "monte_carlo": bool(
+                stochastic["normal"]["monte_carlo"]["passed"]
+                and stochastic["stressed"]["monte_carlo"]["passed"]
+            ),
+            "dirichlet": bool(
+                stochastic["normal"]["dirichlet"]["passed"]
+                and stochastic["stressed"]["dirichlet"]["passed"]
+            ),
         }
         row["gates"] = {
             "economic_checks": economic_checks,
@@ -6738,6 +6829,7 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
             "deflated_sharpe_probability": float(
                 multiple.deflated_sharpe_probabilities.get(name, 0.0)
             ),
+            "stochastic_validation": stochastic,
             "economic_pass": all(economic_checks.values()),
             "statistical_pass": all(statistical_checks.values()),
             "research_pass": False,
@@ -6818,6 +6910,8 @@ def _run_diversified_rotation_campaign(settings: Settings) -> dict[str, Any]:
                 "average_cash": row["normal"]["metrics"]["cash_fraction_average"],
                 "economic_pass": row["gates"]["economic_pass"],
                 "statistical_pass": row["gates"]["statistical_pass"],
+                "monte_carlo_gate": row["gates"]["statistical_checks"]["monte_carlo"],
+                "dirichlet_gate": row["gates"]["statistical_checks"]["dirichlet"],
                 "paper_candidate": False,
                 "live_ready": False,
             }
@@ -6887,18 +6981,10 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
     if section == "ai":
         from core.ai_governance import evaluate_ai_governance
 
-        evidence = (
-            read_json(args.evidence)
-            if args.evidence is not None
-            else None
-        )
+        evidence = read_json(args.evidence) if args.evidence is not None else None
         decision = evaluate_ai_governance(evidence)
         if args.write_report:
-            report = (
-                settings.paths.lab_dir
-                / "reports"
-                / "ai_governance_status_v1.json"
-            )
+            report = settings.paths.lab_dir / "reports" / "ai_governance_status_v1.json"
             atomic_write_json(report, decision)
             decision = {**decision, "report": str(report)}
         emit(decision)

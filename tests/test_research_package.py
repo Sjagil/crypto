@@ -8,6 +8,15 @@ from reporting.research_package import build_acceptance_summary
 def _inputs() -> dict:
     identity = "frozen-identity"
     dna_hash = "frozen-dna"
+    stochastic = {
+        "passed": False,
+        "checks": {
+            "normal_monte_carlo": False,
+            "normal_dirichlet": True,
+            "stressed_monte_carlo": False,
+            "stressed_dirichlet": True,
+        },
+    }
     quality = {
         "ruff": {"passed": True},
         "pytest": {"passed": True, "passed_count": 1},
@@ -38,6 +47,12 @@ def _inputs() -> dict:
             "economic_research_lead_count": 1,
             "statistically_qualified_count": 0,
             "multiple_testing": {"known_trial_count": 1_240},
+            "survivors": [
+                {
+                    "strategy_dna_hash": dna_hash,
+                    "robustness": {"stochastic_validation": stochastic},
+                }
+            ],
         },
         "external": {
             "candidate_identity": identity,
@@ -88,6 +103,12 @@ def _inputs() -> dict:
             "positive_all_three_periods_descriptive_only": 44,
             "economic_research_lead_count": 0,
             "statistically_qualified_count": 0,
+            "survivors": [
+                {
+                    "strategy_dna_hash": "continuation-dna",
+                    "robustness": {"stochastic_validation": stochastic},
+                }
+            ],
         },
         "observer": {
             "source_candidate_identity": identity,

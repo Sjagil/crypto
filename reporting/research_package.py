@@ -97,12 +97,39 @@ def build_acceptance_summary(
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
+    def require_stochastic_validation(
+        label: str,
+        rows: list[dict[str, Any]],
+        *,
+        container: str,
+    ) -> None:
+        missing = [
+            str(row.get("policy_name") or row.get("strategy_dna_hash") or index)
+            for index, row in enumerate(rows)
+            if not isinstance(row.get(container), dict)
+            or not isinstance(row[container].get("stochastic_validation"), dict)
+        ]
+        if missing:
+            raise ValueError(
+                f"{label} rows lack formal Monte Carlo/Dirichlet evidence: {missing}"
+            )
+
     identity = str(lead["immutable_identity"])
     dna_hash = str(lead["strategy_dna_hash"])
     if lead.get("status") != "FROZEN_RESEARCH_LEAD":
         raise ValueError("candidate is not a frozen research lead")
     if campaign.get("status") != "COMPLETED":
         raise ValueError("source ensemble campaign is incomplete")
+    require_stochastic_validation(
+        "source rotation campaign",
+        campaign["survivors"],
+        container="robustness",
+    )
+    require_stochastic_validation(
+        "institutional rotation continuation",
+        continuation["survivors"],
+        container="robustness",
+    )
     for label, artifact in (("external", external), ("forward", forward)):
         if artifact.get("candidate_identity") != identity:
             raise ValueError(f"{label} candidate identity mismatch")
@@ -117,16 +144,31 @@ def build_acceptance_summary(
             raise ValueError("capital utilization candidate identity mismatch")
         if capital_utilization.get("strategy_dna_hash") != dna_hash:
             raise ValueError("capital utilization strategy DNA mismatch")
+        require_stochastic_validation(
+            "capital utilization",
+            capital_utilization["policy_results"],
+            container="gates",
+        )
     if diversified_rotation is not None:
         if diversified_rotation.get("source_candidate_identity") != identity:
             raise ValueError("diversified rotation candidate identity mismatch")
         if diversified_rotation.get("source_frozen_strategy_dna_hash") != dna_hash:
             raise ValueError("diversified rotation source DNA mismatch")
+        require_stochastic_validation(
+            "diversified rotation",
+            diversified_rotation["policy_results"],
+            container="gates",
+        )
     if portfolio_breakout is not None:
         if portfolio_breakout.get("source_candidate_identity") != identity:
             raise ValueError("portfolio breakout candidate identity mismatch")
         if portfolio_breakout.get("source_frozen_strategy_dna_hash") != dna_hash:
             raise ValueError("portfolio breakout source DNA mismatch")
+        require_stochastic_validation(
+            "portfolio breakout",
+            portfolio_breakout["policy_results"],
+            container="gates",
+        )
     if portfolio_storm is not None:
         if portfolio_storm.get("status") != "COMPLETED_NOT_PROMOTED":
             raise ValueError("portfolio storm is incomplete")

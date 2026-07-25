@@ -654,6 +654,23 @@ invariant violations remain immediate operational failures. Reset requires
 `--mode reset --yes --reason "..."`. The autopilot cannot set paper/live ready,
 cannot submit orders and cannot overwrite the frozen candidate.
 
+Formal promotion now also requires two independent stochastic robustness gates.
+The stationary-bootstrap Monte Carlo uses 10,000 dependent-path simulations
+with geometric block restarts and must keep both the terminal-loss probability
+below 5% and the probability of breaching a 20% drawdown below 1%; its 5th
+percentile total return must remain non-negative. The Dirichlet
+time-concentration stress runs 10,000 simulations for concentration alphas
+0.5, 1.0 and 5.0 over chronological market blocks. Every profile must retain
+at least 95% probability of a positive terminal result and a non-negative 5th
+percentile. Both checks run on normal and stressed-cost net return paths.
+Probability gates use the one-sided 95% Wilson upper confidence bound rather
+than accepting the raw simulation frequency at face value.
+They never alter strategy DNA, DSR, White Reality Check, Hansen SPA, PBO or the
+known-trial denominator. Missing, invalid or insufficient paths fail closed.
+The generic acceptance gate and the rotation, capital-utilization,
+diversification and breakout campaign reports all enforce and persist this
+evidence.
+
 AI, neural-network and other machine-learning development is explicitly
 embargoed. `python main.py lab ai status` reports the fail-closed policy.
 Eligibility requires an economically and statistically passed immutable
