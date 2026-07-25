@@ -118,3 +118,46 @@ def test_acceptance_summary_rejects_cross_candidate_evidence() -> None:
 
     with pytest.raises(ValueError, match="identity mismatch"):
         build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_includes_orderless_autopilot_evidence() -> None:
+    values = _inputs()
+    values["autopilot_state"] = {
+        "status": "COMPLETED_ORDERLESS",
+        "cycle_count": 4,
+        "last_cycle_id": "AUTO_TEST",
+        "last_completed_at": "2026-07-25T00:00:00Z",
+        "last_data_fingerprint": "data-hash",
+        "last_research_at": "2026-07-25T00:00:00Z",
+        "research_ran": False,
+        "research_reason": "DATA_UNCHANGED",
+        "degradation": {"status": "INSUFFICIENT_FORWARD_DATA"},
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    values["autopilot_degradation"] = {
+        "system_degraded": False,
+        "status": "HEALTHY",
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    assert summary["autopilot"]["status"] == "COMPLETED_ORDERLESS"
+    assert summary["autopilot"]["cycle_count"] == 4
+    assert not summary["autopilot"]["persistent_kill_switch"][
+        "system_degraded"
+    ]
+    assert summary["autopilot"]["orders_generated"] == 0
+
+
+def test_acceptance_summary_rejects_autopilot_live_permission() -> None:
+    values = _inputs()
+    values["autopilot_state"] = {
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="live permission"):
+        build_acceptance_summary(**values)

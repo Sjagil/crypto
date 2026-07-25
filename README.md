@@ -477,6 +477,10 @@ python main.py lab campaign plan --name portfolio-breakout-v1
 python main.py lab campaign run --name portfolio-breakout-v1 --yes
 python main.py lab campaign report --name portfolio-breakout-v1
 python main.py lab campaign observe --name portfolio-breakout-v1
+python main.py lab campaign autopilot
+python main.py lab campaign autopilot --mode status
+python main.py lab campaign autopilot --run-research --refresh-data
+python main.py lab campaign autopilot --mode continuous --run-research --refresh-data --max-cycles 7
 python main.py lab state
 python main.py lab state --apply
 ```
@@ -547,6 +551,22 @@ The strict policy remains BTC/ETH/SOL/LINK only, 40% maximum total exposure,
 20% per asset and 60% minimum cash. The report detects identical return paths
 caused by hard-cap saturation but still counts every declared variant in the
 1,312-trial multiple-testing universe.
+
+`campaign autopilot` runs one bounded, orderless cycle by default. It audits a
+deterministic data fingerprint, schedules only the already preregistered
+breakout family when `--run-research` is enabled, verifies every frozen observer
+manifest, and persists a cycle record below `output/lab/autopilot/`. Research
+is skipped when data is unchanged or the seven-day research interval has not
+elapsed. `--refresh-data` refreshes only the strict ALLOWED daily universe;
+`--mode continuous` is explicit and can be bounded with `--max-cycles`.
+
+Forward-degradation evidence may be supplied with `--degradation-input` as JSON
+containing `live_return`, `cv_mean`, `cv_std` and `observation_count`. Fewer
+than 30 observations remains `INSUFFICIENT_FORWARD_DATA`; an undefined metric,
+stage failure, order/promotion invariant violation, or z-score below -2.0
+activates a persistent `SYSTEM_DEGRADED` kill-switch. Reset requires
+`--mode reset --yes --reason "..."`. The autopilot cannot set paper/live ready,
+cannot submit orders and cannot overwrite the frozen candidate.
 
 `campaign observe` writes `FROZEN_FORWARD_RESEARCH` rankings and hypothetical
 next-open weights with zero generated or submitted orders. Forward promotion

@@ -3353,6 +3353,201 @@ def _breakout_portfolio_campaign_path(settings: Settings) -> Path:
     )
 
 
+def _autopilot_data_stage(
+    settings: Settings,
+    *,
+    refresh: bool,
+    refresh_timeout_seconds: float,
+) -> dict[str, Any]:
+    """Audit local research data and optionally refresh the strict 1d universe."""
+
+    from core.autopilot import AutopilotOrchestrator
+
+    refresh_result: dict[str, Any] = {
+        "status": "SKIPPED",
+        "reason": "REFRESH_NOT_REQUESTED",
+    }
+    if refresh:
+        command = [
+            sys.executable,
+            str(settings.paths.project_root / "main.py"),
+            "lab",
+            "data",
+            "prepare",
+            "--universe-size",
+            "4",
+            "--allowed-universe",
+            "--timeframes",
+            "1d",
+            "--minimum-rows",
+            "2000",
+            "--force",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=settings.paths.project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=refresh_timeout_seconds,
+        )
+        refresh_result = {
+            "status": "PASSED" if completed.returncode == 0 else "FAILED",
+            "return_code": completed.returncode,
+            "command": command,
+            "stdout_tail": completed.stdout[-4_000:],
+            "stderr_tail": completed.stderr[-4_000:],
+        }
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"AUTOPILOT_DATA_REFRESH_FAILED:{completed.returncode}"
+            )
+
+    strict_markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    normalized = settings.paths.data_dir / "normalized"
+    required = [
+        normalized / f"{market}_1d.parquet"
+        for market in strict_markets
+    ]
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"AUTOPILOT_STRICT_DAILY_DATA_MISSING:{missing}"
+        )
+    data_files = sorted(
+        {
+            path
+            for market in strict_markets
+            for path in normalized.glob(f"{market}_1d.parquet*")
+            if path.is_file()
+        }
+    )
+    latest_modified = max(
+        (path.stat().st_mtime for path in data_files),
+        default=0.0,
+    )
+    return {
+        "status": "DATA_REFRESHED" if refresh else "DATA_AUDITED",
+        "strict_markets": list(strict_markets),
+        "timeframes": ["1d"],
+        "file_count": len(data_files),
+        "latest_modified_utc": (
+            datetime.fromtimestamp(latest_modified, tz=UTC).isoformat()
+            if latest_modified
+            else None
+        ),
+        "data_fingerprint": AutopilotOrchestrator.fingerprint_files(
+            data_files
+        ),
+        "refresh": refresh_result,
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
+def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
+    """Verify every breakout observer remains frozen and orderless."""
+
+    from core.autopilot import assert_orderless_research_payload
+
+    report_path = _breakout_portfolio_campaign_path(settings)
+    if not report_path.is_file():
+        raise FileNotFoundError(
+            "portfolio-breakout-v1 report is required before autopilot"
+        )
+    report = read_json(report_path)
+    assert_orderless_research_payload(report)
+    manifests = dict(report.get("observer_manifests") or {})
+    if not manifests:
+        raise RuntimeError("AUTOPILOT_OBSERVER_MANIFESTS_MISSING")
+    identities: dict[str, str] = {}
+    for policy_name, raw_path in sorted(manifests.items()):
+        path = Path(raw_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"observer manifest missing: {path}")
+        observer = read_json(path)
+        assert_orderless_research_payload(observer)
+        if observer.get("status") != "FROZEN_FORWARD_RESEARCH":
+            raise RuntimeError(
+                f"AUTOPILOT_OBSERVER_NOT_FROZEN:{policy_name}"
+            )
+        if bool(observer.get("candidate_promotion_implied", False)):
+            raise RuntimeError(
+                f"AUTOPILOT_OBSERVER_PROMOTION_IMPLIED:{policy_name}"
+            )
+        identities[str(policy_name)] = str(
+            observer.get("strategy_dna_hash") or ""
+        )
+    return {
+        "status": "FROZEN_FORWARD_RESEARCH",
+        "campaign": "PORTFOLIO_BREAKOUT_V1",
+        "observer_count": len(manifests),
+        "observer_dna_hashes": identities,
+        "source_candidate_identity": report.get(
+            "source_candidate_identity"
+        ),
+        "frozen_candidate_unchanged": bool(
+            report.get("frozen_candidate_unchanged")
+        ),
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
+def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
+    """Re-run only the already preregistered eight-variant breakout family."""
+
+    result = _run_breakout_portfolio_campaign(settings)
+    total_trials = int(result["total_known_trials"])
+    parameters_tested = int(result["parameters_tested"])
+    return {
+        "status": result["status"],
+        "campaign": result["campaign"],
+        "parameters_tested": parameters_tested,
+        "prior_trials_accounted": int(
+            result.get(
+                "prior_trials_accounted",
+                total_trials - parameters_tested,
+            )
+        ),
+        "total_known_trials": total_trials,
+        "economic_research_lead_count": result[
+            "economic_research_lead_count"
+        ],
+        "statistically_qualified_count": result[
+            "statistically_qualified_count"
+        ],
+        "frozen_candidate_unchanged": result[
+            "frozen_candidate_unchanged"
+        ],
+        "paper_candidates": result["paper_candidates"],
+        "live_orders": result["live_orders"],
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+
+def _autopilot_degradation_observation(
+    path: Path | None,
+) -> Any:
+    if path is None:
+        return None
+    from core.autopilot import DegradationObservation
+
+    payload = read_json(path)
+    return DegradationObservation(
+        live_return=float(payload["live_return"]),
+        cv_mean=float(payload["cv_mean"]),
+        cv_std=float(payload["cv_std"]),
+        observation_count=int(payload["observation_count"]),
+        window=str(payload.get("window") or "30d"),
+        source=str(payload.get("source") or path),
+    )
+
+
 def _rotation_return_ci_lower(
     returns: pd.Series,
     *,
@@ -5286,6 +5481,7 @@ def _run_breakout_portfolio_campaign(settings: Settings) -> dict[str, Any]:
         "status": payload["status"],
         "campaign": payload["campaign"],
         "parameters_tested": len(parameters_set),
+        "prior_trials_accounted": payload["prior_trials_accounted"],
         "total_known_trials": payload["total_known_trials"],
         "economic_research_lead_count": len(economic_leads),
         "statistically_qualified_count": len(statistical_rows),
@@ -6052,6 +6248,102 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         return 0
     if section == "campaign":
         campaign_action = action or "status"
+        if campaign_action == "autopilot":
+            from core.autopilot import (
+                AutopilotOrchestrator,
+                AutopilotPolicy,
+            )
+
+            policy = AutopilotPolicy(
+                interval_seconds=args.interval_seconds,
+                research_interval_seconds=args.research_interval_seconds,
+                degradation_z_threshold=args.degradation_z_threshold,
+                minimum_degradation_observations=(
+                    args.minimum_degradation_observations
+                ),
+                stale_lock_seconds=args.stale_lock_seconds,
+            )
+            orchestrator = AutopilotOrchestrator(
+                settings.paths.lab_dir / "autopilot",
+                policy=policy,
+            )
+            if args.mode == "status":
+                emit(orchestrator.status())
+                return 0
+            if args.mode == "reset":
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "reason": (
+                                "PERSISTENT_KILL_SWITCH_RESET_REQUIRES_REVIEW"
+                            ),
+                            "orders_generated": 0,
+                            "paper_candidate_permitted": False,
+                            "live_ready": False,
+                        }
+                    )
+                    return 2
+                emit(
+                    orchestrator.reset_kill_switch(
+                        reason=args.reason or "",
+                        confirmed=True,
+                    )
+                )
+                return 0
+
+            degradation_observation = (
+                _autopilot_degradation_observation(
+                    args.degradation_input
+                )
+            )
+
+            def cycle() -> dict[str, Any]:
+                return orchestrator.run_once(
+                    data_stage=lambda: _autopilot_data_stage(
+                        settings,
+                        refresh=args.refresh_data,
+                        refresh_timeout_seconds=(
+                            args.refresh_timeout_seconds
+                        ),
+                    ),
+                    research_stage=(
+                        (lambda: _autopilot_research_stage(settings))
+                        if args.run_research
+                        else None
+                    ),
+                    observer_stage=lambda: _autopilot_observer_stage(
+                        settings
+                    ),
+                    degradation_observation=degradation_observation,
+                    force_research=args.force_research,
+                )
+
+            if args.mode == "continuous":
+                max_cycles = (
+                    None if args.max_cycles == 0 else args.max_cycles
+                )
+                results = await asyncio.to_thread(
+                    orchestrator.run_loop,
+                    cycle,
+                    max_cycles=max_cycles,
+                )
+                payload: dict[str, Any] = {
+                    "status": results[-1]["status"],
+                    "cycle_count": len(results),
+                    "last_cycle": results[-1],
+                    "orders_generated": 0,
+                    "paper_candidate_permitted": False,
+                    "live_ready": False,
+                }
+            else:
+                payload = await asyncio.to_thread(cycle)
+            emit(payload)
+            return (
+                3
+                if payload.get("status") == "SYSTEM_DEGRADED"
+                else 0
+            )
         campaign_name = getattr(
             args,
             "name",
@@ -8744,6 +9036,52 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("cross-sectional-ensemble",),
         default="cross-sectional-ensemble",
     )
+    campaign_autopilot = campaign.add_parser("autopilot")
+    campaign_autopilot.add_argument(
+        "--mode",
+        choices=("once", "continuous", "status", "reset"),
+        default="once",
+    )
+    campaign_autopilot.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=86_400.0,
+    )
+    campaign_autopilot.add_argument(
+        "--research-interval-seconds",
+        type=float,
+        default=604_800.0,
+    )
+    campaign_autopilot.add_argument(
+        "--degradation-z-threshold",
+        type=float,
+        default=-2.0,
+    )
+    campaign_autopilot.add_argument(
+        "--minimum-degradation-observations",
+        type=int,
+        default=30,
+    )
+    campaign_autopilot.add_argument(
+        "--stale-lock-seconds",
+        type=float,
+        default=14_400.0,
+    )
+    campaign_autopilot.add_argument("--max-cycles", type=int, default=1)
+    campaign_autopilot.add_argument("--run-research", action="store_true")
+    campaign_autopilot.add_argument("--force-research", action="store_true")
+    campaign_autopilot.add_argument("--refresh-data", action="store_true")
+    campaign_autopilot.add_argument(
+        "--refresh-timeout-seconds",
+        type=float,
+        default=3_600.0,
+    )
+    campaign_autopilot.add_argument(
+        "--degradation-input",
+        type=Path,
+    )
+    campaign_autopilot.add_argument("--reason")
+    campaign_autopilot.add_argument("--yes", action="store_true")
     lab.add_parser("queue")
     lab.add_parser("workers")
     lab.add_parser("failures")

@@ -61,6 +61,8 @@ def test_required_command_families_are_registered() -> None:
         ["lab", "campaign", "audit", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "observe", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "package", "--name", "cross-sectional-ensemble"],
+        ["lab", "campaign", "autopilot"],
+        ["lab", "campaign", "autopilot", "--mode", "status"],
     ):
         assert parser.parse_args(arguments).command
 

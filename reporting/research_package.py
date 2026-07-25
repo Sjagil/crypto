@@ -89,6 +89,8 @@ def build_acceptance_summary(
     capital_utilization: dict[str, Any] | None = None,
     diversified_rotation: dict[str, Any] | None = None,
     portfolio_breakout: dict[str, Any] | None = None,
+    autopilot_state: dict[str, Any] | None = None,
+    autopilot_degradation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
 
@@ -125,6 +127,13 @@ def build_acceptance_summary(
             raise ValueError("portfolio breakout candidate identity mismatch")
         if portfolio_breakout.get("source_frozen_strategy_dna_hash") != dna_hash:
             raise ValueError("portfolio breakout source DNA mismatch")
+    if autopilot_state is not None:
+        if int(autopilot_state.get("orders_generated") or 0) != 0:
+            raise ValueError("autopilot state contains generated orders")
+        if bool(autopilot_state.get("paper_candidate_permitted", False)):
+            raise ValueError("autopilot state contains paper permission")
+        if bool(autopilot_state.get("live_ready", False)):
+            raise ValueError("autopilot state contains live permission")
     if any(
         bool(artifact.get(field))
         for artifact in (
@@ -328,6 +337,29 @@ def build_acceptance_summary(
             "live_orders": 0,
             "live_ready": False,
         }
+    if autopilot_state is not None:
+        summary["autopilot"] = {
+            "status": autopilot_state["status"],
+            "cycle_count": autopilot_state["cycle_count"],
+            "last_cycle_id": autopilot_state.get("last_cycle_id"),
+            "last_completed_at": autopilot_state.get(
+                "last_completed_at"
+            ),
+            "last_data_fingerprint": autopilot_state.get(
+                "last_data_fingerprint"
+            ),
+            "last_research_at": autopilot_state.get("last_research_at"),
+            "last_research_data_fingerprint": autopilot_state.get(
+                "last_research_data_fingerprint"
+            ),
+            "research_ran": autopilot_state.get("research_ran"),
+            "research_reason": autopilot_state.get("research_reason"),
+            "degradation": autopilot_state.get("degradation"),
+            "persistent_kill_switch": autopilot_degradation,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
     return summary
 
 
@@ -399,6 +431,17 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     )
     for observer in sorted(breakout_observer_directory.glob("*.json")):
         paths[f"breakout_observer_{observer.name}"] = observer
+    autopilot_directory = settings.paths.lab_dir / "autopilot"
+    autopilot_state = autopilot_directory / "state.json"
+    autopilot_degradation = autopilot_directory / "degradation_state.json"
+    if autopilot_state.is_file():
+        paths["autopilot_state.json"] = autopilot_state
+        state = read_json(autopilot_state)
+        last_cycle = Path(str(state.get("last_cycle_path") or ""))
+        if last_cycle.is_file():
+            paths["autopilot_latest_cycle.json"] = last_cycle
+    if autopilot_degradation.is_file():
+        paths["autopilot_degradation_state.json"] = autopilot_degradation
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -465,6 +508,10 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         capital_utilization=payloads["capital_utilization_campaign_v1.json"],
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
         portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
+        autopilot_state=payloads.get("autopilot_state.json"),
+        autopilot_degradation=payloads.get(
+            "autopilot_degradation_state.json"
+        ),
     )
     evidence_hash = stable_hash(
         {
