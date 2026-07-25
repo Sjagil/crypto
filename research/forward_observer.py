@@ -15,11 +15,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from research.portfolio_breakout import BreakoutPortfolioResult
 from research.portfolio_selection import _validated_panel
 from utils.common import stable_hash
 
 FORWARD_OBSERVER_SCHEMA_VERSION = "breakout_forward_observer_v1"
+PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION = "portfolio_forward_observer_v1"
 
 
 class ForwardHistoryRevisionError(RuntimeError):
@@ -34,6 +34,7 @@ class BreakoutForwardEvidence:
     decisions: tuple[dict[str, Any], ...]
     summary: dict[str, Any]
     degradation_observation: dict[str, Any] | None
+    schema_version: str = FORWARD_OBSERVER_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,11 +385,12 @@ def _formal_performance(
     return metrics, checks
 
 
-def build_breakout_forward_evidence(
-    result: BreakoutPortfolioResult,
+def _build_portfolio_forward_evidence(
+    result: Any,
     frames: Mapping[str, pd.DataFrame],
     *,
     forward_start: Any,
+    schema_version: str,
     minimum_observations: int = 365,
     minimum_rebalances: int = 30,
     minimum_regime_decisions: int = 5,
@@ -481,7 +483,7 @@ def build_breakout_forward_evidence(
             prior_position=prior_position,
         )
         record = {
-            "schema_version": FORWARD_OBSERVER_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "observation_id": stable_hash(
                 [
                     result.parameters.dna_hash,
@@ -639,6 +641,55 @@ def build_breakout_forward_evidence(
             forward_returns=forward_returns,
             historical_returns=historical_returns,
         ),
+        schema_version=schema_version,
+    )
+
+
+def build_breakout_forward_evidence(
+    result: Any,
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    forward_start: Any,
+    minimum_observations: int = 365,
+    minimum_rebalances: int = 30,
+    minimum_regime_decisions: int = 5,
+    performance_policy: ForwardPerformanceGatePolicy | None = None,
+) -> BreakoutForwardEvidence:
+    """Build append-only evidence for a frozen breakout portfolio."""
+
+    return _build_portfolio_forward_evidence(
+        result,
+        frames,
+        forward_start=forward_start,
+        schema_version=FORWARD_OBSERVER_SCHEMA_VERSION,
+        minimum_observations=minimum_observations,
+        minimum_rebalances=minimum_rebalances,
+        minimum_regime_decisions=minimum_regime_decisions,
+        performance_policy=performance_policy,
+    )
+
+
+def build_rotation_forward_evidence(
+    result: Any,
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    forward_start: Any,
+    minimum_observations: int = 365,
+    minimum_rebalances: int = 30,
+    minimum_regime_decisions: int = 5,
+    performance_policy: ForwardPerformanceGatePolicy | None = None,
+) -> BreakoutForwardEvidence:
+    """Build append-only evidence for a frozen rotation allocation policy."""
+
+    return _build_portfolio_forward_evidence(
+        result,
+        frames,
+        forward_start=forward_start,
+        schema_version=PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION,
+        minimum_observations=minimum_observations,
+        minimum_rebalances=minimum_rebalances,
+        minimum_regime_decisions=minimum_regime_decisions,
+        performance_policy=performance_policy,
     )
 
 
@@ -692,7 +743,7 @@ def merge_forward_observations(
     )
 
 
-def merge_breakout_forward_manifest(
+def merge_portfolio_forward_manifest(
     existing: Mapping[str, Any],
     evidence: BreakoutForwardEvidence,
     *,
@@ -735,9 +786,7 @@ def merge_breakout_forward_manifest(
         {
             **identity_checks,
             "status": "FROZEN_FORWARD_RESEARCH",
-            "forward_observer_schema_version": (
-                FORWARD_OBSERVER_SCHEMA_VERSION
-            ),
+            "forward_observer_schema_version": evidence.schema_version,
             "forward_observations": merged,
             "forward_decisions": decisions,
             "forward_summary": {
@@ -755,6 +804,27 @@ def merge_breakout_forward_manifest(
         }
     )
     return payload
+
+
+def merge_breakout_forward_manifest(
+    existing: Mapping[str, Any],
+    evidence: BreakoutForwardEvidence,
+    *,
+    source_candidate_identity: str,
+    strategy_dna_hash: str,
+    execution_identity: str,
+    forward_start: Any,
+) -> dict[str, Any]:
+    """Backward-compatible breakout wrapper around the generic merge."""
+
+    return merge_portfolio_forward_manifest(
+        existing,
+        evidence,
+        source_candidate_identity=source_candidate_identity,
+        strategy_dna_hash=strategy_dna_hash,
+        execution_identity=execution_identity,
+        forward_start=forward_start,
+    )
 
 
 def validate_forward_manifest_identity(
@@ -784,11 +854,14 @@ def validate_forward_manifest_identity(
 
 __all__ = [
     "FORWARD_OBSERVER_SCHEMA_VERSION",
+    "PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION",
     "BreakoutForwardEvidence",
     "ForwardPerformanceGatePolicy",
     "ForwardHistoryRevisionError",
     "build_breakout_forward_evidence",
+    "build_rotation_forward_evidence",
     "merge_breakout_forward_manifest",
+    "merge_portfolio_forward_manifest",
     "merge_forward_observations",
     "validate_forward_manifest_identity",
 ]

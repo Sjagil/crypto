@@ -3353,6 +3353,186 @@ def _breakout_portfolio_campaign_path(settings: Settings) -> Path:
     )
 
 
+def _portfolio_storm_paths(
+    settings: Settings,
+) -> tuple[Path, Path, Path]:
+    reports = settings.paths.lab_dir / "reports"
+    return (
+        reports / "portfolio_storm_plan_v1.json",
+        reports / "portfolio_storm_report_v1.json",
+        reports / "portfolio_storm_returns_v1.npz",
+    )
+
+
+def _portfolio_storm_plan_payload(
+    settings: Settings,
+    *,
+    trial_count: int,
+) -> dict[str, Any]:
+    from research.portfolio_storm import STORM_SEED, storm_plan
+
+    frozen_path = (
+        settings.paths.lab_dir
+        / "candidates"
+        / "rotation_research_lead_v1.json"
+    )
+    frozen, _, markets, paths, frames = _frozen_rotation_inputs(settings)
+    payload = storm_plan(trial_count=trial_count, seed=STORM_SEED)
+    common_index = sorted(
+        set.intersection(
+            *[set(frame.index) for frame in frames.values()]
+        )
+    )
+    return {
+        **payload,
+        "source_candidate_identity": frozen["immutable_identity"],
+        "source_candidate_sha256": sha256_file(frozen_path),
+        "markets": list(markets),
+        "timeframe": "1d",
+        "common_history_start": str(common_index[0]),
+        "common_history_end": str(common_index[-1]),
+        "common_history_observations": len(common_index),
+        "data_hashes": {
+            market: sha256_file(path) for market, path in paths.items()
+        },
+    }
+
+
+def _run_portfolio_storm_campaign(
+    settings: Settings,
+    *,
+    maximum_trials: int | None = None,
+) -> dict[str, Any]:
+    """Run an immutable development-only multi-objective portfolio storm."""
+
+    from research.portfolio_storm import (
+        STORM_TRIAL_COUNT,
+        PortfolioStormDNA,
+        run_portfolio_storm,
+    )
+
+    plan_path, report_path, matrix_path = _portfolio_storm_paths(settings)
+    trial_count = maximum_trials or STORM_TRIAL_COUNT
+    if trial_count < 2 or trial_count > STORM_TRIAL_COUNT:
+        raise ValueError(
+            f"portfolio storm trial count must be in [2, {STORM_TRIAL_COUNT}]"
+        )
+    expected = _portfolio_storm_plan_payload(
+        settings,
+        trial_count=trial_count,
+    )
+    if plan_path.is_file():
+        plan = read_json(plan_path)
+        immutable_fields = (
+            "search_space_hash",
+            "trial_count",
+            "seed",
+            "source_candidate_identity",
+            "source_candidate_sha256",
+            "data_hashes",
+        )
+        mismatches = [
+            field
+            for field in immutable_fields
+            if plan.get(field) != expected.get(field)
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "PORTFOLIO_STORM_PLAN_IDENTITY_MISMATCH:"
+                f"{mismatches}"
+            )
+    else:
+        plan = expected
+        atomic_write_json(plan_path, _json_ready(plan))
+
+    dna = tuple(
+        PortfolioStormDNA(**values)
+        for values in plan["strategy_dna"]
+    )
+    frozen_path = (
+        settings.paths.lab_dir
+        / "candidates"
+        / "rotation_research_lead_v1.json"
+    )
+    frozen_sha_before = sha256_file(frozen_path)
+    _, _, _, source_paths, frames = _frozen_rotation_inputs(settings)
+    breakout_path = _breakout_portfolio_campaign_path(settings)
+    prior_known_trials = 1_312
+    if breakout_path.is_file():
+        prior_known_trials = int(
+            read_json(breakout_path).get(
+                "total_known_trials",
+                prior_known_trials,
+            )
+        )
+    report, matrix, timestamps = run_portfolio_storm(
+        frames,
+        dna,
+        fee_rate=settings.costs.default_fee,
+        slippage_bps=settings.costs.slippage_bps,
+        spread_bps=settings.costs.spread_bps,
+        prior_known_trials=prior_known_trials,
+    )
+    temporary_matrix = matrix_path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        temporary_matrix,
+        returns=matrix,
+        timestamps=np.asarray(
+            [str(timestamp) for timestamp in timestamps],
+            dtype="U40",
+        ),
+        strategy_dna_hashes=np.asarray(
+            [row.dna_hash for row in dna],
+            dtype="U64",
+        ),
+    )
+    os.replace(temporary_matrix, matrix_path)
+    report.update(
+        {
+            "plan_path": str(plan_path),
+            "plan_sha256": sha256_file(plan_path),
+            "source_candidate_identity": plan[
+                "source_candidate_identity"
+            ],
+            "returns_matrix_path": str(matrix_path),
+            "returns_matrix_sha256": sha256_file(matrix_path),
+            "returns_matrix_shape": list(matrix.shape),
+            "data_hashes": {
+                market: sha256_file(path)
+                for market, path in source_paths.items()
+            },
+            "frozen_candidate_sha256_before": frozen_sha_before,
+            "frozen_candidate_sha256_after": sha256_file(frozen_path),
+            "frozen_candidate_unchanged": (
+                frozen_sha_before == sha256_file(frozen_path)
+            ),
+        }
+    )
+    atomic_write_json(report_path, _json_ready(report))
+    return {
+        "status": report["status"],
+        "campaign": report["campaign"],
+        "trial_count": report["trial_count"],
+        "total_known_trials": report["total_known_trials"],
+        "pareto_survivor_count": report["pareto_survivor_count"],
+        "pbo": report["multiple_testing"][
+            "pbo_development_all_trials"
+        ],
+        "white_spa_status": report["multiple_testing"][
+            "white_spa_status"
+        ],
+        "frozen_candidate_unchanged": report[
+            "frozen_candidate_unchanged"
+        ],
+        "plan": str(plan_path),
+        "report": str(report_path),
+        "returns_matrix": str(matrix_path),
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 def _autopilot_data_stage(
     settings: Settings,
     *,
@@ -3598,6 +3778,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         bool(summary.get("forward_performance_pass", False))
         for summary in summaries.values()
     )
+    capital_result = _run_capital_utilization_campaign(settings)
+    assert_orderless_research_payload(capital_result)
+    capital_report = read_json(
+        _capital_utilization_campaign_path(settings)
+    )
+    assert_orderless_research_payload(capital_report)
+    capital_forward_summaries = dict(
+        capital_report.get("forward_summaries") or {}
+    )
+    capital_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in capital_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -3612,6 +3805,20 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         "all_sample_requirements_met": all_sample_requirements_met,
         "all_forward_performance_pass": (
             all_forward_performance_pass
+        ),
+        "parallel_capital_utilization_observers": {
+            "campaign": "CAPITAL_UTILIZATION_V1",
+            "observer_count": len(capital_forward_summaries),
+            "forward_summaries": capital_forward_summaries,
+            "total_forward_observations": (
+                capital_forward_observations
+            ),
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+        "total_forward_observations_all_campaigns": (
+            total_forward_observations
+            + capital_forward_observations
         ),
         "source_candidate_identity": report.get(
             "source_candidate_identity"
@@ -5031,6 +5238,11 @@ def _run_rotation_forward_observer(settings: Settings) -> dict[str, Any]:
 def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
     """Compare pre-registered allocation policies on one frozen signal DNA."""
 
+    from research.forward_observer import (
+        ForwardPerformanceGatePolicy,
+        build_rotation_forward_evidence,
+        merge_portfolio_forward_manifest,
+    )
     from research.optimization import multiple_testing_bootstrap
     from research.portfolio_selection import (
         CAPITAL_UTILIZATION_METRICS_VERSION,
@@ -5152,7 +5364,6 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             "minimum_forward_rebalances": 30,
             "regime_coverage_required": True,
             "latest_historical_snapshot": snapshot,
-            "forward_observations": [],
             "current_operational_limits_compatible": (
                 current_operational_compatible
             ),
@@ -5167,6 +5378,52 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
             / "capital_utilization_v1"
             / f"{allocation.name.lower()}.json"
         )
+        existing_observer = (
+            read_json(observer_path)
+            if observer_path.is_file()
+            else {}
+        )
+        evidence = build_rotation_forward_evidence(
+            normal,
+            frames,
+            forward_start=forward_start,
+            minimum_observations=365,
+            minimum_rebalances=30,
+            performance_policy=ForwardPerformanceGatePolicy(
+                minimum_profit_factor=(
+                    settings.research.minimum_profit_factor
+                ),
+                minimum_stressed_profit_factor=(
+                    settings.research.minimum_stressed_profit_factor
+                ),
+                maximum_drawdown=settings.research.maximum_drawdown,
+                minimum_effective_sample_size=(
+                    settings.research.minimum_effective_sample_size
+                ),
+                stressed_cost_multiplier=(
+                    settings.costs.stressed_cost_multiplier
+                ),
+                bootstrap_samples=(
+                    settings.research.multiple_testing_bootstrap_samples
+                ),
+                bootstrap_block_size=(
+                    settings.research.multiple_testing_block_size
+                ),
+                bootstrap_seed=settings.app.random_seed,
+            ),
+        )
+        merged_forward = merge_portfolio_forward_manifest(
+            existing_observer,
+            evidence,
+            source_candidate_identity=frozen["immutable_identity"],
+            strategy_dna_hash=parameters.dna_hash,
+            execution_identity=normal.summary()["execution_identity"],
+            forward_start=forward_start,
+        )
+        observer_payload = {
+            **merged_forward,
+            **observer_payload,
+        }
         atomic_write_json(observer_path, _json_ready(observer_payload))
         observer_paths[allocation.name] = str(observer_path)
         rows.append(
@@ -5189,6 +5446,7 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
                 "cash_reason_attribution": normal.metrics[
                     "cash_reason_attribution_average"
                 ],
+                "forward_summary": observer_payload["forward_summary"],
                 "observer_manifest": str(observer_path),
             }
         )
@@ -5349,6 +5607,10 @@ def _run_capital_utilization_campaign(settings: Settings) -> dict[str, Any]:
         "benchmarks": benchmarks,
         "policy_results": rows,
         "observer_manifests": observer_paths,
+        "forward_summaries": {
+            str(row["policy_name"]): row["forward_summary"]
+            for row in rows
+        },
         "frozen_candidate_sha256_before": frozen_sha_before,
         "frozen_candidate_sha256_after": sha256_file(frozen_path),
         "frozen_candidate_unchanged": (
@@ -6727,6 +6989,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         capital_utilization_campaign = campaign_name == "capital-utilization-v1"
         diversified_rotation_campaign = campaign_name == "diversified-rotation-v1"
         breakout_portfolio_campaign = campaign_name == "portfolio-breakout-v1"
+        portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         rotation_campaign = campaign_name in {
             "cross-sectional-rotation",
             "cross-sectional-ensemble",
@@ -6739,6 +7002,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 or capital_utilization_campaign
                 or diversified_rotation_campaign
                 or breakout_portfolio_campaign
+                or portfolio_storm_campaign
             )
             else (("1h",) if formal_campaign else ("5m", "15m"))
         )
@@ -6756,17 +7020,27 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             else (
                 (
                     (
-                        "PORTFOLIO_BREAKOUT_V1"
+                        (
+                            "PORTFOLIO_STORM_V1"
+                            if portfolio_storm_campaign
+                            else "PORTFOLIO_BREAKOUT_V1"
+                        )
                         if breakout_portfolio_campaign
+                        or portfolio_storm_campaign
                         else "DIVERSIFIED_ROTATION_V1"
                     )
-                    if diversified_rotation_campaign or breakout_portfolio_campaign
+                    if (
+                        diversified_rotation_campaign
+                        or breakout_portfolio_campaign
+                        or portfolio_storm_campaign
+                    )
                     else "CAPITAL_UTILIZATION_V1"
                 )
                 if (
                     capital_utilization_campaign
                     or diversified_rotation_campaign
                     or breakout_portfolio_campaign
+                    or portfolio_storm_campaign
                 )
                 else (
                     "FORMAL_CAUSAL_FIVE_FAMILY_V1"
@@ -6846,6 +7120,47 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action in {"plan", "estimate"}:
+            if portfolio_storm_campaign:
+                from research.portfolio_storm import STORM_TRIAL_COUNT
+
+                trial_count = (
+                    min(args.storm_trials, STORM_TRIAL_COUNT)
+                    if hasattr(args, "storm_trials")
+                    else STORM_TRIAL_COUNT
+                )
+                payload = _portfolio_storm_plan_payload(
+                    settings,
+                    trial_count=trial_count,
+                )
+                plan_path, _, _ = _portfolio_storm_paths(settings)
+                if campaign_action == "plan":
+                    if plan_path.is_file():
+                        existing = read_json(plan_path)
+                        if existing.get("search_space_hash") != payload.get(
+                            "search_space_hash"
+                        ):
+                            raise RuntimeError(
+                                "PORTFOLIO_STORM_PLAN_ALREADY_EXISTS_DIFFERENT"
+                            )
+                    else:
+                        atomic_write_json(plan_path, _json_ready(payload))
+                public_plan = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"strategy_dna", "strategy_dna_hashes"}
+                }
+                emit(
+                    {
+                        **public_plan,
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "plan_path": str(plan_path),
+                    }
+                )
+                return 0
             if breakout_portfolio_campaign:
                 from research.portfolio_breakout import (
                     breakout_portfolio_parameter_set,
@@ -7088,6 +7403,27 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "run":
+            if portfolio_storm_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "parameter_trials": args.storm_trials,
+                            "reason_code": (
+                                "LARGE_PREREGISTERED_MULTI_OBJECTIVE_STORM"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_portfolio_storm_campaign,
+                        settings,
+                        maximum_trials=args.storm_trials,
+                    )
+                )
+                return 0
             if breakout_portfolio_campaign:
                 if not args.yes:
                     emit(
@@ -7237,6 +7573,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             emit(result)
             return 0 if int(result.get("failures") or 0) == 0 else 2
         if campaign_action == "report":
+            if portfolio_storm_campaign:
+                _, report_path, _ = _portfolio_storm_paths(settings)
+                if not report_path.is_file():
+                    raise FileNotFoundError(
+                        "portfolio-storm-v1 report does not exist"
+                    )
+                emit(read_json(report_path))
+                return 0
             if breakout_portfolio_campaign:
                 report_path = _breakout_portfolio_campaign_path(settings)
                 emit(
@@ -7301,6 +7645,28 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             )
             return 0
         if campaign_action == "status":
+            if portfolio_storm_campaign:
+                plan_path, report_path, matrix_path = (
+                    _portfolio_storm_paths(settings)
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "PLANNED_NOT_RUN"
+                            if plan_path.is_file()
+                            else "NOT_PLANNED"
+                        ),
+                        "plan": str(plan_path),
+                        "plan_exists": plan_path.is_file(),
+                        "report": str(report_path),
+                        "report_exists": report_path.is_file(),
+                        "returns_matrix_exists": matrix_path.is_file(),
+                    }
+                )
+                return 0
             if breakout_portfolio_campaign:
                 report_path = _breakout_portfolio_campaign_path(settings)
                 emit(
@@ -9354,18 +9720,22 @@ def build_parser() -> argparse.ArgumentParser:
         "capital-utilization-v1",
         "diversified-rotation-v1",
         "portfolio-breakout-v1",
+        "portfolio-storm-v1",
     )
     campaign_plan = campaign.add_parser("plan")
     campaign_plan.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_plan.add_argument("--combination-sizes", default="1,2")
+    campaign_plan.add_argument("--storm-trials", type=int, default=5_000)
     campaign_estimate = campaign.add_parser("estimate")
     campaign_estimate.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_estimate.add_argument("--combination-sizes", default="1,2")
+    campaign_estimate.add_argument("--storm-trials", type=int, default=5_000)
     campaign_run = campaign.add_parser("run")
     campaign_run.add_argument("--name", choices=campaign_names, default=campaign_names[0])
     campaign_run.add_argument("--combination-sizes", default="1,2")
     campaign_run.add_argument("--workers", type=int, default=4)
     campaign_run.add_argument("--max-trials", type=int, default=20)
+    campaign_run.add_argument("--storm-trials", type=int, default=5_000)
     campaign_run.add_argument("--retest", action="store_true")
     campaign_run.add_argument("--yes", action="store_true")
     campaign_status = campaign.add_parser("status")

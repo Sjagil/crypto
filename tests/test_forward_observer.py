@@ -9,17 +9,25 @@ import pytest
 import core.cli as cli
 from research.forward_observer import (
     FORWARD_OBSERVER_SCHEMA_VERSION,
+    PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION,
     ForwardHistoryRevisionError,
     ForwardPerformanceGatePolicy,
     build_breakout_forward_evidence,
+    build_rotation_forward_evidence,
     merge_breakout_forward_manifest,
     merge_forward_observations,
+    merge_portfolio_forward_manifest,
 )
 from research.portfolio_breakout import (
     BreakoutPortfolioParameters,
     backtest_breakout_portfolio,
 )
-from research.portfolio_selection import RotationPortfolioPolicy
+from research.portfolio_selection import (
+    CapitalUtilizationPolicy,
+    RotationParameters,
+    RotationPortfolioPolicy,
+    backtest_rotation,
+)
 
 
 def _frames(rows: int = 540) -> dict[str, pd.DataFrame]:
@@ -291,3 +299,78 @@ def test_campaign_recalculation_preserves_only_forward_fields():
             execution_identity="execution",
             forward_start=start,
         )
+
+
+def test_rotation_allocation_policy_gets_distinct_append_only_forward_evidence():
+    frames = _frames()
+    allocation = CapitalUtilizationPolicy(
+        name="TEST_SEMI_AGGRESSIVE",
+        base_exposure_budget=0.80,
+        maximum_total_exposure=0.80,
+        maximum_position_exposure=0.40,
+        minimum_cash=0.20,
+    )
+    policy = RotationPortfolioPolicy(
+        allowed_markets=tuple(frames),
+        maximum_total_exposure=0.80,
+        maximum_position_exposure=0.40,
+        minimum_cash=0.20,
+        minimum_history_observations=90,
+    )
+    result = backtest_rotation(
+        frames,
+        RotationParameters(
+            momentum_lookback=20,
+            additional_momentum_lookbacks=(90,),
+            top_n=2,
+            rebalance_days=7,
+            asset_ema_period=50,
+            btc_ema_period=200,
+            require_btc_uptrend=True,
+            continuous_regime=True,
+            weighting="equal",
+            gross_exposure=0.40,
+            minimum_cash=0.20,
+            maximum_positions=2,
+        ),
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+        portfolio_policy=policy,
+        capital_utilization_policy=allocation,
+    )
+    start = frames["BTC-EUR"].index[-45]
+    evidence = build_rotation_forward_evidence(
+        result,
+        frames,
+        forward_start=start,
+    )
+    identity = result.summary()["execution_identity"]
+    merged = merge_portfolio_forward_manifest(
+        {},
+        evidence,
+        source_candidate_identity="frozen",
+        strategy_dna_hash=result.parameters.dna_hash,
+        execution_identity=identity,
+        forward_start=start,
+    )
+
+    assert evidence.schema_version == (
+        PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION
+    )
+    assert len(merged["forward_observations"]) == 44
+    assert merged["forward_observer_schema_version"] == (
+        PORTFOLIO_FORWARD_OBSERVER_SCHEMA_VERSION
+    )
+    assert all(
+        observation["cash_fraction"] >= 0.20 - 1e-12
+        for observation in merged["forward_observations"]
+    )
+    assert all(
+        sum(observation["target_weights"].values()) <= 0.80 + 1e-12
+        for observation in merged["forward_observations"]
+    )
+    assert merged["orders_generated"] == 0
+    assert merged["orders_submitted"] == 0
+    assert merged["paper_candidate_permitted"] is False
+    assert merged["live_ready"] is False

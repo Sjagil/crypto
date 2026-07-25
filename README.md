@@ -477,6 +477,10 @@ python main.py lab campaign plan --name portfolio-breakout-v1
 python main.py lab campaign run --name portfolio-breakout-v1 --yes
 python main.py lab campaign report --name portfolio-breakout-v1
 python main.py lab campaign observe --name portfolio-breakout-v1
+python main.py lab campaign plan --name portfolio-storm-v1 --storm-trials 5000
+python main.py lab campaign run --name portfolio-storm-v1 --storm-trials 5000 --yes
+python main.py lab campaign status --name portfolio-storm-v1
+python main.py lab campaign report --name portfolio-storm-v1
 python main.py lab campaign autopilot
 python main.py lab campaign autopilot --mode status
 python main.py lab campaign autopilot --run-research --refresh-data
@@ -534,7 +538,13 @@ The report adds Sortino, Omega, CVaR, drawdown duration, exposure buckets,
 40/60/80% equal-weight and exposure-matched benchmarks, plus paired block
 bootstrap differences. Every policy is counted as a known trial. Policies
 above configured operational exposure remain research-only; all observers
-generate and submit zero orders.
+generate and submit zero orders. Their forward ledgers are append-only:
+historical source truncation, policy/execution identity drift, or any changed
+realized record fails closed. Formal performance gates remain dormant until
+365 realized daily intervals, 30 changed portfolios and the declared
+BTC-trend, volatility and breadth coverage are all present. The scheduled
+autopilot updates these capital-utilization observers alongside the breakout
+observers without granting paper or live authority.
 
 `diversified-rotation-v1` is a separate six-trial continuation family. It keeps
 the frozen 20/90-day momentum horizons, weekly next-open timing, EMA50 asset
@@ -555,6 +565,17 @@ The strict policy remains BTC/ETH/SOL/LINK only, 40% maximum total exposure,
 caused by hard-cap saturation but still counts every declared variant in the
 1,312-trial multiple-testing universe.
 
+`portfolio-storm-v1` preregisters a deterministic 5,000-DNA search before any
+objective is evaluated. It varies only declared momentum, EMA, top-1/top-2,
+rebalance, regime-mapping, weighting, strict exposure and hysteresis choices.
+Every trial stays below 40% total, 20% per asset and above 60% cash. Selection
+uses only the development split and constructs a Pareto front by maximizing
+portfolio-period profit factor while minimizing Ulcer Index and turnover
+efficiency. Validation and confirmation are reported only after survivor DNA
+is frozen. PBO uses all 5,000 development return paths and DSR uses the full
+known-trial denominator. Large-matrix White/SPA remains explicitly deferred,
+so the storm cannot claim a research pass or create a paper/live candidate.
+
 `campaign autopilot` runs one bounded, orderless cycle by default. It audits a
 deterministic data fingerprint, schedules only the already preregistered
 breakout family when `--run-research` is enabled, verifies every frozen observer
@@ -571,7 +592,8 @@ relative momentum, cross-sectional rank and breadth. Targets are physically
 separate and become available only at the next asset candle. No full-sample
 normalization is permitted. `--skip-feature-store` exists only for diagnostics.
 The observer stage then reconstructs append-only open-to-open forward returns
-for all eight frozen breakout DNA variants. Every record hashes its source
+for all eight frozen breakout DNA variants and all five capital-utilization
+policies. Every record hashes its source
 prices, weights, turnover, costs, regime and realized hypothetical return.
 Revised or truncated historical evidence fails closed. Performance gates remain
 disabled until 365 realized daily intervals, 30 rebalances and five decisions

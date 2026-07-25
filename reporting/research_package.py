@@ -89,6 +89,7 @@ def build_acceptance_summary(
     capital_utilization: dict[str, Any] | None = None,
     diversified_rotation: dict[str, Any] | None = None,
     portfolio_breakout: dict[str, Any] | None = None,
+    portfolio_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
     autopilot_degradation: dict[str, Any] | None = None,
     feature_store: dict[str, Any] | None = None,
@@ -129,6 +130,15 @@ def build_acceptance_summary(
             raise ValueError("portfolio breakout candidate identity mismatch")
         if portfolio_breakout.get("source_frozen_strategy_dna_hash") != dna_hash:
             raise ValueError("portfolio breakout source DNA mismatch")
+    if portfolio_storm is not None:
+        if portfolio_storm.get("status") != "COMPLETED_NOT_PROMOTED":
+            raise ValueError("portfolio storm is incomplete")
+        if portfolio_storm.get("source_candidate_identity") != identity:
+            raise ValueError("portfolio storm candidate identity mismatch")
+        if int(portfolio_storm.get("orders_generated") or 0) != 0:
+            raise ValueError("portfolio storm contains generated orders")
+        if bool(portfolio_storm.get("live_ready", False)):
+            raise ValueError("portfolio storm contains live permission")
     if autopilot_state is not None:
         if int(autopilot_state.get("orders_generated") or 0) != 0:
             raise ValueError("autopilot state contains generated orders")
@@ -374,6 +384,28 @@ def build_acceptance_summary(
             "live_orders": 0,
             "live_ready": False,
         }
+    if portfolio_storm is not None:
+        summary["portfolio_storm"] = {
+            "status": portfolio_storm["status"],
+            "campaign": portfolio_storm["campaign"],
+            "trial_count": portfolio_storm["trial_count"],
+            "prior_known_trials": portfolio_storm[
+                "prior_known_trials"
+            ],
+            "total_known_trials": portfolio_storm[
+                "total_known_trials"
+            ],
+            "pareto_survivor_count": portfolio_storm[
+                "pareto_survivor_count"
+            ],
+            "multiple_testing": portfolio_storm[
+                "multiple_testing"
+            ],
+            "research_pass": False,
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if autopilot_state is not None:
         summary["autopilot"] = {
             "status": autopilot_state["status"],
@@ -510,6 +542,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "portfolio_breakout_forward_observer_v1.json": (
             reports / "portfolio_breakout_forward_observer_v1.json"
         ),
+        "portfolio_storm_plan_v1.json": (
+            reports / "portfolio_storm_plan_v1.json"
+        ),
+        "portfolio_storm_report_v1.json": (
+            reports / "portfolio_storm_report_v1.json"
+        ),
+        "portfolio_storm_returns_v1.npz": (
+            reports / "portfolio_storm_returns_v1.npz"
+        ),
     }
     observer_directory = (
         settings.paths.lab_dir / "observers" / "capital_utilization_v1"
@@ -617,6 +658,7 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         capital_utilization=payloads["capital_utilization_campaign_v1.json"],
         diversified_rotation=payloads["diversified_rotation_campaign_v1.json"],
         portfolio_breakout=payloads["portfolio_breakout_campaign_v1.json"],
+        portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         autopilot_state=payloads.get("autopilot_state.json"),
         autopilot_degradation=payloads.get(
             "autopilot_degradation_state.json"
