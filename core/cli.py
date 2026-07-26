@@ -4156,16 +4156,17 @@ def _reconcile_storm_epoch_accounting(
     *,
     default_prior_known_trials: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Separate immutable data evaluations from unique strategy trials.
+    """Count each unique strategy-search-space/data-epoch evaluation.
 
     A storm may reevaluate the same frozen search space on every new data
-    watermark.  Those are new evidence epochs, not new strategy DNA.  The
-    original reports remain untouched; this derived index records both the
-    at-birth denominator and the reconciled unique-strategy denominator.
+    watermark. This does not create new DNA, but it is a new selection
+    opportunity and therefore belongs in the multiple-testing denominator.
+    Exact retries on the same fingerprint remain deduplicated. Historical
+    reports remain untouched; the derived index records both semantics.
     """
 
     reconciled: list[dict[str, Any]] = []
-    seen_search_spaces: set[str] = set()
+    seen_evaluations: set[tuple[str, str]] = set()
     running_total = int(default_prior_known_trials)
     for position, raw_epoch in enumerate(epochs):
         epoch = dict(raw_epoch)
@@ -4200,29 +4201,56 @@ def _reconcile_storm_epoch_accounting(
             or epoch.get("total_known_trials")
             or running_total
         )
+        data_fingerprint = str(
+            epoch.get("data_fingerprint") or ""
+        )
+        evaluation_identity = (
+            search_space_hash,
+            data_fingerprint,
+        )
         if is_canonical_baseline:
             running_total = max(running_total, at_birth_total)
             prior_total = max(
                 int(default_prior_known_trials),
                 running_total - evaluated_strategy_count,
             )
-            new_strategy_count = 0
+            new_evaluation_count = 0
         else:
-            prior_total = running_total
-            new_strategy_count = (
+            implied_prior_total = max(
+                int(default_prior_known_trials),
+                at_birth_total - evaluated_strategy_count,
+            )
+            prior_total = max(
+                running_total,
+                implied_prior_total,
+            )
+            new_evaluation_count = (
                 0
-                if search_space_hash
-                and search_space_hash in seen_search_spaces
+                if all(evaluation_identity)
+                and evaluation_identity in seen_evaluations
                 else evaluated_strategy_count
             )
-            running_total += new_strategy_count
-        if search_space_hash:
-            seen_search_spaces.add(search_space_hash)
+            running_total = max(
+                at_birth_total,
+                prior_total + new_evaluation_count,
+            )
+        if all(evaluation_identity):
+            seen_evaluations.add(evaluation_identity)
         epoch.update(
             {
                 "prior_known_trials": prior_total,
-                "new_trial_count": new_strategy_count,
-                "new_strategy_dna_count": new_strategy_count,
+                "new_trial_count": new_evaluation_count,
+                "new_evaluation_trial_count": new_evaluation_count,
+                "new_strategy_dna_count": (
+                    evaluated_strategy_count
+                    if search_space_hash
+                    and not any(
+                        row.get("strategy_search_space_hash")
+                        == search_space_hash
+                        for row in reconciled
+                    )
+                    else 0
+                ),
                 "evaluated_strategy_count": evaluated_strategy_count,
                 "evaluation_epoch_count": 1,
                 "strategy_search_space_hash": (
@@ -4231,12 +4259,68 @@ def _reconcile_storm_epoch_accounting(
                 "report_total_known_trials_at_birth": at_birth_total,
                 "total_known_trials": running_total,
                 "trial_accounting_semantics": (
-                    "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+                    "STRATEGY_DNA_X_CLOSED_DATA_EPOCH_EVALUATIONS"
                 ),
             }
         )
         reconciled.append(epoch)
     return reconciled, running_total
+
+
+def _reconcile_autopilot_storm_indexes(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Migrate derived storm indexes to evaluation-trial semantics."""
+
+    audits: dict[str, Any] = {}
+    specifications = (
+        (
+            "portfolio_storm",
+            settings.paths.lab_dir / "storm_epochs" / "index.json",
+            1_312,
+        ),
+        (
+            "signal_synthesis_storm",
+            settings.paths.lab_dir
+            / "signal_storm_epochs"
+            / "index.json",
+            6_312,
+        ),
+    )
+    for label, index_path, default_prior in specifications:
+        if not index_path.is_file():
+            raise FileNotFoundError(
+                f"storm epoch index is missing: {index_path}"
+            )
+        index = dict(read_json(index_path))
+        epochs, total = _reconcile_storm_epoch_accounting(
+            list(index.get("epochs") or []),
+            default_prior_known_trials=default_prior,
+        )
+        index.update(
+            {
+                "epochs": epochs,
+                "total_known_trials": total,
+                "evaluation_epoch_count": len(epochs),
+                "trial_accounting_version": (
+                    "strategy_dna_x_data_epoch_v3"
+                ),
+                "orders_generated": 0,
+                "paper_candidate_permitted": False,
+                "live_ready": False,
+            }
+        )
+        atomic_write_json(index_path, _json_ready(index))
+        audits[label] = {
+            "status": "PASSED",
+            "evaluation_epoch_count": len(epochs),
+            "total_known_trials_in_local_historical_chain": total,
+            "index": str(index_path),
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
+    return audits
 
 
 def _run_autopilot_storm_epoch(
@@ -4297,7 +4381,7 @@ def _run_autopilot_storm_epoch(
             "total_known_trials": reconciled_total,
             "evaluation_epoch_count": len(epochs),
             "trial_accounting_version": (
-                "unique_strategy_dna_v2"
+                "strategy_dna_x_data_epoch_v3"
             ),
         }
     )
@@ -4325,7 +4409,16 @@ def _run_autopilot_storm_epoch(
         },
         length=20,
     )
-    prior_known_trials = reconciled_total
+    from research.global_trial_accounting import (
+        global_multiple_testing_denominator,
+    )
+
+    prior_known_trials = max(
+        reconciled_total,
+        global_multiple_testing_denominator(
+            settings.paths.lab_dir
+        ),
+    )
     current_search_space_hash = str(
         _portfolio_storm_plan_payload(
             settings,
@@ -4342,8 +4435,9 @@ def _run_autopilot_storm_epoch(
         if current_search_space_hash not in known_search_spaces
         else 0
     )
+    new_evaluation_trial_count = STORM_TRIAL_COUNT
     total_known_trials = (
-        prior_known_trials + new_strategy_trial_count
+        prior_known_trials + new_evaluation_trial_count
     )
     epoch_directory = root / epoch_id
     result = _run_portfolio_storm_campaign(
@@ -4359,7 +4453,8 @@ def _run_autopilot_storm_epoch(
         "data_fingerprint": data_fingerprint,
         "source": "AUTOPILOT_NEW_DATA_EPOCH",
         "engine_version": STORM_ENGINE_VERSION,
-        "new_trial_count": new_strategy_trial_count,
+        "new_trial_count": new_evaluation_trial_count,
+        "new_evaluation_trial_count": new_evaluation_trial_count,
         "new_strategy_dna_count": new_strategy_trial_count,
         "evaluated_strategy_count": STORM_TRIAL_COUNT,
         "evaluation_epoch_count": 1,
@@ -4368,7 +4463,7 @@ def _run_autopilot_storm_epoch(
             result["total_known_trials"]
         ),
         "trial_accounting_semantics": (
-            "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+            "STRATEGY_DNA_X_CLOSED_DATA_EPOCH_EVALUATIONS"
         ),
         "prior_known_trials": prior_known_trials,
         "total_known_trials": int(result["total_known_trials"]),
@@ -4454,7 +4549,7 @@ def _run_autopilot_signal_storm_epoch(
             "total_known_trials": reconciled_total,
             "evaluation_epoch_count": len(epochs),
             "trial_accounting_version": (
-                "unique_strategy_dna_v2"
+                "strategy_dna_x_data_epoch_v3"
             ),
         }
     )
@@ -4481,7 +4576,16 @@ def _run_autopilot_signal_storm_epoch(
         },
         length=20,
     )
-    prior_known_trials = reconciled_total
+    from research.global_trial_accounting import (
+        global_multiple_testing_denominator,
+    )
+
+    prior_known_trials = max(
+        reconciled_total,
+        global_multiple_testing_denominator(
+            settings.paths.lab_dir
+        ),
+    )
     current_search_space_hash = str(
         _signal_synthesis_storm_plan_payload(
             settings,
@@ -4498,8 +4602,9 @@ def _run_autopilot_signal_storm_epoch(
         if current_search_space_hash not in known_search_spaces
         else 0
     )
+    new_evaluation_trial_count = SIGNAL_STORM_TRIAL_COUNT
     total_known_trials = (
-        prior_known_trials + new_strategy_trial_count
+        prior_known_trials + new_evaluation_trial_count
     )
     epoch_directory = root / epoch_id
     result = _run_signal_synthesis_storm_campaign(
@@ -4515,7 +4620,8 @@ def _run_autopilot_signal_storm_epoch(
         "data_fingerprint": data_fingerprint,
         "source": "AUTOPILOT_NEW_DATA_EPOCH",
         "engine_version": SIGNAL_STORM_ENGINE_VERSION,
-        "new_trial_count": new_strategy_trial_count,
+        "new_trial_count": new_evaluation_trial_count,
+        "new_evaluation_trial_count": new_evaluation_trial_count,
         "new_strategy_dna_count": new_strategy_trial_count,
         "evaluated_strategy_count": SIGNAL_STORM_TRIAL_COUNT,
         "evaluation_epoch_count": 1,
@@ -4524,7 +4630,7 @@ def _run_autopilot_signal_storm_epoch(
             result["total_known_trials"]
         ),
         "trial_accounting_semantics": (
-            "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+            "STRATEGY_DNA_X_CLOSED_DATA_EPOCH_EVALUATIONS"
         ),
         "prior_known_trials": prior_known_trials,
         "total_known_trials": int(result["total_known_trials"]),
@@ -5301,6 +5407,9 @@ def _autopilot_ledger_preflight_stage(
 ) -> dict[str, Any]:
     """Verify every active append-only ledger before data or research runs."""
 
+    from research.global_trial_accounting import (
+        audit_global_trial_accounting,
+    )
     from research.ledger_guard import audit_forward_ledgers
     from research.regime_router import audit_router_decision_chain
 
@@ -5330,6 +5439,15 @@ def _autopilot_ledger_preflight_stage(
         for path in sorted(directory.glob("*.json"))
     ]
     payload = audit_forward_ledgers(paths)
+    payload["storm_epoch_accounting"] = (
+        _reconcile_autopilot_storm_indexes(settings)
+    )
+    payload["global_trial_accounting"] = (
+        audit_global_trial_accounting(
+            settings.paths.lab_dir,
+            persist=True,
+        )
+    )
     router_path = (
         settings.paths.lab_dir
         / "reports"
@@ -5572,6 +5690,10 @@ def _preserved_breakout_forward_fields(
 def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     """Run classical preregistered campaigns and immutable storm epochs."""
 
+    from research.global_trial_accounting import (
+        audit_global_trial_accounting,
+    )
+
     result = _run_breakout_portfolio_campaign(settings)
     absolute_momentum = _run_absolute_momentum_campaign(settings)
     absolute_momentum_plateau = (
@@ -5619,19 +5741,26 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         settings,
         data_fingerprint=str(data_audit["signal_data_fingerprint"]),
     )
-    total_trials = int(result["total_known_trials"])
+    trial_accounting = audit_global_trial_accounting(
+        settings.paths.lab_dir,
+        persist=True,
+    )
+    total_trials = int(
+        trial_accounting["global_multiple_testing_denominator"]
+    )
     parameters_tested = int(result["parameters_tested"])
     return {
         "status": result["status"],
         "campaign": result["campaign"],
         "parameters_tested": parameters_tested,
-        "prior_trials_accounted": int(
-            result.get(
-                "prior_trials_accounted",
-                total_trials - parameters_tested,
-            )
+        "prior_trials_accounted": (
+            total_trials - parameters_tested
         ),
         "total_known_trials": total_trials,
+        "trial_accounting": trial_accounting,
+        "breakout_report_total_known_trials_at_birth": int(
+            result["total_known_trials"]
+        ),
         "economic_research_lead_count": result["economic_research_lead_count"],
         "statistically_qualified_count": result["statistically_qualified_count"],
         "frozen_candidate_unchanged": result["frozen_candidate_unchanged"],
@@ -8954,6 +9083,9 @@ def _run_absolute_momentum_plateau_campaign(
         build_rotation_forward_evidence,
         merge_portfolio_forward_manifest,
     )
+    from research.global_trial_accounting import (
+        resolve_known_trial_count,
+    )
     from research.optimization import multiple_testing_bootstrap
     from research.portfolio_selection import (
         RotationPortfolioPolicy,
@@ -9150,9 +9282,12 @@ def _run_absolute_momentum_plateau_campaign(
         if absolute_report_path.is_file()
         else 16_715
     )
-    total_known_trials = (
-        base_known_trials
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            base_known_trials
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -9585,6 +9720,9 @@ def _run_volatility_contraction_campaign(
         build_rotation_forward_evidence,
         merge_portfolio_forward_manifest,
     )
+    from research.global_trial_accounting import (
+        resolve_known_trial_count,
+    )
     from research.optimization import multiple_testing_bootstrap
     from research.portfolio_selection import (
         RotationPortfolioPolicy,
@@ -9804,9 +9942,12 @@ def _run_volatility_contraction_campaign(
         if plateau_path.is_file()
         else 16_832
     )
-    total_known_trials = (
-        base_known_trials
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            base_known_trials
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -10203,6 +10344,9 @@ def _run_trend_pullback_campaign(
         build_rotation_forward_evidence,
         merge_portfolio_forward_manifest,
     )
+    from research.global_trial_accounting import (
+        resolve_known_trial_count,
+    )
     from research.optimization import multiple_testing_bootstrap
     from research.portfolio_selection import (
         RotationPortfolioPolicy,
@@ -10417,9 +10561,12 @@ def _run_trend_pullback_campaign(
         if ensemble_path.is_file()
         else 16_849
     )
-    total_known_trials = (
-        base_known_trials
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            base_known_trials
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -10792,6 +10939,9 @@ def _run_range_expansion_4h_campaign(
         build_rotation_forward_evidence,
         merge_portfolio_forward_manifest,
     )
+    from research.global_trial_accounting import (
+        resolve_known_trial_count,
+    )
     from research.optimization import multiple_testing_bootstrap
     from research.portfolio_selection import RotationPortfolioPolicy
     from research.range_expansion_4h import (
@@ -11029,9 +11179,12 @@ def _run_range_expansion_4h_campaign(
         if pullback_path.is_file()
         else 16_861
     )
-    total_known_trials = (
-        base_known_trials
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            base_known_trials
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -11438,6 +11591,9 @@ def _run_multi_alpha_ensemble_campaign(
         build_rotation_forward_evidence,
         merge_portfolio_forward_manifest,
     )
+    from research.global_trial_accounting import (
+        resolve_known_trial_count,
+    )
     from research.multi_alpha_ensemble import (
         FROZEN_COMPONENT_DNA,
         MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION,
@@ -11695,9 +11851,12 @@ def _run_multi_alpha_ensemble_campaign(
     base_known_trials = int(
         contraction_report.get("total_known_trials", 16_848)
     )
-    total_known_trials = (
-        base_known_trials
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            base_known_trials
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     matrix = pd.DataFrame(
         {"MULTI_ALPHA_FIXED_V1": development_returns}
@@ -12130,6 +12289,24 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             atomic_write_json(report, decision)
             decision = {**decision, "report": str(report)}
         emit(decision)
+        return 0
+    if section == "trials":
+        from research.global_trial_accounting import (
+            audit_global_trial_accounting,
+        )
+
+        storm_indexes = _reconcile_autopilot_storm_indexes(
+            settings
+        )
+        emit(
+            {
+                **audit_global_trial_accounting(
+                    settings.paths.lab_dir,
+                    persist=True,
+                ),
+                "storm_epoch_indexes": storm_indexes,
+            }
+        )
         return 0
     if section == "data":
         requested_markets = [
@@ -16480,6 +16657,12 @@ def build_parser() -> argparse.ArgumentParser:
     ai_status = lab_ai.add_parser("status")
     ai_status.add_argument("--evidence", type=Path)
     ai_status.add_argument("--write-report", action="store_true")
+
+    lab_trials = lab.add_parser("trials").add_subparsers(
+        dest="lab_action",
+        required=True,
+    )
+    lab_trials.add_parser("audit")
 
     universe = lab.add_parser("universe").add_subparsers(
         dest="lab_action",

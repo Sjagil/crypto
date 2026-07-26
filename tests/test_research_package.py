@@ -133,6 +133,37 @@ def test_acceptance_summary_keeps_positive_research_fail_closed() -> None:
     assert not summary["promotion"]["live_ready"]
 
 
+def test_acceptance_summary_includes_global_trial_accounting() -> None:
+    values = _inputs()
+    values["global_trial_accounting"] = {
+        "status": "PASSED",
+        "global_multiple_testing_denominator": 32_100,
+        "evaluation_trial_count": 32_100,
+        "unique_strategy_dna_equivalent_count": 11_921,
+        "accounting_root_hash": "a" * 64,
+        "accounting_policy": {
+            "same_dna_same_data": "DEDUPLICATED_EXACT_RETRY",
+            "same_dna_new_closed_data_epoch": (
+                "COUNTED_AS_NEW_SELECTION_EVALUATION"
+            ),
+        },
+        "ai_governance_status": "AI_DEVELOPMENT_EMBARGOED",
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    accounting = summary["global_trial_accounting"]
+    assert accounting["global_multiple_testing_denominator"] == 32_100
+    assert accounting["unique_strategy_dna_equivalent_count"] == 11_921
+    assert accounting["ai_governance_status"] == (
+        "AI_DEVELOPMENT_EMBARGOED"
+    )
+    assert accounting["live_ready"] is False
+
+
 def test_acceptance_summary_rejects_cross_candidate_evidence() -> None:
     values = _inputs()
     values["external"]["candidate_identity"] = "different"

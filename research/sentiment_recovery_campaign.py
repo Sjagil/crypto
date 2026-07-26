@@ -19,6 +19,7 @@ from research.forward_observer import (
     merge_portfolio_forward_manifest,
     validate_forward_manifest_identity,
 )
+from research.global_trial_accounting import resolve_known_trial_count
 from research.optimization import multiple_testing_bootstrap
 from research.portfolio_selection import (
     RotationPortfolioPolicy,
@@ -486,9 +487,12 @@ def run_sentiment_recovery_campaign(
             },
         )
     registry_audit = registry.audit()
-    total_known_trials = (
-        SENTIMENT_RECOVERY_BASE_KNOWN_TRIALS
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            SENTIMENT_RECOVERY_BASE_KNOWN_TRIALS
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,

@@ -104,6 +104,7 @@ def build_acceptance_summary(
     autopilot_degradation: dict[str, Any] | None = None,
     feature_store: dict[str, Any] | None = None,
     ai_governance: dict[str, Any] | None = None,
+    global_trial_accounting: dict[str, Any] | None = None,
     breakout_forward_observers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Cross-check evidence identities and state the strongest honest conclusion."""
@@ -580,6 +581,31 @@ def build_acceptance_summary(
             )
         ):
             raise ValueError("AI governance permits automatic promotion")
+    if global_trial_accounting is not None:
+        if global_trial_accounting.get("status") != "PASSED":
+            raise ValueError("global trial accounting audit failed")
+        if int(
+            global_trial_accounting.get(
+                "global_multiple_testing_denominator"
+            )
+            or 0
+        ) <= 0:
+            raise ValueError("global trial denominator is invalid")
+        if (
+            global_trial_accounting.get("ai_governance_status")
+            != "AI_DEVELOPMENT_EMBARGOED"
+        ):
+            raise ValueError(
+                "global trial accounting violates AI embargo"
+            )
+        if int(
+            global_trial_accounting.get("orders_generated") or 0
+        ) != 0 or bool(
+            global_trial_accounting.get("live_ready", False)
+        ):
+            raise ValueError(
+                "global trial accounting contains execution permission"
+            )
     if breakout_forward_observers is not None:
         for name, observer_payload in breakout_forward_observers.items():
             if observer_payload.get("source_candidate_identity") != identity:
@@ -1253,6 +1279,33 @@ def build_acceptance_summary(
         }
     if ai_governance is not None:
         summary["ai_governance"] = ai_governance
+    if global_trial_accounting is not None:
+        summary["global_trial_accounting"] = {
+            "status": global_trial_accounting["status"],
+            "global_multiple_testing_denominator": (
+                global_trial_accounting[
+                    "global_multiple_testing_denominator"
+                ]
+            ),
+            "evaluation_trial_count": global_trial_accounting[
+                "evaluation_trial_count"
+            ],
+            "unique_strategy_dna_equivalent_count": (
+                global_trial_accounting[
+                    "unique_strategy_dna_equivalent_count"
+                ]
+            ),
+            "accounting_root_hash": global_trial_accounting[
+                "accounting_root_hash"
+            ],
+            "accounting_policy": global_trial_accounting[
+                "accounting_policy"
+            ],
+            "ai_governance_status": "AI_DEVELOPMENT_EMBARGOED",
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        }
     if breakout_forward_observers is not None:
         per_policy = {
             str(payload.get("policy_name") or name): {
@@ -1444,6 +1497,9 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         ),
         "macro_liquidity_plan_v1.json": (
             reports / "macro_liquidity_plan_v1.json"
+        ),
+        "global_trial_accounting_v1.json": (
+            reports / "global_trial_accounting_v1.json"
         ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
@@ -1819,6 +1875,33 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
     signal_storm_epoch_index = settings.paths.lab_dir / "signal_storm_epochs" / "index.json"
     if signal_storm_epoch_index.is_file():
         paths["signal_storm_epoch_index.json"] = signal_storm_epoch_index
+    trial_accounting_root = (
+        settings.paths.lab_dir / "trial_accounting"
+    )
+    trial_accounting_index = trial_accounting_root / "index.json"
+    if trial_accounting_index.is_file():
+        paths["global_trial_accounting_index.json"] = (
+            trial_accounting_index
+        )
+    for snapshot in sorted(
+        (trial_accounting_root / "snapshots").glob("*.json")
+    ):
+        paths[f"global_trial_accounting_snapshot_{snapshot.name}"] = (
+            snapshot
+        )
+    for label, epoch_root in (
+        ("portfolio_storm", settings.paths.lab_dir / "storm_epochs"),
+        (
+            "signal_synthesis_storm",
+            settings.paths.lab_dir / "signal_storm_epochs",
+        ),
+    ):
+        for epoch_report in sorted(
+            epoch_root.glob("*/report.json")
+        ):
+            paths[
+                f"{label}_epoch_{epoch_report.parent.name}_report.json"
+            ] = epoch_report
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"acceptance evidence is missing: {missing}")
@@ -1916,6 +1999,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         autopilot_degradation=payloads.get("autopilot_degradation_state.json"),
         feature_store=payloads.get("feature_store_latest.manifest.json"),
         ai_governance=payloads.get("ai_governance_status_v1.json"),
+        global_trial_accounting=payloads.get(
+            "global_trial_accounting_v1.json"
+        ),
         breakout_forward_observers={
             name: payload
             for name, payload in payloads.items()

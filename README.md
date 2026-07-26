@@ -907,12 +907,25 @@ leaderboards, reports, and charts are written below `output/lab/`. Restarting
 with `--resume` recovers stale work and deterministic experiment hashes prevent
 completed experiments from being duplicated.
 
-Storm data epochs are now accounted separately from strategy discovery. A
-frozen 5,000-DNA search space evaluated on a new daily watermark creates 5,000
-new immutable evaluation records but zero new strategy trials. The reconciled
-epoch indexes use `UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS`; this prevents DSR and
-other multiple-testing denominators from increasing merely because time
-advanced.
+Storm data epochs distinguish new DNA from new selection opportunities. An
+exact retry of the same 5,000-DNA search space on the same data fingerprint is
+reused and does not increment anything. Evaluating and selecting from that
+space on a genuinely new closed-data fingerprint creates 5,000 new evaluation
+trials, while its unique-DNA count remains unchanged. The reconciled indexes
+use `STRATEGY_DNA_X_CLOSED_DATA_EPOCH_EVALUATIONS`.
+
+All campaign evidence is reconciled by the fail-closed global trial audit:
+
+```bash
+python main.py lab trials audit
+```
+
+It writes a content-addressed snapshot, append-only index, and
+`output/lab/reports/global_trial_accounting_v1.json`. Future autonomous storm
+runs use this global evaluation denominator before adding their new trials.
+Historical campaign reports remain immutable and retain their at-birth
+denominators. Gaussian neighborhood smoothing is treated as a robustness
+selector only; it cannot guarantee a PBO pass.
 
 `MULTI_ALPHA_ENSEMBLE_V2` is one preregistered classical meta-strategy that
 combines the frozen absolute-momentum and beta-residual-reversal sleeves. It

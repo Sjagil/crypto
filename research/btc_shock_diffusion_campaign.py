@@ -23,6 +23,7 @@ from research.forward_observer import (
     merge_portfolio_forward_manifest,
     validate_forward_manifest_identity,
 )
+from research.global_trial_accounting import resolve_known_trial_count
 from research.liquidity_sweep_campaign import (
     _benchmark_summary,
     _json_ready,
@@ -374,9 +375,12 @@ def run_btc_shock_diffusion_campaign(
             },
         )
     registry_audit = registry.audit()
-    total_known_trials = (
-        BTC_SHOCK_DIFFUSION_BASE_KNOWN_TRIALS
-        + int(registry_audit["unique_strategy_dna_count"])
+    total_known_trials = resolve_known_trial_count(
+        settings.paths.lab_dir,
+        local_known_trial_count=(
+            BTC_SHOCK_DIFFUSION_BASE_KNOWN_TRIALS
+            + int(registry_audit["unique_strategy_dna_count"])
+        ),
     )
     multiple = multiple_testing_bootstrap(
         matrix,

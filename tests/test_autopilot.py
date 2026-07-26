@@ -35,11 +35,12 @@ def _observer_stage():
     }
 
 
-def test_storm_epoch_accounting_counts_data_epochs_without_recounting_dna():
+def test_storm_epoch_accounting_counts_new_closed_data_epochs():
     epochs = [
         {
             "epoch_id": "CANONICAL_INITIAL_STORM",
             "source": "CANONICAL_PORTFOLIO_STORM_V1",
+            "data_fingerprint": "data-a",
             "strategy_search_space_hash": "space-a",
             "evaluated_strategy_count": 5_000,
             "total_known_trials": 6_312,
@@ -47,6 +48,7 @@ def test_storm_epoch_accounting_counts_data_epochs_without_recounting_dna():
         {
             "epoch_id": "data-epoch-two",
             "source": "AUTOPILOT_NEW_DATA_EPOCH",
+            "data_fingerprint": "data-b",
             "strategy_search_space_hash": "space-a",
             "evaluated_strategy_count": 5_000,
             "total_known_trials": 11_312,
@@ -54,6 +56,7 @@ def test_storm_epoch_accounting_counts_data_epochs_without_recounting_dna():
         {
             "epoch_id": "new-search-space",
             "source": "AUTOPILOT_NEW_DATA_EPOCH",
+            "data_fingerprint": "data-c",
             "strategy_search_space_hash": "space-b",
             "evaluated_strategy_count": 5_000,
             "total_known_trials": 16_312,
@@ -65,16 +68,20 @@ def test_storm_epoch_accounting_counts_data_epochs_without_recounting_dna():
         default_prior_known_trials=1_312,
     )
 
-    assert total == 11_312
+    assert total == 16_312
     assert [row["new_strategy_dna_count"] for row in reconciled] == [
-        0,
+        5_000,
         0,
         5_000,
     ]
+    assert [
+        row["new_evaluation_trial_count"]
+        for row in reconciled
+    ] == [0, 5_000, 5_000]
     assert [row["total_known_trials"] for row in reconciled] == [
         6_312,
-        6_312,
         11_312,
+        16_312,
     ]
     assert reconciled[1]["report_total_known_trials_at_birth"] == 11_312
     assert all(
@@ -329,6 +336,17 @@ def test_insufficient_forward_data_never_degrades_or_promotes(tmp_path):
 
 
 def test_research_stage_accepts_compact_campaign_result(monkeypatch):
+    monkeypatch.setattr(
+        "research.global_trial_accounting."
+        "audit_global_trial_accounting",
+        lambda lab_dir, **kwargs: {
+            "status": "PASSED",
+            "global_multiple_testing_denominator": 32_100,
+            "orders_generated": 0,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+    )
     monkeypatch.setattr(
         cli,
         "_autopilot_data_stage",
@@ -674,9 +692,14 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
-    result = cli._autopilot_research_stage(object())
-    assert result["prior_trials_accounted"] == 1_304
-    assert result["total_known_trials"] == 1_312
+    result = cli._autopilot_research_stage(get_settings())
+    assert result["prior_trials_accounted"] == 32_092
+    assert result["total_known_trials"] == 32_100
+    assert result["trial_accounting"]["status"] == "PASSED"
+    assert (
+        result["breakout_report_total_known_trials_at_birth"]
+        == 1_312
+    )
     assert result["portfolio_storm_total_known_trials"] == 6_312
     assert result["signal_synthesis_total_known_trials"] == 16_312
     assert (
