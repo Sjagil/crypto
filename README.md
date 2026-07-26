@@ -754,6 +754,25 @@ stochastic gates. All 16 trials remain in the cumulative 16,877-trial
 denominator. The observer is orderless, forward progress is 0/2,190 closed
 four-hour bars, and no research, paper or live promotion is permitted.
 
+`python main.py lab campaign run --name sentiment-recovery-v1 --yes`
+evaluates a separate preregistered eight-DNA daily family on BTC-EUR and
+ETH-EUR. Entries require a timestamped recovery from external extreme fear
+while both BTC and the selected asset remain above a fixed 100/200-day EMA.
+Signals use completed daily observations and execute at the next open, with
+normal and stressed costs, at most 40% total exposure, 20% per asset and at
+least 60% cash. The Alternative.me history is backward-only aligned and never
+backfilled before inception. Its historical values have source-day timestamps
+but no revision vintages; that retrospective-source limitation is explicit
+and makes genuine forward evidence mandatory.
+
+The development-selected v1 primary, `SR_F20_D5_EMA100`, returned 10.3% over
+the full sample with a 6.7% maximum drawdown and only 1.6% average exposure.
+PBO passed at 0.071, but validation and confirmation produced no trades, DSR
+was 0.002, White Reality Check was 0.315 and Hansen SPA was 0.296. Economic,
+stochastic and untouched-holdout gates therefore failed. All eight trials are
+stored in the immutable 21,320-trial accounting history; the observer remains
+orderless at 0/365 forward days and no promotion is permitted.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

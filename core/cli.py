@@ -3391,6 +3391,26 @@ def _range_expansion_4h_campaign_path(
     )
 
 
+def _sentiment_recovery_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.sentiment_recovery_campaign import (
+        sentiment_recovery_campaign_path,
+    )
+
+    return sentiment_recovery_campaign_path(settings)
+
+
+def _run_sentiment_recovery_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.sentiment_recovery_campaign import (
+        run_sentiment_recovery_campaign,
+    )
+
+    return run_sentiment_recovery_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4540,6 +4560,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         )
         for summary in range_4h_forward_summaries.values()
     )
+    sentiment_result = _run_sentiment_recovery_campaign(settings)
+    assert_orderless_research_payload(sentiment_result)
+    sentiment_report = read_json(
+        _sentiment_recovery_campaign_path(settings)
+    )
+    assert_orderless_research_payload(sentiment_report)
+    sentiment_forward_summaries = dict(
+        sentiment_report.get("forward_summaries") or {}
+    )
+    sentiment_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in sentiment_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4636,6 +4669,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_sentiment_recovery_observers": {
+            "campaign": "SENTIMENT_RECOVERY_V1",
+            "status": sentiment_result["status"],
+            "observer_count": len(sentiment_forward_summaries),
+            "forward_summaries": sentiment_forward_summaries,
+            "total_forward_observations": (
+                sentiment_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -4645,6 +4691,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + ensemble_forward_observations
             + pullback_forward_observations
             + range_4h_forward_observations
+            + sentiment_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4677,6 +4724,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "multi_alpha_ensemble_v1",
         observer_root / "trend_pullback_v1",
         observer_root / "range_expansion_4h_v1_1",
+        observer_root / "sentiment_recovery_v1",
     )
     paths = [
         path
@@ -4762,6 +4810,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     )
     trend_pullback = _run_trend_pullback_campaign(settings)
     range_expansion_4h = _run_range_expansion_4h_campaign(
+        settings
+    )
+    sentiment_recovery = _run_sentiment_recovery_campaign(
         settings
     )
     data_audit = _autopilot_data_stage(
@@ -4960,6 +5011,35 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": range_expansion_4h[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_sentiment_recovery_campaign": {
+            "campaign": sentiment_recovery["campaign"],
+            "status": sentiment_recovery["status"],
+            "generated_trial_count": sentiment_recovery[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": sentiment_recovery[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": sentiment_recovery[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": sentiment_recovery[
+                "primary_strategy_id"
+            ],
+            "pbo": sentiment_recovery["pbo"],
+            "economic_pass": sentiment_recovery[
+                "economic_pass"
+            ],
+            "statistical_pass": sentiment_recovery[
+                "statistical_pass"
+            ],
+            "observer_manifests": sentiment_recovery[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -11411,6 +11491,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         range_expansion_4h_campaign = (
             campaign_name == "range-expansion-4h-v1-1"
         )
+        sentiment_recovery_campaign = (
+            campaign_name == "sentiment-recovery-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -11436,6 +11519,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         or volatility_contraction_campaign
                         or multi_alpha_ensemble_campaign
                         or trend_pullback_campaign
+                        or sentiment_recovery_campaign
                         or portfolio_storm_campaign
                     )
                     else (
@@ -11514,6 +11598,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "TREND_PULLBACK_V1"
         if range_expansion_4h_campaign:
             campaign_label = "RANGE_EXPANSION_4H_V1_1"
+        if sentiment_recovery_campaign:
+            campaign_label = "SENTIMENT_RECOVERY_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -11596,6 +11682,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_range_expansion_4h_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if sentiment_recovery_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_sentiment_recovery_campaign,
                         settings,
                     )
                 )
@@ -11948,6 +12042,54 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         "maximum_position_exposure": 0.20,
                         "minimum_cash": 0.60,
                         "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
+            if sentiment_recovery_campaign:
+                from research.sentiment_recovery_campaign import (
+                    plan_sentiment_recovery_campaign,
+                )
+
+                plan = plan_sentiment_recovery_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_EXTERNAL_SENTIMENT_ALPHA_FAMILY"
+                        ),
+                        "economic_hypothesis": (
+                            "CAUSAL_EXTREME_FEAR_RECOVERY_IN_LONG_TRENDS"
+                        ),
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "base_known_trials": plan["base_known_trials"],
+                        "projected_total_known_trials": plan[
+                            "projected_total_known_trials"
+                        ],
+                        "strategy_dna_hashes": plan[
+                            "strategy_dna_hashes"
+                        ],
+                        "sentiment_source_policy": plan[
+                            "sentiment_source_policy"
+                        ],
+                        "known_limitations": plan[
+                            "known_limitations"
+                        ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
                         "paper_candidates": 0,
                         "orders_generated": 0,
                         "live_ready": False,
@@ -12328,6 +12470,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if sentiment_recovery_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 8,
+                            "reason_code": (
+                                "PREREGISTERED_SENTIMENT_RECOVERY_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_sentiment_recovery_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -12585,6 +12747,20 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if sentiment_recovery_campaign:
+                report_path = _sentiment_recovery_campaign_path(
+                    settings
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -12777,6 +12953,23 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             if range_expansion_4h_campaign:
                 report_path = _range_expansion_4h_campaign_path(
+                    settings
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if sentiment_recovery_campaign:
+                report_path = _sentiment_recovery_campaign_path(
                     settings
                 )
                 emit(
@@ -14823,6 +15016,7 @@ def build_parser() -> argparse.ArgumentParser:
         "multi-alpha-ensemble-v1",
         "trend-pullback-v1",
         "range-expansion-4h-v1-1",
+        "sentiment-recovery-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -14879,6 +15073,7 @@ def build_parser() -> argparse.ArgumentParser:
             "multi-alpha-ensemble-v1",
             "trend-pullback-v1",
             "range-expansion-4h-v1-1",
+            "sentiment-recovery-v1",
         ),
         default="cross-sectional-ensemble",
     )

@@ -93,6 +93,7 @@ def build_acceptance_summary(
     multi_alpha_ensemble: dict[str, Any] | None = None,
     trend_pullback: dict[str, Any] | None = None,
     range_expansion_4h: dict[str, Any] | None = None,
+    sentiment_recovery: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -385,6 +386,49 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "4h range expansion",
             [range_primary],
+            container="gates",
+        )
+    if sentiment_recovery is not None:
+        if (
+            sentiment_recovery.get("campaign")
+            != "SENTIMENT_RECOVERY_V1"
+        ):
+            raise ValueError(
+                "sentiment recovery campaign identity mismatch"
+            )
+        if int(sentiment_recovery.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "sentiment recovery campaign contains orders"
+            )
+        if bool(sentiment_recovery.get("live_ready", False)):
+            raise ValueError(
+                "sentiment recovery campaign contains live permission"
+            )
+        sentiment_registry = (
+            sentiment_recovery.get("trial_registry") or {}
+        )
+        if sentiment_registry.get("status") != "PASSED":
+            raise ValueError(
+                "sentiment recovery registry audit failed"
+            )
+        if int(
+            sentiment_registry.get("unique_trial_count") or 0
+        ) != int(
+            sentiment_recovery.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "sentiment recovery trial count mismatch"
+            )
+        sentiment_primary = sentiment_recovery.get(
+            "primary_result"
+        )
+        if not isinstance(sentiment_primary, dict):
+            raise ValueError(
+                "sentiment recovery primary result missing"
+            )
+        require_stochastic_validation(
+            "sentiment recovery",
+            [sentiment_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -817,6 +861,48 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if sentiment_recovery is not None:
+        summary["sentiment_recovery"] = {
+            "status": sentiment_recovery["status"],
+            "campaign": sentiment_recovery["campaign"],
+            "engine_version": sentiment_recovery[
+                "engine_version"
+            ],
+            "timeframe": sentiment_recovery["timeframe"],
+            "generated_trial_count": sentiment_recovery[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": sentiment_recovery[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": sentiment_recovery[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": sentiment_recovery[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": sentiment_recovery[
+                "multiple_testing"
+            ],
+            "trial_registry": sentiment_recovery[
+                "trial_registry"
+            ],
+            "primary_result": sentiment_recovery[
+                "primary_result"
+            ],
+            "sentiment_source_policy": sentiment_recovery[
+                "sentiment_source_policy"
+            ],
+            "forward_requirement": sentiment_recovery[
+                "forward_requirement"
+            ],
+            "holdout_status": sentiment_recovery[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -1003,6 +1089,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "range_expansion_4h_plan_v1_1.json": (
             reports / "range_expansion_4h_plan_v1_1.json"
         ),
+        "sentiment_recovery_campaign_v1.json": (
+            reports / "sentiment_recovery_campaign_v1.json"
+        ),
+        "sentiment_recovery_campaign_v1.csv": (
+            reports / "sentiment_recovery_campaign_v1.csv"
+        ),
+        "sentiment_recovery_plan_v1.json": (
+            reports / "sentiment_recovery_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1145,6 +1240,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (range_4h_registry_directory / "records").glob("*.json")
     ):
         paths[f"range_expansion_4h_trial_{record.name}"] = record
+    sentiment_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "sentiment_recovery_v1"
+    )
+    for observer in sorted(
+        sentiment_observer_directory.glob("*.json")
+    ):
+        paths[f"sentiment_recovery_observer_{observer.name}"] = (
+            observer
+        )
+    sentiment_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "sentiment_recovery_v1"
+    )
+    paths["sentiment_recovery_registry_index.json"] = (
+        sentiment_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (sentiment_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"sentiment_recovery_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1246,6 +1364,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         trend_pullback=payloads["trend_pullback_campaign_v1.json"],
         range_expansion_4h=payloads[
             "range_expansion_4h_campaign_v1_1.json"
+        ],
+        sentiment_recovery=payloads[
+            "sentiment_recovery_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],

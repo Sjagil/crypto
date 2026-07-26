@@ -467,3 +467,71 @@ def test_acceptance_summary_includes_rejected_4h_range_expansion() -> None:
     assert not range_4h["primary_result"]["gates"]["economic_pass"]
     assert range_4h["orders_generated"] == 0
     assert range_4h["live_ready"] is False
+
+
+def test_acceptance_summary_includes_rejected_sentiment_recovery() -> None:
+    values = _inputs()
+    values["sentiment_recovery"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "SENTIMENT_RECOVERY_V1",
+        "engine_version": "1.0.0",
+        "timeframe": "1d",
+        "generated_trial_count": 8,
+        "registered_unique_trials": 8,
+        "total_known_trials": 21_320,
+        "primary_strategy_id": "SR_F20_D5_EMA100",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.0714,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 8,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "sentiment_source_policy": {
+            "provider": "alternative_me",
+            "alignment": "BACKWARD_ONLY_NO_BACKFILL",
+            "historical_revision_vintages_available": False,
+        },
+        "forward_requirement": {
+            "minimum_closed_daily_observations": 365,
+            "minimum_rebalances": 30,
+        },
+        "holdout_status": (
+            "NO_GLOBALLY_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    sentiment = summary["sentiment_recovery"]
+    assert sentiment["registered_unique_trials"] == 8
+    assert sentiment["multiple_testing"][
+        "probability_of_backtest_overfitting"
+    ] == 0.0714
+    assert not sentiment["primary_result"]["gates"][
+        "economic_pass"
+    ]
+    assert sentiment["orders_generated"] == 0
+    assert sentiment["live_ready"] is False
+
+
+def test_acceptance_summary_rejects_sentiment_live_permission() -> None:
+    values = _inputs()
+    values["sentiment_recovery"] = {
+        "campaign": "SENTIMENT_RECOVERY_V1",
+        "orders_generated": 0,
+        "live_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="live permission"):
+        build_acceptance_summary(**values)
