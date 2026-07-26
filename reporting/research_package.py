@@ -1436,6 +1436,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "btc_shock_diffusion_plan_v1.json": (
             reports / "btc_shock_diffusion_plan_v1.json"
         ),
+        "macro_liquidity_campaign_v1.json": (
+            reports / "macro_liquidity_campaign_v1.json"
+        ),
+        "macro_liquidity_campaign_v1.csv": (
+            reports / "macro_liquidity_campaign_v1.csv"
+        ),
+        "macro_liquidity_plan_v1.json": (
+            reports / "macro_liquidity_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1763,6 +1772,27 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         )
     ):
         paths[f"btc_shock_diffusion_trial_{record.name}"] = record
+    macro_liquidity_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "macro_liquidity_v1"
+    )
+    for observer in sorted(
+        macro_liquidity_observer_directory.glob("*.json")
+    ):
+        paths[f"macro_liquidity_observer_{observer.name}"] = observer
+    macro_liquidity_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "macro_liquidity_v1"
+    )
+    paths["macro_liquidity_registry_index.json"] = (
+        macro_liquidity_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (macro_liquidity_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"macro_liquidity_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"

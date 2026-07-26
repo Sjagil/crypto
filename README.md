@@ -941,6 +941,30 @@ positive, but validation weakened, doubled-cost validation turned negative and
 PBO remained far above the gate. It is therefore frozen forward research, not
 a paper or live candidate.
 
+`MACRO_LIQUIDITY_ROTATION_V1` is a two-DNA classical FRED-only campaign.
+It accepts only `SOURCE_AVAILABLE_AT` observations for WALCL, M2SL, and NFCI;
+derivatives, EODHD equity/VIX, stablecoin, on-chain, options, and GEX history
+are rejected when the available files are snapshot-only or `FORWARD_ONLY`.
+The fixed Sunday-close/Monday-open variants require two or all three liquidity
+votes, allocate 10% to each allowed asset above its causal EMA200, cap total
+exposure at 40%, and retain at least 60% zero-yield cash.
+
+```bash
+python main.py lab campaign plan --name macro-liquidity-v1
+python main.py lab campaign run --name macro-liquidity-v1 --yes
+python main.py lab campaign observe --name macro-liquidity-v1
+```
+
+The real campaign rejected both variants. The development-selected 3-of-3
+path returned -4.70%, changed the portfolio only twice, and had PBO 0.743; the
+2-of-3 path returned -33.57% with a -35.54% drawdown. White Reality Check and
+Hansen SPA were both 1.0. It has no paper/live permission or order authority.
+
+AI, neural networks, reinforcement learning, and other learned-model work
+remain explicitly embargoed until a classical strategy passes the historical
+statistical gates, completes its frozen forward sample, and demonstrates
+acceptable paper/live execution evidence.
+
 The classical regime router is governance-first and orderless. It classifies
 only completed daily candles using BTC EMA200 trend and slope, 14-day
 choppiness, 30-day volatility versus its 252-day baseline, and allowlisted

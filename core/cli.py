@@ -3551,6 +3551,26 @@ def _run_btc_shock_diffusion_campaign(
     return run_btc_shock_diffusion_campaign(settings)
 
 
+def _macro_liquidity_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.macro_liquidity_campaign import (
+        macro_liquidity_campaign_path,
+    )
+
+    return macro_liquidity_campaign_path(settings)
+
+
+def _run_macro_liquidity_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.macro_liquidity_campaign import (
+        run_macro_liquidity_campaign,
+    )
+
+    return run_macro_liquidity_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4994,6 +5014,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in shock_diffusion_forward_summaries.values()
     )
+    macro_liquidity_result = _run_macro_liquidity_campaign(settings)
+    assert_orderless_research_payload(macro_liquidity_result)
+    macro_liquidity_report = read_json(
+        _macro_liquidity_campaign_path(settings)
+    )
+    assert_orderless_research_payload(macro_liquidity_report)
+    macro_liquidity_forward_summaries = dict(
+        macro_liquidity_report.get("forward_summaries") or {}
+    )
+    macro_liquidity_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in macro_liquidity_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -5210,6 +5243,23 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_macro_liquidity_observers": {
+            "campaign": "MACRO_LIQUIDITY_ROTATION_V1",
+            "status": macro_liquidity_result["status"],
+            "observer_count": len(
+                macro_liquidity_forward_summaries
+            ),
+            "forward_summaries": (
+                macro_liquidity_forward_summaries
+            ),
+            "total_forward_observations": (
+                macro_liquidity_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -5227,6 +5277,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + ensemble_v2_forward_observations
             + peer_residual_forward_observations
             + shock_diffusion_forward_observations
+            + macro_liquidity_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -5271,6 +5322,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "multi_alpha_ensemble_v2",
         observer_root / "peer_residual_reversal_v1",
         observer_root / "btc_shock_diffusion_v1",
+        observer_root / "macro_liquidity_v1",
     )
     paths = [
         path
@@ -5354,6 +5406,10 @@ def _autopilot_regime_router_stage(
         (
             "btc_shock_diffusion_campaign_v1.json",
             SleeveStyle.EVENT_CONTINUATION,
+        ),
+        (
+            "macro_liquidity_campaign_v1.json",
+            SleeveStyle.TREND,
         ),
     )
     sleeves = []
@@ -5549,6 +5605,7 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     btc_shock_diffusion = (
         _run_btc_shock_diffusion_campaign(settings)
     )
+    macro_liquidity = _run_macro_liquidity_campaign(settings)
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -6018,6 +6075,36 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": btc_shock_diffusion[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_macro_liquidity_campaign": {
+            "campaign": macro_liquidity["campaign"],
+            "status": macro_liquidity["status"],
+            "generated_trial_count": macro_liquidity[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": macro_liquidity[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": macro_liquidity[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": macro_liquidity[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": macro_liquidity[
+                "primary_strategy_id"
+            ],
+            "pbo": macro_liquidity["pbo"],
+            "economic_pass": macro_liquidity["economic_pass"],
+            "statistical_pass": macro_liquidity[
+                "statistical_pass"
+            ],
+            "observer_manifests": macro_liquidity[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -12514,6 +12601,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         residual_reversal_campaign = (
             campaign_name == "residual-reversal-v1"
         )
+        macro_liquidity_campaign = (
+            campaign_name == "macro-liquidity-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -12544,6 +12634,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         or dual_asset_trend_campaign
                         or liquidity_sweep_campaign
                         or residual_reversal_campaign
+                        or macro_liquidity_campaign
                         or portfolio_storm_campaign
                     )
                     else (
@@ -12632,6 +12723,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "LIQUIDITY_SWEEP_RECOVERY_V1"
         if residual_reversal_campaign:
             campaign_label = "RESIDUAL_REVERSAL_V1"
+        if macro_liquidity_campaign:
+            campaign_label = "MACRO_LIQUIDITY_ROTATION_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -12754,6 +12847,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_residual_reversal_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if macro_liquidity_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_macro_liquidity_campaign,
                         settings,
                     )
                 )
@@ -13348,6 +13449,55 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if macro_liquidity_campaign:
+                from research.macro_liquidity_campaign import (
+                    plan_macro_liquidity_campaign,
+                )
+
+                plan = plan_macro_liquidity_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_FRED_MACRO_LIQUIDITY_FAMILY"
+                        ),
+                        "economic_hypothesis": (
+                            "FRED_LIQUIDITY_IMPULSE_RISK_ON_ROTATION"
+                        ),
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "base_known_trials": plan["base_known_trials"],
+                        "projected_total_known_trials": plan[
+                            "projected_total_known_trials"
+                        ],
+                        "strategy_dna_hashes": plan[
+                            "strategy_dna_hashes"
+                        ],
+                        "signal_policy": plan["signal_policy"],
+                        "data_exclusion_audit": plan[
+                            "data_exclusion_audit"
+                        ],
+                        "known_limitations": plan[
+                            "known_limitations"
+                        ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
             if absolute_momentum_campaign:
                 from research.absolute_momentum import (
                     absolute_momentum_parameter_set,
@@ -13818,6 +13968,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_residual_reversal_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if macro_liquidity_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 2,
+                            "reason_code": (
+                                "PREREGISTERED_FRED_MACRO_LIQUIDITY_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_macro_liquidity_campaign,
                         settings,
                     )
                 )
@@ -16415,6 +16585,7 @@ def build_parser() -> argparse.ArgumentParser:
         "dual-asset-trend-v1",
         "liquidity-sweep-v1",
         "residual-reversal-v1",
+        "macro-liquidity-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -16476,6 +16647,7 @@ def build_parser() -> argparse.ArgumentParser:
             "dual-asset-trend-v1",
             "liquidity-sweep-v1",
             "residual-reversal-v1",
+            "macro-liquidity-v1",
         ),
         default="cross-sectional-ensemble",
     )
