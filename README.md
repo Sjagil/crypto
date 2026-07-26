@@ -1080,6 +1080,7 @@ python main.py microstructure status
 python main.py microstructure data-status
 python main.py microstructure audit
 python main.py microstructure readiness-report
+python main.py microstructure gate-check --stage technical_feature_validation
 ```
 
 The continuous shadow service additionally records Bitvavo public trade,
@@ -1090,8 +1091,14 @@ raw-payload hash. Closed-hour snapshots report delta/CVD inputs, order-book
 imbalance, microprice, spread, funding, open interest, basis, and
 perpetual/spot volume. A mid-hour start, sequence gap, reconnect, dropped
 message, or missing stream is recorded as `DATA_GAP`; nothing is interpolated.
-Backtesting remains forbidden until `microstructure data-status` proves at
-least 90 consecutive complete days.
+Snapshots are finalized only after a five-minute late-arrival grace period,
+and raw hourly segments remain writable for another full hour before
+lossless sealing. Readiness is rebuilt from immutable snapshot hashes and
+source-record hashes; a latest gap resets the consecutive counter to zero.
+Backtesting remains forbidden until `microstructure gate-check` proves at
+least 90 consecutive complete days. Preliminary research and formal regime
+assessment remain separately blocked until 180 and 365 consecutive days.
+None of these milestones can activate paper or live trading.
 
 The classical regime router is governance-first and orderless. It classifies
 only completed daily candles using BTC EMA200 trend and slope, 14-day

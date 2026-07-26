@@ -285,10 +285,116 @@ def verify_orderflow_ledger(
     }
 
 
+def _segment_chain_boundary(
+    path: Path,
+) -> tuple[str | None, str | None, int]:
+    if path.name.endswith(".xz"):
+        opener = lzma.open
+    elif path.name.endswith(".gz"):
+        opener = gzip.open
+    else:
+        opener = open
+    first_previous: str | None = None
+    last_hash: str | None = None
+    count = 0
+    with opener(path, "rt", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = dict(json.loads(line))
+            if first_previous is None:
+                first_previous = record.get("previous_record_hash")
+            last_hash = record.get("record_hash")
+            count += 1
+    return first_previous, last_hash, count
+
+
+def _decompressed_size(path: Path) -> int:
+    size = 0
+    opener = (
+        lzma.open
+        if path.name.endswith(".xz")
+        else gzip.open
+        if path.name.endswith(".gz")
+        else open
+    )
+    with opener(path, "rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            size += len(chunk)
+    return size
+
+
+def _recover_late_appended_segment(
+    raw: Path,
+    compressed: Path,
+    manifest_path: Path,
+    *,
+    segment_hour: datetime,
+) -> dict[str, Any]:
+    """Losslessly join a sealed prefix and a late-appended suffix."""
+
+    _, compressed_last, compressed_records = (
+        _segment_chain_boundary(compressed)
+    )
+    raw_first_previous, _, raw_records = _segment_chain_boundary(raw)
+    if (
+        compressed_last is None
+        or raw_first_previous != compressed_last
+    ):
+        raise RuntimeError(
+            "ORDERFLOW_LATE_APPEND_CHAIN_BOUNDARY_MISMATCH"
+        )
+    original_compressed_hash = _sha256_file(compressed)
+    late_suffix_hash = _sha256_file(raw)
+    expected = hashlib.sha256()
+    temporary = compressed.with_suffix(".jsonl.xz.recovery.tmp")
+    temporary.unlink(missing_ok=True)
+    with lzma.open(compressed, "rb") as sealed_prefix, raw.open(
+        "rb"
+    ) as late_suffix, lzma.open(
+        temporary,
+        "wb",
+        preset=3,
+    ) as target:
+        for source in (sealed_prefix, late_suffix):
+            while chunk := source.read(1024 * 1024):
+                expected.update(chunk)
+                target.write(chunk)
+    restored_hash = _sha256_file(temporary, decompress=True)
+    if restored_hash != expected.hexdigest():
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError(
+            "ORDERFLOW_LATE_APPEND_RECOVERY_MISMATCH"
+        )
+    temporary.replace(compressed)
+    manifest = {
+        "schema_version": "orderflow_segment_manifest_v1",
+        "status": "SEALED_VERIFIED_LATE_APPEND_RECOVERED",
+        "segment_hour": segment_hour.isoformat(),
+        "compressed_path": str(compressed),
+        "uncompressed_sha256": restored_hash,
+        "compressed_sha256": _sha256_file(compressed),
+        "original_compressed_sha256": original_compressed_hash,
+        "late_suffix_sha256": late_suffix_hash,
+        "sealed_prefix_records": compressed_records,
+        "late_suffix_records": raw_records,
+        "recovered_record_count": (
+            compressed_records + raw_records
+        ),
+        "uncompressed_bytes": _decompressed_size(compressed),
+        "compressed_bytes": compressed.stat().st_size,
+        "orders_generated": 0,
+    }
+    atomic_write_json(manifest_path, manifest)
+    raw.unlink()
+    return manifest
+
+
 def seal_completed_orderflow_segments(
     root: Path | str,
     *,
     current_hour: datetime,
+    seal_lag_hours: int = 2,
 ) -> list[dict[str, Any]]:
     """Losslessly XZ-seal closed hours and publish verification manifests."""
 
@@ -297,7 +403,7 @@ def seal_completed_orderflow_segments(
         minute=0,
         second=0,
         microsecond=0,
-    )
+    ) - timedelta(hours=max(1, seal_lag_hours) - 1)
     sealed: list[dict[str, Any]] = []
     for path in sorted(directory.rglob("*.jsonl")):
         try:
@@ -327,9 +433,15 @@ def seal_completed_orderflow_segments(
                 decompress=True,
             )
             if restored_hash != original_hash:
-                raise RuntimeError(
-                    "ORDERFLOW_SEGMENT_COMPRESSION_MISMATCH"
+                sealed.append(
+                    _recover_late_appended_segment(
+                        path,
+                        compressed,
+                        manifest_path,
+                        segment_hour=segment_hour,
+                    )
                 )
+                continue
             compressed_hash = _sha256_file(compressed)
             manifest = {
                 "schema_version": "orderflow_segment_manifest_v1",
@@ -930,36 +1042,223 @@ def _apply_cvd_history(
                 ) / iqr
 
 
-def _readiness_counts(
-    feature_directory: Path,
-) -> tuple[int, int, str | None, str | None]:
-    complete_epochs: list[datetime] = []
-    for path in sorted(feature_directory.glob("*.json")):
+def _snapshot_source_hashes(
+    ledger_root: Path,
+    hour_start: datetime,
+) -> set[str]:
+    return {
+        str(record.get("record_hash"))
+        for record in _read_segment(ledger_root, hour_start)
+        if record.get("record_hash")
+    }
+
+
+def _audit_hourly_snapshot(
+    path: Path,
+    *,
+    ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    """Verify one immutable hour before it can advance readiness."""
+
+    reasons: list[str] = []
+    try:
         payload = dict(read_json(path))
-        if payload.get("status") == "COMPLETE":
-            complete_epochs.append(_utc(payload["hour_start"]))
+    except (OSError, TypeError, ValueError) as exc:
+        return {
+            "path": str(path),
+            "hour_start": None,
+            "eligible": False,
+            "reason_codes": [f"UNREADABLE_SNAPSHOT:{type(exc).__name__}"],
+        }
+    if payload.get("schema_version") != MICROSTRUCTURE_SCHEMA:
+        reasons.append("UNSUPPORTED_SCHEMA")
+    snapshot_hash = payload.get("snapshot_hash")
+    hash_body = {
+        key: value
+        for key, value in payload.items()
+        if key != "snapshot_hash"
+    }
+    if (
+        not isinstance(snapshot_hash, str)
+        or snapshot_hash != stable_hash(hash_body, length=64)
+    ):
+        reasons.append("SNAPSHOT_HASH_MISMATCH")
+    try:
+        hour_start = _utc(payload["hour_start"])
+        hour_end = _utc(payload["hour_end"])
+    except (KeyError, TypeError, ValueError):
+        hour_start = None
+        hour_end = None
+        reasons.append("INVALID_HOUR_BOUNDARY")
+    if hour_start is not None:
+        expected_name = hour_start.strftime("%Y%m%dT%H0000Z.json")
+        if path.name != expected_name:
+            reasons.append("FILENAME_HOUR_MISMATCH")
+        if hour_end != hour_start + timedelta(hours=1):
+            reasons.append("INVALID_HOUR_DURATION")
+    if payload.get("status") != "COMPLETE":
+        reasons.append("SNAPSHOT_NOT_COMPLETE")
+    if payload.get("synthetic_data_used") is not False:
+        reasons.append("SYNTHETIC_DATA_NOT_EXCLUDED")
+    if int(payload.get("orders_generated") or 0) != 0:
+        reasons.append("ORDER_SIDE_EFFECT_DETECTED")
+    health = dict(payload.get("stream_health") or {})
+    if str(health.get("state")) not in {"CONNECTED", "STOPPED"}:
+        reasons.append("STREAM_NOT_HEALTHY")
+    for counter in ("sequence_gaps", "dropped_messages", "reconnects"):
+        if int(health.get(counter) or 0) != 0:
+            reasons.append(f"STREAM_{counter.upper()}")
+    markets = payload.get("markets")
+    if not isinstance(markets, list) or not markets:
+        reasons.append("MARKETS_MISSING")
+        markets = []
+    source_hashes: set[str] = set()
+    for row in markets:
+        market = str(row.get("market") or "UNKNOWN")
+        if row.get("status") != "COMPLETE":
+            reasons.append(f"MARKET_NOT_COMPLETE:{market}")
+        if row.get("reason_codes"):
+            reasons.append(f"MARKET_HAS_GAP_REASON:{market}")
+        if hour_start is not None:
+            try:
+                first = _utc(row["first_arrival_timestamp"])
+                last = _utc(row["last_arrival_timestamp"])
+            except (KeyError, TypeError, ValueError):
+                reasons.append(f"ARRIVAL_COVERAGE_MISSING:{market}")
+            else:
+                if first > hour_start + timedelta(minutes=5):
+                    reasons.append(f"ARRIVAL_START_LATE:{market}")
+                if last < hour_start + timedelta(minutes=55):
+                    reasons.append(f"ARRIVAL_END_EARLY:{market}")
+        coverage = dict(row.get("required_field_coverage") or {})
+        for field in (
+            "spot_cvd_input_available",
+            "orderbook_available",
+            "funding_available",
+            "open_interest_available",
+            "basis_available",
+        ):
+            if coverage.get(field) is not True:
+                reasons.append(f"REQUIRED_FIELD_MISSING:{market}:{field}")
+        row_hashes = row.get("source_record_hashes")
+        if not isinstance(row_hashes, list) or not row_hashes:
+            reasons.append(f"SOURCE_RECORD_HASHES_MISSING:{market}")
+            continue
+        for record_hash in row_hashes:
+            if (
+                not isinstance(record_hash, str)
+                or len(record_hash) != 64
+            ):
+                reasons.append(f"SOURCE_RECORD_HASH_INVALID:{market}")
+            else:
+                source_hashes.add(record_hash)
+    if ledger_root is not None and hour_start is not None:
+        ledger_hashes = _snapshot_source_hashes(
+            ledger_root,
+            hour_start,
+        )
+        if not ledger_hashes:
+            reasons.append("LEDGER_SEGMENT_MISSING")
+        elif not source_hashes.issubset(ledger_hashes):
+            reasons.append("SOURCE_RECORD_NOT_IN_LEDGER")
+    unique_reasons = sorted(set(reasons))
+    return {
+        "path": str(path),
+        "hour_start": (
+            hour_start.isoformat() if hour_start is not None else None
+        ),
+        "eligible": not unique_reasons,
+        "reason_codes": unique_reasons,
+        "snapshot_hash": snapshot_hash,
+    }
+
+
+def audit_microstructure_snapshots(
+    feature_directory: Path,
+    *,
+    ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    """Return the fail-closed readiness evidence from all sealed hours."""
+
+    audits = [
+        _audit_hourly_snapshot(path, ledger_root=ledger_root)
+        for path in sorted(feature_directory.glob("*.json"))
+    ]
+    eligible_epochs = [
+        _utc(row["hour_start"])
+        for row in audits
+        if row["eligible"] and row["hour_start"] is not None
+    ]
     consecutive = 0
-    expected: datetime | None = None
-    for epoch in reversed(complete_epochs):
-        if expected is None or epoch == expected:
+    if audits:
+        expected: datetime | None = None
+        for row in reversed(audits):
+            if not row["eligible"] or row["hour_start"] is None:
+                break
+            epoch = _utc(row["hour_start"])
+            if expected is not None and epoch != expected:
+                break
             consecutive += 1
             expected = epoch - timedelta(hours=1)
-        else:
-            break
-    return (
-        len(complete_epochs),
-        consecutive,
-        (
-            complete_epochs[0].isoformat()
-            if complete_epochs
+    excluded = [row for row in audits if not row["eligible"]]
+    return {
+        "audited_snapshot_count": len(audits),
+        "eligible_complete_hours": len(eligible_epochs),
+        "consecutive_complete_hours": consecutive,
+        "first_complete_hour": (
+            min(eligible_epochs).isoformat()
+            if eligible_epochs
             else None
         ),
-        (
-            complete_epochs[-1].isoformat()
-            if complete_epochs
+        "last_complete_hour": (
+            max(eligible_epochs).isoformat()
+            if eligible_epochs
             else None
         ),
+        "latest_snapshot_hour": (
+            audits[-1]["hour_start"] if audits else None
+        ),
+        "latest_snapshot_eligible": (
+            bool(audits[-1]["eligible"]) if audits else False
+        ),
+        "excluded_snapshot_count": len(excluded),
+        "excluded_snapshots": excluded,
+    }
+
+
+def prospective_milestone_status(
+    consecutive_hours: int,
+) -> dict[str, Any]:
+    definitions = (
+        ("technical_feature_validation", 90),
+        ("preliminary_research", 180),
+        ("formal_regime_assessment", 365),
     )
+    milestones: dict[str, Any] = {}
+    for name, days in definitions:
+        required_hours = days * 24
+        remaining_hours = max(0, required_hours - consecutive_hours)
+        milestones[name] = {
+            "minimum_consecutive_days": days,
+            "required_complete_hours": required_hours,
+            "eligible": consecutive_hours >= required_hours,
+            "remaining_complete_hours": remaining_hours,
+            "remaining_complete_days_equivalent": (
+                remaining_hours / 24
+            ),
+        }
+    if milestones["formal_regime_assessment"]["eligible"]:
+        stage = "FORMAL_REGIME_ASSESSMENT_ELIGIBLE"
+    elif milestones["preliminary_research"]["eligible"]:
+        stage = "PRELIMINARY_RESEARCH_ELIGIBLE"
+    elif milestones["technical_feature_validation"]["eligible"]:
+        stage = "TECHNICAL_FEATURE_VALIDATION_ELIGIBLE"
+    else:
+        stage = "COLLECT"
+    return {
+        "stage": stage,
+        "milestones": milestones,
+    }
 
 
 def _readiness_payload(
@@ -967,21 +1266,28 @@ def _readiness_payload(
     feature_directory: Path,
     target: Path,
     snapshot: Mapping[str, Any],
+    ledger_root: Path | None = None,
 ) -> dict[str, Any]:
-    (
-        complete_hours,
-        consecutive_complete_hours,
-        first_complete_hour,
-        last_complete_hour,
-    ) = _readiness_counts(feature_directory)
+    audit = audit_microstructure_snapshots(
+        feature_directory,
+        ledger_root=ledger_root,
+    )
+    complete_hours = int(audit["eligible_complete_hours"])
+    consecutive_complete_hours = int(
+        audit["consecutive_complete_hours"]
+    )
     technical_ready = consecutive_complete_hours >= 90 * 24
-    return {
-        "schema_version": "microstructure_readiness_v1",
+    milestone = prospective_milestone_status(
+        consecutive_complete_hours
+    )
+    body = {
+        "schema_version": "microstructure_readiness_v2",
         "status": (
             "TECHNICAL_FEATURE_VALIDATION_READY"
             if technical_ready
             else "COLLECTING_PROSPECTIVE_DATA"
         ),
+        "milestone_stage": milestone["stage"],
         "latest_hour_status": snapshot["status"],
         "latest_snapshot": str(target),
         "complete_hours": complete_hours,
@@ -990,18 +1296,77 @@ def _readiness_payload(
         "consecutive_complete_days_equivalent": (
             consecutive_complete_hours / 24
         ),
-        "first_complete_hour": first_complete_hour,
-        "last_complete_hour": last_complete_hour,
+        "first_complete_hour": audit["first_complete_hour"],
+        "last_complete_hour": audit["last_complete_hour"],
         "minimum_days": {
             "technical_feature_validation": 90,
             "preliminary_research": 180,
             "formal_regime_assessment": 365,
         },
+        "milestones": milestone["milestones"],
+        "snapshot_audit": audit,
         "backtest_permitted": technical_ready,
         "paper_permitted": False,
         "live_permitted": False,
         "synthetic_data_used": False,
         "orders_generated": 0,
+    }
+    return {
+        **body,
+        "readiness_hash": stable_hash(body, length=64),
+    }
+
+
+def current_microstructure_readiness(
+    feature_directory: Path,
+    *,
+    ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    """Rebuild readiness from immutable snapshots, never from stale state."""
+
+    targets = sorted(feature_directory.glob("*.json"))
+    if targets:
+        target = targets[-1]
+        snapshot = dict(read_json(target))
+        return _readiness_payload(
+            feature_directory=feature_directory,
+            target=target,
+            snapshot=snapshot,
+            ledger_root=ledger_root,
+        )
+    milestone = prospective_milestone_status(0)
+    audit = audit_microstructure_snapshots(
+        feature_directory,
+        ledger_root=ledger_root,
+    )
+    body = {
+        "schema_version": "microstructure_readiness_v2",
+        "status": "COLLECTING_PROSPECTIVE_DATA",
+        "milestone_stage": milestone["stage"],
+        "latest_hour_status": "NOT_FINALIZED",
+        "latest_snapshot": None,
+        "complete_hours": 0,
+        "consecutive_complete_hours": 0,
+        "complete_days_equivalent": 0.0,
+        "consecutive_complete_days_equivalent": 0.0,
+        "first_complete_hour": None,
+        "last_complete_hour": None,
+        "minimum_days": {
+            "technical_feature_validation": 90,
+            "preliminary_research": 180,
+            "formal_regime_assessment": 365,
+        },
+        "milestones": milestone["milestones"],
+        "snapshot_audit": audit,
+        "backtest_permitted": False,
+        "paper_permitted": False,
+        "live_permitted": False,
+        "synthetic_data_used": False,
+        "orders_generated": 0,
+    }
+    return {
+        **body,
+        "readiness_hash": stable_hash(body, length=64),
     }
 
 
@@ -1020,6 +1385,7 @@ class ProspectiveOrderflowRecorder:
         positioning_directory: Path | None = None,
         flush_seconds: float = 1.0,
         batch_size: int = 500,
+        finalization_grace_minutes: int = 5,
     ) -> None:
         self.ledger = ledger
         self.database = database
@@ -1030,6 +1396,10 @@ class ProspectiveOrderflowRecorder:
         self.positioning_directory = positioning_directory
         self.flush_seconds = flush_seconds
         self.batch_size = batch_size
+        self.finalization_grace_minutes = max(
+            1,
+            int(finalization_grace_minutes),
+        )
         self.started_at = utc_now()
         self._stop = asyncio.Event()
         self._pause_requested = asyncio.Event()
@@ -1363,6 +1733,7 @@ class ProspectiveOrderflowRecorder:
                 feature_directory=self.feature_directory,
                 target=target,
                 snapshot=snapshot,
+                ledger_root=self.ledger.root,
             )
             atomic_write_json(self.readiness_path, readiness)
             readiness["sealed_segments"] = (
@@ -1490,6 +1861,7 @@ class ProspectiveOrderflowRecorder:
             feature_directory=self.feature_directory,
             target=target,
             snapshot=snapshot,
+            ledger_root=self.ledger.root,
         )
         atomic_write_json(self.readiness_path, readiness)
         readiness["sealed_segments"] = (
@@ -1554,13 +1926,17 @@ class ProspectiveOrderflowRecorder:
                     buffer.clear()
                     last_flush = now_monotonic
                     self._write_health(manager)
-                current_closed = _closed_hour_start(utc_now())
+                now = utc_now()
+                current_closed = _closed_hour_start(now)
                 if (
-                    last_finalized is None
-                    or current_closed > last_finalized
+                    (
+                        last_finalized is None
+                        or current_closed > last_finalized
+                    )
+                    and now.minute >= self.finalization_grace_minutes
                 ):
                     self.finalize_previous_hour(
-                        observed_at=utc_now(),
+                        observed_at=now,
                         health=manager.health(),
                     )
                     last_finalized = current_closed
@@ -1579,7 +1955,10 @@ class ProspectiveOrderflowRecorder:
 __all__ = [
     "HashChainedOrderflowLedger",
     "ProspectiveOrderflowRecorder",
+    "audit_microstructure_snapshots",
+    "current_microstructure_readiness",
     "normalize_stream_event",
+    "prospective_milestone_status",
     "seal_completed_orderflow_segments",
     "summarize_orderflow_hour",
     "verify_orderflow_ledger",

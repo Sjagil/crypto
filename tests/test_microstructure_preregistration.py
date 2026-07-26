@@ -4,6 +4,7 @@ import pytest
 
 from research.microstructure_preregistration import (
     crowding_avoidance_plan,
+    microstructure_research_gate,
     write_crowding_avoidance_plan,
 )
 
@@ -35,3 +36,44 @@ def test_microstructure_plan_is_immutable(tmp_path) -> None:
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="HISTORY_REVISION"):
         write_crowding_avoidance_plan(path)
+
+
+def test_research_gate_blocks_early_and_never_promotes_live() -> None:
+    readiness = {
+        "milestones": {
+            "technical_feature_validation": {
+                "eligible": False,
+                "required_complete_hours": 2160,
+                "remaining_complete_hours": 1,
+            }
+        },
+        "consecutive_complete_hours": 2159,
+        "synthetic_data_used": False,
+        "snapshot_audit": {
+            "latest_snapshot_eligible": True,
+            "excluded_snapshot_count": 2,
+        },
+        "backtest_permitted": False,
+        "readiness_hash": "a" * 64,
+    }
+    blocked = microstructure_research_gate(
+        readiness,
+        requested_stage="technical_feature_validation",
+    )
+    assert blocked["status"] == "BLOCKED"
+    readiness["milestones"][
+        "technical_feature_validation"
+    ]["eligible"] = True
+    readiness["milestones"][
+        "technical_feature_validation"
+    ]["remaining_complete_hours"] = 0
+    readiness["consecutive_complete_hours"] = 2160
+    readiness["backtest_permitted"] = True
+    permitted = microstructure_research_gate(
+        readiness,
+        requested_stage="technical_feature_validation",
+    )
+    assert permitted["status"] == "PERMITTED"
+    assert permitted["backtest_permitted"]
+    assert not permitted["paper_permitted"]
+    assert not permitted["live_permitted"]

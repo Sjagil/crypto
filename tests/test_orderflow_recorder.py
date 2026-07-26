@@ -12,12 +12,16 @@ from core.contracts import NormalizedStreamEvent, StreamEventType
 from data.orderflow_recorder import (
     HashChainedOrderflowLedger,
     ProspectiveOrderflowRecorder,
+    audit_microstructure_snapshots,
+    current_microstructure_readiness,
     normalize_stream_event,
+    prospective_milestone_status,
     seal_completed_orderflow_segments,
     summarize_orderflow_hour,
     verify_orderflow_ledger,
 )
 from data.websocket_manager import WebSocketManager
+from utils.common import stable_hash
 
 
 def event(
@@ -139,7 +143,7 @@ def test_closed_segment_is_losslessly_sealed_and_auditable(
 
     manifests = seal_completed_orderflow_segments(
         root,
-        current_hour=at + timedelta(hours=1),
+        current_hour=at + timedelta(hours=2),
     )
 
     assert len(manifests) == 1
@@ -147,6 +151,61 @@ def test_closed_segment_is_losslessly_sealed_and_auditable(
     assert not list(root.rglob("*.jsonl"))
     assert len(list(root.rglob("*.jsonl.xz"))) == 1
     assert verify_orderflow_ledger(root)["status"] == "PASSED"
+
+
+def test_late_append_is_losslessly_recovered_after_safe_seal(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stream"
+    ledger = HashChainedOrderflowLedger(
+        root=root,
+        checkpoint_path=tmp_path / "checkpoint.json",
+    )
+    at = datetime(2026, 7, 26, 10, 1, tzinfo=UTC)
+    ledger.append(
+        [
+            event(
+                kind=StreamEventType.TRADE,
+                at=at,
+                message_id="first",
+                payload={
+                    "price": "100",
+                    "quantity": "1",
+                    "side": "buy",
+                },
+            )
+        ]
+    )
+    seal_completed_orderflow_segments(
+        root,
+        current_hour=at + timedelta(hours=2),
+    )
+    ledger.append(
+        [
+            event(
+                kind=StreamEventType.TRADE,
+                at=at + timedelta(minutes=30),
+                message_id="late",
+                payload={
+                    "price": "101",
+                    "quantity": "1",
+                    "side": "sell",
+                },
+            )
+        ]
+    )
+    assert verify_orderflow_ledger(root)["status"] == "FAILED"
+    recovered = seal_completed_orderflow_segments(
+        root,
+        current_hour=at + timedelta(hours=2),
+    )
+    assert recovered[0]["status"] == (
+        "SEALED_VERIFIED_LATE_APPEND_RECOVERED"
+    )
+    audit = verify_orderflow_ledger(root)
+    assert audit["status"] == "PASSED"
+    assert audit["record_count"] == 2
+    assert not list(root.rglob("*.jsonl"))
 
 
 def test_orderflow_storage_limit_fails_before_append(
@@ -552,4 +611,127 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     assert (
         repeated["snapshot"]["snapshot_hash"]
         == result["snapshot"]["snapshot_hash"]
+    )
+
+
+def _write_auditable_snapshot(
+    directory: Path,
+    hour_start: datetime,
+    *,
+    complete: bool = True,
+    tamper_hash: bool = False,
+) -> Path:
+    market_status = "COMPLETE" if complete else "DATA_GAP"
+    body = {
+        "schema_version": "microstructure_hourly_snapshot_v1",
+        "hour_start": hour_start.isoformat(),
+        "hour_end": (hour_start + timedelta(hours=1)).isoformat(),
+        "finalized_at": (
+            hour_start + timedelta(hours=1, minutes=1)
+        ).isoformat(),
+        "status": market_status,
+        "markets": [
+            {
+                "market": "BTC-EUR",
+                "hour_start": hour_start.isoformat(),
+                "hour_end": (
+                    hour_start + timedelta(hours=1)
+                ).isoformat(),
+                "status": market_status,
+                "reason_codes": (
+                    [] if complete else ["SEQUENCE_GAP"]
+                ),
+                "first_arrival_timestamp": (
+                    hour_start + timedelta(seconds=30)
+                ).isoformat(),
+                "last_arrival_timestamp": (
+                    hour_start + timedelta(minutes=59)
+                ).isoformat(),
+                "required_field_coverage": {
+                    "spot_cvd_input_available": True,
+                    "orderbook_available": True,
+                    "funding_available": True,
+                    "open_interest_available": True,
+                    "basis_available": True,
+                },
+                "source_record_hashes": ["a" * 64],
+            }
+        ],
+        "stream_health": {
+            "state": "CONNECTED",
+            "sequence_gaps": 0 if complete else 1,
+            "dropped_messages": 0,
+            "reconnects": 0,
+        },
+        "ledger_root_hash": "b" * 64,
+        "synthetic_data_used": False,
+        "orders_generated": 0,
+    }
+    snapshot_hash = stable_hash(body, length=64)
+    payload = {
+        **body,
+        "snapshot_hash": (
+            "f" * 64 if tamper_hash else snapshot_hash
+        ),
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / hour_start.strftime(
+        "%Y%m%dT%H0000Z.json"
+    )
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    return target
+
+
+def test_readiness_resets_on_latest_gap_and_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    features = tmp_path / "features"
+    start = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    _write_auditable_snapshot(features, start)
+    _write_auditable_snapshot(
+        features,
+        start + timedelta(hours=1),
+    )
+    _write_auditable_snapshot(
+        features,
+        start + timedelta(hours=2),
+        complete=False,
+    )
+    audit = audit_microstructure_snapshots(features)
+    assert audit["eligible_complete_hours"] == 2
+    assert audit["consecutive_complete_hours"] == 0
+    assert audit["excluded_snapshot_count"] == 1
+    _write_auditable_snapshot(
+        features,
+        start + timedelta(hours=3),
+        tamper_hash=True,
+    )
+    readiness = current_microstructure_readiness(features)
+    assert readiness["complete_hours"] == 2
+    assert readiness["consecutive_complete_hours"] == 0
+    assert not readiness["backtest_permitted"]
+    assert readiness["milestone_stage"] == "COLLECT"
+    assert readiness["snapshot_audit"][
+        "excluded_snapshot_count"
+    ] == 2
+    assert len(readiness["readiness_hash"]) == 64
+
+
+def test_prospective_milestones_are_strict_and_non_promotional() -> None:
+    before = prospective_milestone_status(90 * 24 - 1)
+    technical = prospective_milestone_status(90 * 24)
+    preliminary = prospective_milestone_status(180 * 24)
+    formal = prospective_milestone_status(365 * 24)
+    assert before["stage"] == "COLLECT"
+    assert (
+        technical["stage"]
+        == "TECHNICAL_FEATURE_VALIDATION_ELIGIBLE"
+    )
+    assert (
+        preliminary["stage"]
+        == "PRELIMINARY_RESEARCH_ELIGIBLE"
+    )
+    assert (
+        formal["stage"]
+        == "FORMAL_REGIME_ASSESSMENT_ELIGIBLE"
     )

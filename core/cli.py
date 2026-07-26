@@ -2861,24 +2861,33 @@ def command_microstructure(
         emit(write_crowding_avoidance_plan(plan_path))
         return 0
     if args.microstructure_command == "data-status":
+        from data.orderflow_recorder import (
+            current_microstructure_readiness,
+        )
+
         readiness_path = (
             _operation_directory(settings)
             / "microstructure_readiness.json"
         )
+        readiness = current_microstructure_readiness(
+            settings.paths.context_data_dir
+            / "microstructure_hourly",
+            ledger_root=(
+                settings.paths.context_data_dir
+                / "orderflow_stream"
+            ),
+        )
+        atomic_write_json(readiness_path, readiness)
         stream_path = (
             settings.paths.checkpoints_dir
             / "orderflow_stream_chain.json"
         )
         emit(
             {
-                "status": "READY"
-                if readiness_path.is_file()
-                else "NOT_COLLECTED",
-                "readiness": (
-                    read_json(readiness_path)
-                    if readiness_path.is_file()
-                    else None
-                ),
+                "status": "TECHNICAL_READY"
+                if readiness.get("backtest_permitted")
+                else "COLLECTING",
+                "readiness": readiness,
                 "stream": (
                     read_json(stream_path)
                     if stream_path.is_file()
@@ -2915,6 +2924,39 @@ def command_microstructure(
         )
         emit({**report, "report": str(report_path)})
         return 0
+    if args.microstructure_command == "gate-check":
+        from data.orderflow_recorder import (
+            current_microstructure_readiness,
+        )
+        from research.microstructure_preregistration import (
+            microstructure_research_gate,
+        )
+
+        readiness = current_microstructure_readiness(
+            settings.paths.context_data_dir
+            / "microstructure_hourly",
+            ledger_root=(
+                settings.paths.context_data_dir
+                / "orderflow_stream"
+            ),
+        )
+        atomic_write_json(
+            _operation_directory(settings)
+            / "microstructure_readiness.json",
+            readiness,
+        )
+        gate = microstructure_research_gate(
+            readiness,
+            requested_stage=args.stage,
+        )
+        gate_path = (
+            settings.paths.lab_dir
+            / "reports"
+            / f"microstructure_{args.stage}_gate_v1.json"
+        )
+        atomic_write_json(gate_path, gate)
+        emit({**gate, "report": str(gate_path)})
+        return 0 if gate["status"] == "PERMITTED" else 2
     emit(
         read_json(plan_path)
         if plan_path.is_file()
@@ -17420,6 +17462,18 @@ def build_parser() -> argparse.ArgumentParser:
     microstructure.add_parser("data-status")
     microstructure.add_parser("audit")
     microstructure.add_parser("readiness-report")
+    microstructure_gate = microstructure.add_parser(
+        "gate-check"
+    )
+    microstructure_gate.add_argument(
+        "--stage",
+        choices=(
+            "technical_feature_validation",
+            "preliminary_research",
+            "formal_regime_assessment",
+        ),
+        default="technical_feature_validation",
+    )
 
     gex = commands.add_parser("gex").add_subparsers(dest="gex_command", required=True)
     gex_collect = gex.add_parser("collect")

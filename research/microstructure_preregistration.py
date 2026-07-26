@@ -8,6 +8,11 @@ from typing import Any
 from utils.common import atomic_write_json, read_json, stable_hash
 
 FAMILY_ID = "CROWDING_AVOIDANCE_V1"
+RESEARCH_STAGES = (
+    "technical_feature_validation",
+    "preliminary_research",
+    "formal_regime_assessment",
+)
 
 
 def crowding_avoidance_plan() -> dict[str, Any]:
@@ -148,8 +153,68 @@ def write_crowding_avoidance_plan(path: Path) -> dict[str, Any]:
     return {**plan, "plan_path": str(path)}
 
 
+def microstructure_research_gate(
+    readiness: dict[str, Any],
+    *,
+    requested_stage: str,
+) -> dict[str, Any]:
+    """Fail closed until the requested prospective milestone is proven."""
+
+    if requested_stage not in RESEARCH_STAGES:
+        raise ValueError("UNKNOWN_MICROSTRUCTURE_RESEARCH_STAGE")
+    milestones = dict(readiness.get("milestones") or {})
+    milestone = dict(milestones.get(requested_stage) or {})
+    snapshot_audit = dict(readiness.get("snapshot_audit") or {})
+    permitted = bool(
+        milestone.get("eligible")
+        and readiness.get("synthetic_data_used") is False
+        and snapshot_audit.get("latest_snapshot_eligible") is True
+        and (
+            requested_stage != "technical_feature_validation"
+            or readiness.get("backtest_permitted") is True
+        )
+    )
+    body = {
+        "schema_version": "microstructure_research_gate_v1",
+        "family_id": FAMILY_ID,
+        "requested_stage": requested_stage,
+        "status": "PERMITTED" if permitted else "BLOCKED",
+        "reason_code": (
+            "PROSPECTIVE_MILESTONE_PROVEN"
+            if permitted
+            else "INSUFFICIENT_VERIFIED_PROSPECTIVE_HISTORY"
+        ),
+        "required_complete_hours": milestone.get(
+            "required_complete_hours"
+        ),
+        "remaining_complete_hours": milestone.get(
+            "remaining_complete_hours"
+        ),
+        "consecutive_complete_hours": readiness.get(
+            "consecutive_complete_hours",
+            0,
+        ),
+        "excluded_snapshot_count": snapshot_audit.get(
+            "excluded_snapshot_count",
+            0,
+        ),
+        "readiness_hash": readiness.get("readiness_hash"),
+        "backtest_permitted": (
+            permitted
+            if requested_stage == "technical_feature_validation"
+            else bool(readiness.get("backtest_permitted"))
+        ),
+        "paper_permitted": False,
+        "live_permitted": False,
+        "orders_generated": 0,
+    }
+    return {**body, "gate_hash": stable_hash(body, length=64)}
+
+
 __all__ = [
     "FAMILY_ID",
+    "RESEARCH_STAGES",
     "crowding_avoidance_plan",
+    "microstructure_research_gate",
     "write_crowding_avoidance_plan",
 ]

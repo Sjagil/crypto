@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from data.orderflow_recorder import verify_orderflow_ledger
+from data.orderflow_recorder import (
+    current_microstructure_readiness,
+    verify_orderflow_ledger,
+)
 from data.service_supervisor import CollectorSupervisor
 from utils.common import (
     atomic_write_json,
@@ -50,7 +53,18 @@ def prospective_readiness_report(settings: Any) -> dict[str, Any]:
     )
     volume = _read(volume_path)
     readiness_path = operations / "microstructure_readiness.json"
-    readiness = _read(readiness_path)
+    stored_readiness = _read(readiness_path)
+    readiness = current_microstructure_readiness(
+        settings.paths.context_data_dir / "microstructure_hourly",
+        ledger_root=(
+            settings.paths.context_data_dir / "orderflow_stream"
+        ),
+    )
+    stale_readiness_replaced = (
+        stored_readiness.get("readiness_hash")
+        != readiness.get("readiness_hash")
+    )
+    atomic_write_json(readiness_path, readiness)
     stream_health_path = (
         operations / "orderflow_stream_health.json"
     )
@@ -199,6 +213,15 @@ def prospective_readiness_report(settings: Any) -> dict[str, Any]:
                 "minimum_days": 90,
                 "synthetic_data_used": readiness.get(
                     "synthetic_data_used"
+                ),
+                "milestone_stage": readiness.get(
+                    "milestone_stage"
+                ),
+                "excluded_snapshot_count": (
+                    readiness.get("snapshot_audit") or {}
+                ).get("excluded_snapshot_count"),
+                "stale_readiness_replaced": (
+                    stale_readiness_replaced
                 ),
             },
             blocks_live=not orderflow_ready,

@@ -40,6 +40,12 @@ def test_required_command_families_are_registered() -> None:
         ["microstructure", "data-status"],
         ["microstructure", "audit"],
         ["microstructure", "readiness-report"],
+        [
+            "microstructure",
+            "gate-check",
+            "--stage",
+            "technical_feature_validation",
+        ],
         ["scrape", "status"],
         ["features", "build"],
         ["strategies", "list"],
