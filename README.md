@@ -1094,23 +1094,38 @@ predeclared 90/180/365-day checkpoints.
 python main.py microstructure plan
 python main.py microstructure status
 python main.py microstructure data-status
+python main.py microstructure observe
+python main.py microstructure observer-audit
 python main.py microstructure audit
 python main.py microstructure readiness-report
 python main.py microstructure gate-check --stage technical_feature_validation
 ```
 
 The continuous shadow service additionally records Bitvavo public trade,
-ticker, and order-book WebSocket events. Records are segmented by UTC hour and
+24-hour ticker, and order-book WebSocket events. The 24-hour channel is used
+for comparable base-volume facts; the best-bid/ask-only ticker is not
+misrepresented as a volume source. Records are segmented by UTC hour and
 joined by a cross-segment SHA-256 chain. Trades preserve exchange time,
 collector arrival time, aggressor side, base and quote quantity, sequence, and
 raw-payload hash. Closed-hour snapshots report delta/CVD inputs, order-book
 imbalance, microprice, spread, funding, open interest, basis, and
 perpetual/spot volume. A mid-hour start, sequence gap, reconnect, dropped
 message, or missing stream is recorded as `DATA_GAP`; nothing is interpolated.
-Snapshots are finalized only after a five-minute late-arrival grace period,
-and raw hourly segments remain writable for another full hour before
-lossless sealing. Readiness is rebuilt from immutable snapshot hashes and
+Snapshots are finalized only after a five-minute late-arrival grace period.
+When the matching positioning snapshot is still in flight, finalization is
+deferred instead of permanently manufacturing a gap; after ten minutes the
+hour is sealed with the explicit `POSITIONING_CONTEXT_TIMEOUT` reason. Raw
+hourly segments remain writable for another full hour before lossless
+sealing. Readiness is rebuilt from immutable snapshot hashes and
 source-record hashes; a latest gap resets the consecutive counter to zero.
+
+Every sealed hour is also appended once to the orderless
+`CROWDING_AVOIDANCE_V1` observer. Its four preregistered DNA variants are
+evaluated without ranking or threshold changes only after funding, open
+interest, perpetual/spot volume and real spot-CVD history are all available.
+Earlier hours are retained as `DATA_GAP_NOT_EVALUATED` or `FEATURE_WARMUP`,
+never as negative signals. Observation records form a source-linked SHA-256
+chain, preserve the AI embargo and cannot generate targets or orders.
 Backtesting remains forbidden until `microstructure gate-check` proves at
 least 90 consecutive complete days. Preliminary research and formal regime
 assessment remain separately blocked until 180 and 365 consecutive days.

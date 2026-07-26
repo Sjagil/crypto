@@ -38,6 +38,8 @@ def test_required_command_families_are_registered() -> None:
         ["microstructure", "plan"],
         ["microstructure", "status"],
         ["microstructure", "data-status"],
+        ["microstructure", "observe"],
+        ["microstructure", "observer-audit"],
         ["microstructure", "audit"],
         ["microstructure", "readiness-report"],
         [

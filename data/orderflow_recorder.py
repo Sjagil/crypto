@@ -223,6 +223,10 @@ def normalize_stream_event(
                 "best_bid": payload.get("best_bid"),
                 "best_ask": payload.get("best_ask"),
                 "spot_volume_24h": payload.get("volume_24h"),
+                "spot_quote_volume_24h": payload.get(
+                    "quote_volume_24h"
+                ),
+                "ticker_kind": payload.get("ticker_kind"),
             }
         )
     return body
@@ -759,10 +763,20 @@ def summarize_orderflow_hour(
         if record.get("book_state_status")
         == "SEQUENCE_APPLIED"
     ]
+    book_samples = [
+        record
+        for record in books
+        if record.get("book_bids") and record.get("book_asks")
+    ]
     tickers = [
         record
         for record in selected
         if record.get("event_type") == StreamEventType.TICKER.value
+    ]
+    volume_tickers = [
+        record
+        for record in tickers
+        if _decimal(record.get("spot_volume_24h")) is not None
     ]
     buy_base = Decimal(0)
     sell_base = Decimal(0)
@@ -798,10 +812,12 @@ def summarize_orderflow_hour(
         reasons.append("NO_STREAM_EVENTS")
     if not trades:
         reasons.append("NO_TRADES")
-    if not books:
+    if not book_samples:
         reasons.append("NO_VALID_ORDERBOOK")
     if not tickers:
         reasons.append("NO_TICKER")
+    elif not volume_tickers:
+        reasons.append("NO_24H_SPOT_VOLUME")
     if any(
         record.get("book_state_status")
         in {
@@ -846,11 +862,14 @@ def summarize_orderflow_hour(
         "spot_base_volume": float(total_base),
         "spot_quote_volume": float(total_quote),
         "spot_volume_24h": (
-            tickers[-1].get("spot_volume_24h")
-            if tickers
+            volume_tickers[-1].get("spot_volume_24h")
+            if volume_tickers
             else None
         ),
-        **_book_metrics(books[-1] if books else None),
+        "orderbook_sample_count": len(book_samples),
+        **_book_metrics(
+            book_samples[-1] if book_samples else None
+        ),
         "source_record_hashes": [
             record.get("record_hash") for record in selected
         ],
@@ -1386,6 +1405,7 @@ class ProspectiveOrderflowRecorder:
         flush_seconds: float = 1.0,
         batch_size: int = 500,
         finalization_grace_minutes: int = 5,
+        positioning_timeout_minutes: int = 10,
     ) -> None:
         self.ledger = ledger
         self.database = database
@@ -1399,6 +1419,10 @@ class ProspectiveOrderflowRecorder:
         self.finalization_grace_minutes = max(
             1,
             int(finalization_grace_minutes),
+        )
+        self.positioning_timeout_minutes = max(
+            self.finalization_grace_minutes + 1,
+            int(positioning_timeout_minutes),
         )
         self.started_at = utc_now()
         self._stop = asyncio.Event()
@@ -1744,6 +1768,43 @@ class ProspectiveOrderflowRecorder:
             )
             self.ledger.refresh_storage_bytes()
             return {**readiness, "snapshot": snapshot}
+        positioning_target = (
+            self.positioning_directory
+            / (hour_start.strftime("%Y%m%dT%H0000Z") + ".json")
+            if self.positioning_directory is not None
+            else None
+        )
+        positioning_deadline = (
+            hour_start
+            + timedelta(
+                hours=1,
+                minutes=self.positioning_timeout_minutes,
+            )
+        )
+        positioning_pending = bool(
+            positioning_target is not None
+            and not positioning_target.is_file()
+            and _utc(observed_at) < positioning_deadline
+        )
+        if positioning_pending:
+            return {
+                "schema_version": "microstructure_finalization_state_v1",
+                "finalization_state": "DEFERRED_CONTEXT_PENDING",
+                "status": "COLLECTING_PROSPECTIVE_DATA",
+                "reason_code": "POSITIONING_CONTEXT_PENDING",
+                "target_hour": hour_start.isoformat(),
+                "positioning_snapshot": str(positioning_target),
+                "retry_until": positioning_deadline.isoformat(),
+                "snapshot_written": False,
+                "backtest_permitted": False,
+                "paper_permitted": False,
+                "live_permitted": False,
+                "orders_generated": 0,
+            }
+        positioning_timed_out = bool(
+            positioning_target is not None
+            and not positioning_target.is_file()
+        )
         records = _read_segment(self.ledger.root, hour_start)
         provider_health = dict(health.get("bitvavo") or health)
         period_health = dict(provider_health)
@@ -1827,7 +1888,11 @@ class ProspectiveOrderflowRecorder:
             ):
                 row["status"] = "DATA_GAP"
                 row["reason_codes"].append(
-                    "DERIVATIVES_CONTEXT_INCOMPLETE"
+                    (
+                        "POSITIONING_CONTEXT_TIMEOUT"
+                        if positioning_timed_out
+                        else "DERIVATIVES_CONTEXT_INCOMPLETE"
+                    )
                 )
             if row["perpetual_spot_base_volume_ratio"] is None:
                 row["status"] = "DATA_GAP"
@@ -1849,6 +1914,13 @@ class ProspectiveOrderflowRecorder:
             "markets": markets,
             "stream_health": period_health,
             "ledger_root_hash": self.ledger.previous_hash,
+            "positioning_context_status": (
+                "TIMED_OUT"
+                if positioning_timed_out
+                else "AVAILABLE"
+                if positioning_target is not None
+                else "NOT_CONFIGURED"
+            ),
             "synthetic_data_used": False,
             "orders_generated": 0,
         }
@@ -1871,12 +1943,17 @@ class ProspectiveOrderflowRecorder:
             )
         )
         self.ledger.refresh_storage_bytes()
-        return {**readiness, "snapshot": snapshot}
+        return {
+            **readiness,
+            "finalization_state": "FINALIZED",
+            "snapshot": snapshot,
+        }
 
     async def run(self, manager: Any) -> None:
         buffer: list[NormalizedStreamEvent] = []
         last_flush = asyncio.get_running_loop().time()
         last_finalized: datetime | None = None
+        last_finalization_attempt: datetime | None = None
         try:
             while (
                 not self._stop.is_set()
@@ -1934,12 +2011,24 @@ class ProspectiveOrderflowRecorder:
                         or current_closed > last_finalized
                     )
                     and now.minute >= self.finalization_grace_minutes
+                    and (
+                        last_finalization_attempt is None
+                        or (
+                            now - last_finalization_attempt
+                        ).total_seconds()
+                        >= 5
+                    )
                 ):
-                    self.finalize_previous_hour(
+                    result = self.finalize_previous_hour(
                         observed_at=now,
                         health=manager.health(),
                     )
-                    last_finalized = current_closed
+                    last_finalization_attempt = now
+                    if (
+                        result.get("finalization_state")
+                        != "DEFERRED_CONTEXT_PENDING"
+                    ):
+                        last_finalized = current_closed
             self._write_health(manager)
         finally:
             if buffer:

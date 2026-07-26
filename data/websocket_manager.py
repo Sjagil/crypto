@@ -550,10 +550,19 @@ class WebSocketManager:
         self, raw: Mapping[str, Any]
     ) -> list[NormalizedStreamEvent]:
         event = raw.get("event")
-        market = str(raw.get("market", ""))
-        timestamp = _timestamp(raw.get("timestamp"), milliseconds=True)
+        event_payload = (
+            dict(raw.get("data") or {})
+            if event == "ticker24h"
+            else dict(raw)
+        )
+        market = str(event_payload.get("market", ""))
+        timestamp = _timestamp(
+            event_payload.get("timestamp"),
+            milliseconds=True,
+        )
         mapping = {
             "ticker": StreamEventType.TICKER,
+            "ticker24h": StreamEventType.TICKER,
             "trade": StreamEventType.TRADE,
             "candle": StreamEventType.CANDLE,
             "book": StreamEventType.ORDERBOOK_DELTA,
@@ -578,12 +587,27 @@ class WebSocketManager:
                 )
                 for item in raw.get("candle", [])
             ]
-        if event == "ticker":
+        if event in {"ticker", "ticker24h"}:
             payload = {
-                "last_price": raw.get("price") or raw.get("last"),
-                "best_bid": raw.get("bestBid"),
-                "best_ask": raw.get("bestAsk"),
-                "volume_24h": raw.get("volume"),
+                "last_price": (
+                    event_payload.get("price")
+                    or event_payload.get("last")
+                ),
+                "best_bid": (
+                    event_payload.get("bestBid")
+                    or event_payload.get("bid")
+                ),
+                "best_ask": (
+                    event_payload.get("bestAsk")
+                    or event_payload.get("ask")
+                ),
+                "volume_24h": event_payload.get("volume"),
+                "quote_volume_24h": event_payload.get(
+                    "volumeQuote"
+                ),
+                "ticker_kind": (
+                    "24H" if event == "ticker24h" else "BOOK"
+                ),
                 "raw_payload_hash": sha256_text(stable_json(raw)),
             }
         elif event == "trade":

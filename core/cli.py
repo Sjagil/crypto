@@ -2897,6 +2897,45 @@ def command_microstructure(
             }
         )
         return 0
+    if args.microstructure_command == "observe":
+        from research.microstructure_observer import (
+            observe_microstructure_snapshots,
+        )
+
+        result = observe_microstructure_snapshots(
+            feature_directory=(
+                settings.paths.context_data_dir
+                / "microstructure_hourly"
+            ),
+            observer_directory=(
+                settings.paths.lab_dir
+                / "observers"
+                / "crowding_avoidance_v1"
+            ),
+            plan_path=plan_path,
+            ledger_root=(
+                settings.paths.context_data_dir
+                / "orderflow_stream"
+            ),
+        )
+        emit(result)
+        return 0
+    if args.microstructure_command == "observer-audit":
+        from research.microstructure_observer import (
+            audit_crowding_observer,
+        )
+
+        plan = write_crowding_avoidance_plan(plan_path)
+        audit = audit_crowding_observer(
+            (
+                settings.paths.lab_dir
+                / "observers"
+                / "crowding_avoidance_v1"
+            ),
+            expected_plan_hash=str(plan["plan_hash"]),
+        )
+        emit(audit)
+        return 0 if audit["status"] == "PASSED" else 2
     if args.microstructure_command == "audit":
         from data.orderflow_recorder import (
             verify_orderflow_ledger,
@@ -16671,7 +16710,7 @@ async def _operate_start(
     )
     stream_subscriptions = {
         "bitvavo": {
-            "ticker": list(profile["markets"]),
+            "ticker24h": list(profile["markets"]),
             "trades": list(profile["markets"]),
             "book": list(profile["markets"]),
         }
@@ -16772,6 +16811,32 @@ async def _operate_start(
                 candidate_id=candidate_id,
                 candidate_identity=candidate_identity,
                 orderflow_stream_health=stream_health,
+            )
+            from research.microstructure_observer import (
+                observe_microstructure_snapshots,
+            )
+
+            last_cycle["microstructure_observer"] = (
+                observe_microstructure_snapshots(
+                    feature_directory=(
+                        settings.paths.context_data_dir
+                        / "microstructure_hourly"
+                    ),
+                    observer_directory=(
+                        settings.paths.lab_dir
+                        / "observers"
+                        / "crowding_avoidance_v1"
+                    ),
+                    plan_path=(
+                        settings.paths.lab_dir
+                        / "plans"
+                        / "crowding_avoidance_v1.json"
+                    ),
+                    # The recorder already reconciles snapshots against
+                    # the ledger. Keep the once-per-minute observer cheap;
+                    # the explicit CLI audit performs the full ledger scan.
+                    ledger_root=None,
+                )
             )
             service.kill_switch_state = last_cycle["risk_state"]["state"]
         except Exception as exc:
@@ -17597,6 +17662,8 @@ def build_parser() -> argparse.ArgumentParser:
     microstructure.add_parser("plan")
     microstructure.add_parser("status")
     microstructure.add_parser("data-status")
+    microstructure.add_parser("observe")
+    microstructure.add_parser("observer-audit")
     microstructure.add_parser("audit")
     microstructure.add_parser("readiness-report")
     microstructure_gate = microstructure.add_parser(

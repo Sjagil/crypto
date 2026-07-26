@@ -278,12 +278,25 @@ def test_hour_summary_calculates_delta_obi_and_microprice() -> None:
         normalize_stream_event(
             event(
                 kind=StreamEventType.ORDERBOOK_DELTA,
-                at=start + timedelta(minutes=59),
+                at=start + timedelta(minutes=58),
                 message_id="book",
                 sequence=10,
                 payload={
                     "book_bids": [["99", "10"]],
                     "book_asks": [["101", "5"]],
+                    "book_state_status": "SEQUENCE_APPLIED",
+                },
+            )
+        ),
+        normalize_stream_event(
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=start + timedelta(minutes=59),
+                message_id="book-sparse",
+                sequence=11,
+                payload={
+                    "book_bids": [],
+                    "book_asks": [],
                     "book_state_status": "SEQUENCE_APPLIED",
                 },
             )
@@ -307,6 +320,7 @@ def test_hour_summary_calculates_delta_obi_and_microprice() -> None:
     assert summary["trade_delta_base"] == pytest.approx(1)
     assert summary["trade_delta_quote"] == pytest.approx(101)
     assert summary["trade_delta_percentage"] == pytest.approx(1 / 3)
+    assert summary["orderbook_sample_count"] == 1
     assert summary["orderbook_imbalance"] == pytest.approx(1 / 3)
     assert summary["microprice"] == pytest.approx(100.3333333333)
 
@@ -408,6 +422,32 @@ def test_bitvavo_parser_preserves_trade_hash_and_quote_volume() -> None:
     assert payload["quote_quantity"] == "500.00"
     assert payload["aggressor_side"] == "buy"
     assert len(payload["raw_payload_hash"]) == 64
+
+
+def test_bitvavo_ticker24h_preserves_comparable_spot_volume() -> None:
+    parsed = WebSocketManager().parse_message(
+        "bitvavo",
+        {
+            "event": "ticker24h",
+            "data": {
+                "market": "BTC-EUR",
+                "timestamp": 1_785_084_800_000,
+                "last": "50000",
+                "bid": "49999",
+                "ask": "50001",
+                "volume": "123.45",
+                "volumeQuote": "6172500",
+            },
+        },
+    )
+    assert len(parsed) == 1
+    assert parsed[0].event_type is StreamEventType.TICKER
+    assert parsed[0].canonical_market == "BTC-EUR"
+    assert parsed[0].payload["ticker_kind"] == "24H"
+    assert parsed[0].payload["volume_24h"] == "123.45"
+    normalized = normalize_stream_event(parsed[0])
+    assert normalized["spot_volume_24h"] == "123.45"
+    assert normalized["spot_quote_volume_24h"] == "6172500"
 
 
 @pytest.mark.parametrize(
@@ -612,6 +652,121 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
         repeated["snapshot"]["snapshot_hash"]
         == result["snapshot"]["snapshot_hash"]
     )
+
+
+def test_hour_finalization_waits_for_positioning_dependency(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    positioning = tmp_path / "positioning"
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=HashChainedOrderflowLedger(
+            root=tmp_path / "stream",
+            checkpoint_path=tmp_path / "chain.json",
+        ),
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "features",
+        readiness_path=tmp_path / "readiness.json",
+        positioning_directory=positioning,
+        finalization_grace_minutes=5,
+        positioning_timeout_minutes=10,
+    )
+    recorder.started_at = start
+    health = {
+        "bitvavo": {
+            "state": "CONNECTED",
+            "sequence_gaps": 0,
+            "dropped_messages": 0,
+            "reconnects": 0,
+        }
+    }
+    deferred = recorder.finalize_previous_hour(
+        observed_at=start + timedelta(hours=1, minutes=5),
+        health=health,
+    )
+    target = tmp_path / "features" / "20260726T100000Z.json"
+    assert deferred["finalization_state"] == "DEFERRED_CONTEXT_PENDING"
+    assert deferred["reason_code"] == "POSITIONING_CONTEXT_PENDING"
+    assert not deferred["snapshot_written"]
+    assert not target.exists()
+    assert not (tmp_path / "readiness.json").exists()
+
+    positioning.mkdir()
+    (positioning / "20260726T100000Z.json").write_text(
+        json.dumps(
+            {
+                "derivatives_context": [
+                    {
+                        "canonical_market": "BTC-USDT",
+                        "available_at": (
+                            start + timedelta(hours=1, minutes=6)
+                        ).isoformat(),
+                        "raw_hash": "d" * 64,
+                        "values": {
+                            "funding_rate": 0.0001,
+                            "open_interest": 1000,
+                            "basis": 1.5,
+                            "perpetual_base_volume_24h": 2000,
+                            "liquidation_status": (
+                                "UNAVAILABLE_PUBLIC_ENDPOINT"
+                            ),
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    finalized = recorder.finalize_previous_hour(
+        observed_at=start + timedelta(hours=1, minutes=6),
+        health=health,
+    )
+    assert finalized["finalization_state"] == "FINALIZED"
+    assert finalized["snapshot"]["positioning_context_status"] == "AVAILABLE"
+    assert target.is_file()
+    assert all(
+        "POSITIONING_CONTEXT_TIMEOUT"
+        not in row["reason_codes"]
+        for row in finalized["snapshot"]["markets"]
+    )
+
+
+def test_hour_finalization_records_explicit_positioning_timeout(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=HashChainedOrderflowLedger(
+            root=tmp_path / "stream",
+            checkpoint_path=tmp_path / "chain.json",
+        ),
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "features",
+        readiness_path=tmp_path / "readiness.json",
+        positioning_directory=tmp_path / "positioning",
+        finalization_grace_minutes=5,
+        positioning_timeout_minutes=10,
+    )
+    recorder.started_at = start
+    result = recorder.finalize_previous_hour(
+        observed_at=start + timedelta(hours=1, minutes=10),
+        health={
+            "bitvavo": {
+                "state": "CONNECTED",
+                "sequence_gaps": 0,
+                "dropped_messages": 0,
+                "reconnects": 0,
+            }
+        },
+    )
+    assert result["finalization_state"] == "FINALIZED"
+    assert result["snapshot"]["positioning_context_status"] == "TIMED_OUT"
+    assert result["snapshot"]["status"] == "DATA_GAP"
+    assert "POSITIONING_CONTEXT_TIMEOUT" in result["snapshot"]["markets"][0][
+        "reason_codes"
+    ]
 
 
 def _write_auditable_snapshot(
