@@ -95,7 +95,10 @@ def test_hash_chained_hourly_ledger_and_tamper_detection(
                 kind=StreamEventType.TICKER,
                 at=at + timedelta(seconds=1),
                 message_id="ticker-1",
-                payload={"volume_24h": "1000"},
+                payload={
+                    "volume_24h": "1000",
+                    "quote_volume_24h": "100000",
+                },
             ),
         ]
     )
@@ -272,7 +275,10 @@ def test_hour_summary_calculates_delta_obi_and_microprice() -> None:
                 kind=StreamEventType.TICKER,
                 at=start + timedelta(minutes=30),
                 message_id="ticker",
-                payload={"volume_24h": "1000"},
+                payload={
+                    "volume_24h": "1000",
+                    "quote_volume_24h": "100000",
+                },
             )
         ),
         normalize_stream_event(
@@ -565,7 +571,10 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
                 kind=StreamEventType.TICKER,
                 at=start + timedelta(minutes=30),
                 message_id="ticker",
-                payload={"volume_24h": "1000"},
+                payload={
+                    "volume_24h": "1000",
+                    "quote_volume_24h": "100000",
+                },
             ),
             event(
                 kind=StreamEventType.ORDERBOOK_DELTA,
@@ -639,6 +648,13 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     assert not result["paper_permitted"]
     assert not result["live_permitted"]
     assert result["snapshot"]["orders_generated"] == 0
+    market = result["snapshot"]["markets"][0]
+    assert market["perpetual_spot_volume_ratio"] == pytest.approx(2)
+    assert market["perpetual_spot_quote_volume_ratio"] == pytest.approx(2)
+    assert market["perpetual_spot_base_volume_ratio"] is None
+    assert market["base_volume_ratio_status"] == (
+        "NOT_COMPARABLE_MEXC_VOLUME24_IS_CONTRACT_COUNT"
+    )
     repeated = recorder.finalize_previous_hour(
         observed_at=start + timedelta(hours=1, minutes=2),
         health={

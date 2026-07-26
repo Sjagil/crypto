@@ -1103,13 +1103,16 @@ python main.py microstructure gate-check --stage technical_feature_validation
 
 The continuous shadow service additionally records Bitvavo public trade,
 24-hour ticker, and order-book WebSocket events. The 24-hour channel is used
-for comparable base-volume facts; the best-bid/ask-only ticker is not
+for spot base- and quote-volume facts; the best-bid/ask-only ticker is not
 misrepresented as a volume source. Records are segmented by UTC hour and
 joined by a cross-segment SHA-256 chain. Trades preserve exchange time,
 collector arrival time, aggressor side, base and quote quantity, sequence, and
 raw-payload hash. Closed-hour snapshots report delta/CVD inputs, order-book
 imbalance, microprice, spread, funding, open interest, basis, and
-perpetual/spot volume. A mid-hour start, sequence gap, reconnect, dropped
+perpetual/spot volume. The cross-venue ratio uses MEXC `amount24` in USDT
+divided by Bitvavo `volumeQuote` in EUR. MEXC `volume24` is contract count
+and is explicitly never compared with BTC/ETH/SOL/LINK spot-base units. A
+mid-hour start, sequence gap, reconnect, dropped
 message, or missing stream is recorded as `DATA_GAP`; nothing is interpolated.
 Snapshots are finalized only after a five-minute late-arrival grace period.
 When the matching positioning snapshot is still in flight, finalization is

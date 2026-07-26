@@ -47,7 +47,7 @@ def _write_snapshot(
         },
         "source_record_hashes": ["a" * 64],
         "derivatives_positioning": derivatives,
-        "perpetual_spot_base_volume_ratio": (
+        "perpetual_spot_volume_ratio": (
             None if warmup else 2.1
         ),
         "spot_cvd_robust_zscore": None if warmup else -0.6,

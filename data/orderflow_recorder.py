@@ -27,7 +27,11 @@ from utils.common import (
 
 ORDERFLOW_SCHEMA = "prospective_orderflow_event_v1"
 ORDERFLOW_CHECKPOINT_SCHEMA = "prospective_orderflow_checkpoint_v1"
-MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v1"
+MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v2"
+SUPPORTED_MICROSTRUCTURE_SCHEMAS = {
+    "microstructure_hourly_snapshot_v1",
+    MICROSTRUCTURE_SCHEMA,
+}
 ZERO_HASH = "0" * 64
 
 
@@ -866,6 +870,11 @@ def summarize_orderflow_hour(
             if volume_tickers
             else None
         ),
+        "spot_quote_volume_24h": (
+            volume_tickers[-1].get("spot_quote_volume_24h")
+            if volume_tickers
+            else None
+        ),
         "orderbook_sample_count": len(book_samples),
         **_book_metrics(
             book_samples[-1] if book_samples else None
@@ -1089,7 +1098,10 @@ def _audit_hourly_snapshot(
             "eligible": False,
             "reason_codes": [f"UNREADABLE_SNAPSHOT:{type(exc).__name__}"],
         }
-    if payload.get("schema_version") != MICROSTRUCTURE_SCHEMA:
+    if (
+        payload.get("schema_version")
+        not in SUPPORTED_MICROSTRUCTURE_SCHEMAS
+    ):
         reasons.append("UNSUPPORTED_SCHEMA")
     snapshot_hash = payload.get("snapshot_hash")
     hash_body = {
@@ -1838,18 +1850,34 @@ class ProspectiveOrderflowRecorder:
             base = str(row["market"]).split("-", 1)[0]
             derivative = positioning.get(base)
             row["derivatives_positioning"] = derivative
-            perpetual_base = _decimal(
+            perpetual_quote = _decimal(
                 (derivative or {}).get(
-                    "perpetual_base_volume_24h"
+                    "perpetual_quote_volume_24h"
                 )
             )
-            spot_base = _decimal(row.get("spot_volume_24h"))
-            row["perpetual_spot_base_volume_ratio"] = (
-                float(perpetual_base / spot_base)
-                if perpetual_base is not None
-                and spot_base is not None
-                and spot_base > 0
+            spot_quote = _decimal(
+                row.get("spot_quote_volume_24h")
+            )
+            quote_volume_ratio = (
+                float(perpetual_quote / spot_quote)
+                if perpetual_quote is not None
+                and spot_quote is not None
+                and spot_quote > 0
                 else None
+            )
+            row["perpetual_spot_volume_ratio"] = (
+                quote_volume_ratio
+            )
+            row["perpetual_spot_quote_volume_ratio"] = (
+                quote_volume_ratio
+            )
+            row["volume_ratio_method"] = (
+                "MEXC_PERPETUAL_USDT_AMOUNT24_DIVIDED_BY_"
+                "BITVAVO_SPOT_EUR_VOLUMEQUOTE24H"
+            )
+            row["perpetual_spot_base_volume_ratio"] = None
+            row["base_volume_ratio_status"] = (
+                "NOT_COMPARABLE_MEXC_VOLUME24_IS_CONTRACT_COUNT"
             )
             row["required_field_coverage"] = {
                 "spot_cvd_input_available": (
@@ -1894,10 +1922,10 @@ class ProspectiveOrderflowRecorder:
                         else "DERIVATIVES_CONTEXT_INCOMPLETE"
                     )
                 )
-            if row["perpetual_spot_base_volume_ratio"] is None:
+            if row["perpetual_spot_volume_ratio"] is None:
                 row["status"] = "DATA_GAP"
                 row["reason_codes"].append(
-                    "PERPETUAL_SPOT_VOLUME_RATIO_UNAVAILABLE"
+                    "PERPETUAL_SPOT_QUOTE_VOLUME_RATIO_UNAVAILABLE"
                 )
         body = {
             "schema_version": MICROSTRUCTURE_SCHEMA,

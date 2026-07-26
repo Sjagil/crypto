@@ -19,7 +19,7 @@ ZERO_HASH = "0" * 64
 REQUIRED_FEATURES = (
     "funding_zscore",
     "open_interest_change",
-    "perpetual_spot_base_volume_ratio",
+    "perpetual_spot_volume_ratio",
     "spot_cvd_robust_zscore",
 )
 
@@ -53,8 +53,8 @@ def _market_features(row: Mapping[str, Any]) -> dict[str, Any]:
         "open_interest_change": positioning.get(
             "open_interest_change"
         ),
-        "perpetual_spot_base_volume_ratio": row.get(
-            "perpetual_spot_base_volume_ratio"
+        "perpetual_spot_volume_ratio": row.get(
+            "perpetual_spot_volume_ratio"
         ),
         "spot_cvd_robust_zscore": row.get(
             "spot_cvd_robust_zscore"
@@ -93,7 +93,7 @@ def _evaluate_market(
     funding_z = float(features["funding_zscore"])
     oi_change = float(features["open_interest_change"])
     volume_ratio = float(
-        features["perpetual_spot_base_volume_ratio"]
+        features["perpetual_spot_volume_ratio"]
     )
     spot_cvd_z = float(features["spot_cvd_robust_zscore"])
     results: list[dict[str, Any]] = []
