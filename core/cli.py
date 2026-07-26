@@ -3511,6 +3511,26 @@ def _run_multi_alpha_ensemble_v2_campaign(
     return run_multi_alpha_ensemble_v2_campaign(settings)
 
 
+def _peer_residual_reversal_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.peer_residual_reversal_campaign import (
+        peer_residual_reversal_campaign_path,
+    )
+
+    return peer_residual_reversal_campaign_path(settings)
+
+
+def _run_peer_residual_reversal_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.peer_residual_reversal_campaign import (
+        run_peer_residual_reversal_campaign,
+    )
+
+    return run_peer_residual_reversal_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4924,6 +4944,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in ensemble_v2_forward_summaries.values()
     )
+    peer_residual_result = _run_peer_residual_reversal_campaign(
+        settings
+    )
+    assert_orderless_research_payload(peer_residual_result)
+    peer_residual_report = read_json(
+        _peer_residual_reversal_campaign_path(settings)
+    )
+    assert_orderless_research_payload(peer_residual_report)
+    peer_residual_forward_summaries = dict(
+        peer_residual_report.get("forward_summaries") or {}
+    )
+    peer_residual_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in peer_residual_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -5108,6 +5143,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_peer_residual_reversal_observers": {
+            "campaign": "PEER_RESIDUAL_REVERSAL_V1",
+            "status": peer_residual_result["status"],
+            "observer_count": len(
+                peer_residual_forward_summaries
+            ),
+            "forward_summaries": peer_residual_forward_summaries,
+            "total_forward_observations": (
+                peer_residual_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -5123,6 +5173,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + liquidity_sweep_forward_observations
             + residual_reversal_forward_observations
             + ensemble_v2_forward_observations
+            + peer_residual_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -5161,6 +5212,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "liquidity_sweep_v1",
         observer_root / "residual_reversal_v1",
         observer_root / "multi_alpha_ensemble_v2",
+        observer_root / "peer_residual_reversal_v1",
     )
     paths = [
         path
@@ -5259,6 +5311,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     residual_reversal = _run_residual_reversal_campaign(settings)
     multi_alpha_ensemble_v2 = (
         _run_multi_alpha_ensemble_v2_campaign(settings)
+    )
+    peer_residual_reversal = (
+        _run_peer_residual_reversal_campaign(settings)
     )
     data_audit = _autopilot_data_stage(
         settings,
@@ -5665,6 +5720,38 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": multi_alpha_ensemble_v2[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_peer_residual_reversal_campaign": {
+            "campaign": peer_residual_reversal["campaign"],
+            "status": peer_residual_reversal["status"],
+            "generated_trial_count": peer_residual_reversal[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": peer_residual_reversal[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": peer_residual_reversal[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": peer_residual_reversal[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": peer_residual_reversal[
+                "primary_strategy_id"
+            ],
+            "pbo": peer_residual_reversal["pbo"],
+            "economic_pass": peer_residual_reversal[
+                "economic_pass"
+            ],
+            "statistical_pass": peer_residual_reversal[
+                "statistical_pass"
+            ],
+            "observer_manifests": peer_residual_reversal[
                 "observer_manifests"
             ],
             "paper_candidates": 0,

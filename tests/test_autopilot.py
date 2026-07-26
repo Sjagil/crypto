@@ -614,6 +614,26 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_peer_residual_reversal_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "PEER_RESIDUAL_REVERSAL_V1",
+            "generated_trial_count": 4,
+            "registered_unique_trials": 4,
+            "registered_epoch_records": 4,
+            "total_known_trials": 16_915,
+            "primary_strategy_id": "PRR_B60_H5_Z20",
+            "pbo": 0.7142857142857143,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -722,6 +742,19 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_multi_alpha_ensemble_v2_campaign"
     ]["economic_pass"]
+    assert (
+        result["parallel_peer_residual_reversal_campaign"][
+            "total_known_trials"
+        ]
+        == 16_915
+    )
+    assert (
+        result["parallel_peer_residual_reversal_campaign"]["pbo"]
+        > 0.10
+    )
+    assert not result[
+        "parallel_peer_residual_reversal_campaign"
+    ]["statistical_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

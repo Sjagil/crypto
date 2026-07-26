@@ -1418,6 +1418,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "multi_alpha_ensemble_plan_v2.json": (
             reports / "multi_alpha_ensemble_plan_v2.json"
         ),
+        "peer_residual_reversal_campaign_v1.json": (
+            reports / "peer_residual_reversal_campaign_v1.json"
+        ),
+        "peer_residual_reversal_campaign_v1.csv": (
+            reports / "peer_residual_reversal_campaign_v1.csv"
+        ),
+        "peer_residual_reversal_plan_v1.json": (
+            reports / "peer_residual_reversal_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1694,6 +1703,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (ensemble_v2_registry_directory / "records").glob("*.json")
     ):
         paths[f"multi_alpha_ensemble_v2_trial_{record.name}"] = record
+    peer_residual_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "peer_residual_reversal_v1"
+    )
+    for observer in sorted(
+        peer_residual_observer_directory.glob("*.json")
+    ):
+        paths[f"peer_residual_reversal_observer_{observer.name}"] = (
+            observer
+        )
+    peer_residual_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "peer_residual_reversal_v1"
+    )
+    paths["peer_residual_reversal_registry_index.json"] = (
+        peer_residual_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (peer_residual_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"peer_residual_reversal_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"

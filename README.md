@@ -922,6 +922,15 @@ historically discovery-contaminated, remains orderless, and requires 365 new
 daily observations plus 30 forward rebalances; it cannot authorize paper or
 live trading from its historical backtest.
 
+`PEER_RESIDUAL_REVERSAL_V1` is a four-DNA classical relative-value
+family. Each ETH/SOL/LINK return is adjusted by a strictly prior rolling beta
+to the equal-weight return of the other two altcoins; only unusually negative
+peer-relative shocks are eligible while BTC is above its causal EMA200. The
+family is long-only, next-open, capped at 40% total and 20% per asset, and is
+registered as forward research only. Its historical selection failed PBO,
+White Reality Check, Hansen SPA and DSR, so no parameter repair or promotion is
+permitted.
+
 Every generated baseline is paired with deterministic one-dimensional
 sensitivity work for each tunable block parameter. Large grids use a documented
 deterministic non-default sample in QUICK mode; joint parameter work is handled
