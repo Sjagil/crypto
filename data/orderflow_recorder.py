@@ -27,9 +27,10 @@ from utils.common import (
 
 ORDERFLOW_SCHEMA = "prospective_orderflow_event_v1"
 ORDERFLOW_CHECKPOINT_SCHEMA = "prospective_orderflow_checkpoint_v1"
-MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v2"
+MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v3"
 SUPPORTED_MICROSTRUCTURE_SCHEMAS = {
     "microstructure_hourly_snapshot_v1",
+    "microstructure_hourly_snapshot_v2",
     MICROSTRUCTURE_SCHEMA,
 }
 ZERO_HASH = "0" * 64
@@ -875,6 +876,11 @@ def summarize_orderflow_hour(
             if volume_tickers
             else None
         ),
+        "spot_last_price_eur": (
+            volume_tickers[-1].get("last_price")
+            if volume_tickers
+            else None
+        ),
         "orderbook_sample_count": len(book_samples),
         **_book_metrics(
             book_samples[-1] if book_samples else None
@@ -1003,6 +1009,9 @@ def _positioning_context(
             "perpetual_basis": values.get("basis"),
             "perpetual_premium": values.get(
                 "perpetual_premium"
+            ),
+            "perpetual_index_price_usdt": values.get(
+                "index_price"
             ),
             "perpetual_base_volume_24h": values.get(
                 "perpetual_base_volume_24h"
@@ -1162,13 +1171,18 @@ def _audit_hourly_snapshot(
                 if last < hour_start + timedelta(minutes=55):
                     reasons.append(f"ARRIVAL_END_EARLY:{market}")
         coverage = dict(row.get("required_field_coverage") or {})
-        for field in (
+        required_fields = [
             "spot_cvd_input_available",
             "orderbook_available",
             "funding_available",
             "open_interest_available",
             "basis_available",
-        ):
+        ]
+        if payload.get("schema_version") == MICROSTRUCTURE_SCHEMA:
+            required_fields.append(
+                "quote_currency_conversion_available"
+            )
+        for field in required_fields:
             if coverage.get(field) is not True:
                 reasons.append(f"REQUIRED_FIELD_MISSING:{market}:{field}")
         row_hashes = row.get("source_record_hashes")
@@ -1858,11 +1872,44 @@ class ProspectiveOrderflowRecorder:
             spot_quote = _decimal(
                 row.get("spot_quote_volume_24h")
             )
-            quote_volume_ratio = (
-                float(perpetual_quote / spot_quote)
-                if perpetual_quote is not None
-                and spot_quote is not None
+            spot_last_price = _decimal(
+                row.get("spot_last_price_eur")
+            )
+            perpetual_index_price = _decimal(
+                (derivative or {}).get(
+                    "perpetual_index_price_usdt"
+                )
+            )
+            implied_usdt_per_eur = (
+                perpetual_index_price / spot_last_price
+                if perpetual_index_price is not None
+                and perpetual_index_price > 0
+                and spot_last_price is not None
+                and spot_last_price > 0
+                else None
+            )
+            spot_quote_usdt = (
+                spot_quote * implied_usdt_per_eur
+                if spot_quote is not None
                 and spot_quote > 0
+                and implied_usdt_per_eur is not None
+                else None
+            )
+            quote_volume_ratio = (
+                float(perpetual_quote / spot_quote_usdt)
+                if perpetual_quote is not None
+                and spot_quote_usdt is not None
+                and spot_quote_usdt > 0
+                else None
+            )
+            row["implied_usdt_per_eur"] = (
+                float(implied_usdt_per_eur)
+                if implied_usdt_per_eur is not None
+                else None
+            )
+            row["spot_quote_volume_24h_usdt"] = (
+                float(spot_quote_usdt)
+                if spot_quote_usdt is not None
                 else None
             )
             row["perpetual_spot_volume_ratio"] = (
@@ -1873,7 +1920,13 @@ class ProspectiveOrderflowRecorder:
             )
             row["volume_ratio_method"] = (
                 "MEXC_PERPETUAL_USDT_AMOUNT24_DIVIDED_BY_"
-                "BITVAVO_SPOT_EUR_VOLUMEQUOTE24H"
+                "BITVAVO_SPOT_EUR_VOLUMEQUOTE24H_CONVERTED_"
+                "WITH_ASSET_IMPLIED_USDT_PER_EUR"
+            )
+            row["quote_currency_conversion_status"] = (
+                "AVAILABLE"
+                if implied_usdt_per_eur is not None
+                else "UNAVAILABLE"
             )
             row["perpetual_spot_base_volume_ratio"] = None
             row["base_volume_ratio_status"] = (
@@ -1897,6 +1950,9 @@ class ProspectiveOrderflowRecorder:
                 "basis_available": (
                     (derivative or {}).get("perpetual_basis")
                     is not None
+                ),
+                "quote_currency_conversion_available": (
+                    implied_usdt_per_eur is not None
                 ),
                 "liquidations_observed": (
                     (derivative or {}).get(

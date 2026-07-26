@@ -1110,8 +1110,11 @@ collector arrival time, aggressor side, base and quote quantity, sequence, and
 raw-payload hash. Closed-hour snapshots report delta/CVD inputs, order-book
 imbalance, microprice, spread, funding, open interest, basis, and
 perpetual/spot volume. The cross-venue ratio uses MEXC `amount24` in USDT
-divided by Bitvavo `volumeQuote` in EUR. MEXC `volume24` is contract count
-and is explicitly never compared with BTC/ETH/SOL/LINK spot-base units. A
+divided by Bitvavo `volumeQuote` after causally converting that EUR amount to
+USDT with the same asset's contemporaneous MEXC index price and Bitvavo spot
+price. The conversion rate, converted quote volume and method are retained in
+every v3 snapshot. MEXC `volume24` is contract count and is explicitly never
+compared with BTC/ETH/SOL/LINK spot-base units. A
 mid-hour start, sequence gap, reconnect, dropped
 message, or missing stream is recorded as `DATA_GAP`; nothing is interpolated.
 Snapshots are finalized only after a five-minute late-arrival grace period.

@@ -96,6 +96,7 @@ def test_hash_chained_hourly_ledger_and_tamper_detection(
                 at=at + timedelta(seconds=1),
                 message_id="ticker-1",
                 payload={
+                    "last_price": "100",
                     "volume_24h": "1000",
                     "quote_volume_24h": "100000",
                 },
@@ -276,6 +277,7 @@ def test_hour_summary_calculates_delta_obi_and_microprice() -> None:
                 at=start + timedelta(minutes=30),
                 message_id="ticker",
                 payload={
+                    "last_price": "100",
                     "volume_24h": "1000",
                     "quote_volume_24h": "100000",
                 },
@@ -572,6 +574,7 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
                 at=start + timedelta(minutes=30),
                 message_id="ticker",
                 payload={
+                    "last_price": "100",
                     "volume_24h": "1000",
                     "quote_volume_24h": "100000",
                 },
@@ -610,6 +613,7 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
                             "open_interest": 1000,
                             "basis": 1.5,
                             "perpetual_premium": 0.0001,
+                            "index_price": 100,
                             "perpetual_base_volume_24h": 2000,
                             "perpetual_quote_volume_24h": 200000,
                             "liquidation_status": (
@@ -651,6 +655,14 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     market = result["snapshot"]["markets"][0]
     assert market["perpetual_spot_volume_ratio"] == pytest.approx(2)
     assert market["perpetual_spot_quote_volume_ratio"] == pytest.approx(2)
+    assert market["implied_usdt_per_eur"] == pytest.approx(1)
+    assert market["spot_quote_volume_24h_usdt"] == pytest.approx(100000)
+    assert market["quote_currency_conversion_status"] == "AVAILABLE"
+    assert market["volume_ratio_method"] == (
+        "MEXC_PERPETUAL_USDT_AMOUNT24_DIVIDED_BY_"
+        "BITVAVO_SPOT_EUR_VOLUMEQUOTE24H_CONVERTED_"
+        "WITH_ASSET_IMPLIED_USDT_PER_EUR"
+    )
     assert market["perpetual_spot_base_volume_ratio"] is None
     assert market["base_volume_ratio_status"] == (
         "NOT_COMPARABLE_MEXC_VOLUME24_IS_CONTRACT_COUNT"
