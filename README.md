@@ -1025,6 +1025,56 @@ remain explicitly embargoed until a classical strategy passes the historical
 statistical gates, completes its frozen forward sample, and demonstrates
 acceptable paper/live execution evidence.
 
+### Prospective positioning evidence and disabled €5 canary
+
+The eventual Bitvavo live sleeve is registered but disabled by default:
+maximum €5 per order, maximum €5 total exposure, one open position, spot-only,
+1x leverage, no shorts and no autoscaling. Registration is not order
+permission. An order below the venue minimum is rejected rather than enlarged,
+and unknown account exposure fails closed.
+
+```bash
+python main.py live canary-policy
+python main.py live status
+```
+
+Historical evaluation trials, historical selection events, forward
+observations and forward reselections are separate concepts. Frozen forward
+observations do not increase the multiple-testing denominator. The audit
+reports this distinction explicitly:
+
+```bash
+python main.py lab trials audit
+```
+
+The shadow collector now performs one hourly prospective context cycle for the
+most recently closed UTC hour. It stores an immutable current CoinMarketCap
+top-50 snapshot and MEXC funding, open interest, mark/index premium and basis
+for BTC/ETH/SOL/LINK. Every record preserves event time, arrival time,
+`available_at` and its raw payload hash. Missing liquidation data remains
+explicitly unavailable. No historical top-50 membership or order flow is
+backfilled from today's data.
+
+Task Scheduler remains the preferred Windows service mechanism. Where local
+policy blocks task creation, a least-privilege hidden per-user logon launcher
+can be installed. The existing single-instance lock prevents duplicate
+collectors.
+
+```bash
+python main.py operate startup-install --mode shadow --profile practical_spot_v1
+python main.py operate startup-status --mode shadow --profile practical_spot_v1
+```
+
+The first new positioning family is deliberately small rather than another
+parameter storm. `CROWDING_AVOIDANCE_V1` contains four immutable long-blocker
+DNA variants and cannot be evaluated until the prospective dataset reaches its
+predeclared 90/180/365-day checkpoints.
+
+```bash
+python main.py microstructure plan
+python main.py microstructure status
+```
+
 The classical regime router is governance-first and orderless. It classifies
 only completed daily candles using BTC EMA200 trend and slope, 14-day
 choppiness, 30-day volatility versus its 252-day baseline, and allowlisted

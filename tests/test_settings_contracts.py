@@ -46,7 +46,9 @@ def test_live_is_blocked_by_default(isolated_settings: Settings) -> None:
     failures = isolated_settings.static_live_preflight_failures()
     assert "LIVE_BLOCKED_NOT_PRODUCTION" in failures
     assert "LIVE_BLOCKED_MODE_NOT_LIVE" in failures
-    assert "LIVE_BLOCKED_MISSING_ORDER_CAP" in failures
+    assert "LIVE_BLOCKED_CANARY_DISABLED" in failures
+    assert isolated_settings.execution.maximum_live_order_eur == 5.0
+    assert isolated_settings.execution.maximum_live_total_eur == 5.0
 
 
 def test_default_market_data_includes_requested_intraday_timeframes(

@@ -286,6 +286,8 @@ async def test_expired_capability_never_reaches_network(tmp_path) -> None:
         checked_at=utc_now() - timedelta(minutes=6),
         allowed_markets=("BTC-EUR",),
         maximum_order_eur=Decimal("100"),
+        maximum_total_eur=Decimal("100"),
+        maximum_open_positions=1,
     )
     with pytest.raises(ExecutionBlocked, match="expired"):
         await client.submit_order(
@@ -333,6 +335,8 @@ async def test_live_cancel_requires_capability_and_is_audited(tmp_path) -> None:
         checked_at=utc_now(),
         allowed_markets=("BTC-EUR",),
         maximum_order_eur=Decimal("100"),
+        maximum_total_eur=Decimal("100"),
+        maximum_open_positions=1,
     )
     result = await client.cancel_order(
         market="BTC-EUR",

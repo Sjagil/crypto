@@ -300,7 +300,8 @@ def _storm_component(
         "epochs": rows,
         "notes": (
             "An exact retry on an existing fingerprint is reused. A "
-            "selection run on a new closed-data fingerprint counts again."
+            "research ranking or selection run on a new closed-data "
+            "fingerprint counts again; a frozen forward append does not."
         ),
     }
 
@@ -629,7 +630,10 @@ def audit_global_trial_accounting(
             ),
             "same_dna_same_data": "DEDUPLICATED_EXACT_RETRY",
             "same_dna_new_closed_data_epoch": (
-                "COUNTED_AS_NEW_SELECTION_EVALUATION"
+                "COUNTED_ONLY_FOR_RESEARCH_RERUN_OR_RESELECTION"
+            ),
+            "frozen_forward_observation": (
+                "EXCLUDED_FROM_MULTIPLE_TESTING_DENOMINATOR"
             ),
             "historical_reports_mutated": False,
             "gaussian_smoothing_guarantees_pbo_pass": False,

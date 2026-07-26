@@ -71,6 +71,8 @@ class LiveCapability:
     checked_at: datetime
     allowed_markets: tuple[str, ...]
     maximum_order_eur: Decimal
+    maximum_total_eur: Decimal
+    maximum_open_positions: int
 
 
 @dataclass(frozen=True)
@@ -630,7 +632,6 @@ class LivePreflight:
                 capability=None,
                 checked_at=checked_at,
             )
-        assert settings.execution.maximum_live_order_eur is not None
         capability = LiveCapability(
             token=stable_hash(
                 {
@@ -644,6 +645,12 @@ class LivePreflight:
             checked_at=checked_at,
             allowed_markets=normalized_markets,
             maximum_order_eur=Decimal(str(settings.execution.maximum_live_order_eur)),
+            maximum_total_eur=Decimal(
+                str(settings.execution.maximum_live_total_eur)
+            ),
+            maximum_open_positions=(
+                settings.execution.maximum_live_open_positions
+            ),
         )
         return PreflightResult(
             passed=True,
@@ -816,6 +823,9 @@ class BitvavoSpotClient:
         capability: LiveCapability,
         estimated_price: Decimal,
         reconciled_owned_quantity: Decimal,
+        reconciled_total_exposure_eur: Decimal | None = None,
+        reconciled_open_positions: int = 0,
+        exchange_minimum_order_eur: Decimal = Decimal("5"),
     ) -> dict[str, Any]:
         if (
             len(capability.token) != 32
@@ -827,6 +837,36 @@ class BitvavoSpotClient:
         if intent.market not in capability.allowed_markets:
             raise ExecutionBlocked("live capability does not include this market")
         estimated_notional = intent.quantity * estimated_price
+        if intent.side is OrderSide.BUY:
+            if reconciled_total_exposure_eur is None:
+                raise ExecutionBlocked(
+                    "live total exposure is not reconciled"
+                )
+            if (
+                reconciled_total_exposure_eur < 0
+                or reconciled_open_positions < 0
+            ):
+                raise ExecutionBlocked(
+                    "live exposure reconciliation is invalid"
+                )
+            if (
+                reconciled_open_positions
+                >= capability.maximum_open_positions
+            ):
+                raise ExecutionBlocked(
+                    "live canary position limit reached"
+                )
+            if (
+                reconciled_total_exposure_eur + estimated_notional
+                > capability.maximum_total_eur
+            ):
+                raise ExecutionBlocked(
+                    "order exceeds total live canary cap"
+                )
+            if estimated_notional < exchange_minimum_order_eur:
+                raise ExecutionBlocked(
+                    "order is below exchange minimum; autoscale forbidden"
+                )
         if (
             estimated_notional > capability.maximum_order_eur
             or (

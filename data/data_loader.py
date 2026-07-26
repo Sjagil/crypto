@@ -2276,10 +2276,24 @@ class DataLoader:
         target = self.settings.paths.context_data_dir / f"{safe_name}.parquet"
         rows = []
         for item in selected:
+            reserved_columns = {
+                "provider",
+                "source_symbol",
+                "canonical_market",
+                "observation_time",
+                "available_at",
+                "observed_at",
+                "retrieved_at",
+                "revision_or_vintage",
+                "point_in_time_status",
+                "raw_hash",
+                "data_kind",
+            }
             values = {
                 key: value
                 for key, value in item.values.items()
-                if not isinstance(value, (dict, list, tuple))
+                if key not in reserved_columns
+                and not isinstance(value, (dict, list, tuple))
             }
             rows.append(
                 {
@@ -2308,6 +2322,18 @@ class DataLoader:
         if target.is_file():
             existing = pd.read_parquet(target)
             frame = pd.concat([existing, frame], ignore_index=True)
+        for timestamp_column in (
+            "observation_time",
+            "available_at",
+            "observed_at",
+            "retrieved_at",
+        ):
+            if timestamp_column in frame:
+                frame[timestamp_column] = pd.to_datetime(
+                    frame[timestamp_column],
+                    utc=True,
+                    errors="raise",
+                )
         key_columns = [
             name
             for name in (

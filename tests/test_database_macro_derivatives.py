@@ -161,6 +161,8 @@ async def test_actual_funding_interval_annualization() -> None:
             "data": {
                 "fairPrice": "20100",
                 "indexPrice": "20000",
+                "volume24": "1234",
+                "amount24": "24680000",
                 "timestamp": 1_735_689_600_000,
             }
         }
@@ -172,6 +174,48 @@ async def test_actual_funding_interval_annualization() -> None:
         annualize_funding(0.0001, 14_400)
     )
     assert values["funding_periods_per_year"] != 1095
+    assert values["perpetual_base_volume_24h"] == 1234
+    assert values["perpetual_quote_volume_24h"] == 24_680_000
+
+
+@pytest.mark.asyncio
+async def test_derivatives_context_persists_typed_availability(
+    isolated_settings: Settings,
+) -> None:
+    async def request(method, url, params, headers):
+        del method, params, headers
+        if "funding_rate" in url:
+            return {"data": {"fundingRate": "0.0001", "collectCycle": 8}}
+        return {
+            "data": {
+                "symbol": "BTC_USDT",
+                "fairPrice": "20100",
+                "indexPrice": "20000",
+                "holdVol": "1000",
+                "volume24": "1234",
+                "amount24": "24680000",
+                "timestamp": 1_735_689_600_000,
+            }
+        }
+
+    loader = DataLoader(isolated_settings, requester=request)
+    await loader.download_derivatives_context(
+        provider="mexc",
+        market="BTC-USDT",
+        persist=True,
+    )
+    await loader.download_derivatives_context(
+        provider="mexc",
+        market="BTC-USDT",
+        persist=True,
+    )
+    target = (
+        isolated_settings.paths.context_data_dir
+        / "derivatives_mexc_BTC.parquet"
+    )
+    frame = pd.read_parquet(target)
+    assert str(frame["available_at"].dtype) == "datetime64[ns, UTC]"
+    assert frame["source_available_at"].notna().sum() >= 2
 
 
 def test_gex_formulas_and_convention_metadata() -> None:

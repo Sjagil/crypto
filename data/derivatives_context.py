@@ -85,6 +85,10 @@ class FundingRateCollector:
         )
         timestamp = datetime.fromtimestamp(float(timestamp_value) / 1_000, tz=UTC)
         values = {
+            "event_time": timestamp.isoformat(),
+            "arrival_time": observed.isoformat(),
+            "source_available_at": observed.isoformat(),
+            "source": "mexc_public_contract_context",
             "funding_rate": rate,
             "funding_interval_seconds": interval_seconds,
             "funding_periods_per_year": SECONDS_PER_YEAR / interval_seconds,
@@ -94,6 +98,12 @@ class FundingRateCollector:
                 or open_interest.get("openInterest")
                 or ticker.get("holdVol")
                 or 0
+            ),
+            "perpetual_base_volume_24h": float(
+                ticker.get("volume24") or 0
+            ),
+            "perpetual_quote_volume_24h": float(
+                ticker.get("amount24") or 0
             ),
             "mark_price": mark,
             "index_price": index,
@@ -117,6 +127,7 @@ class FundingRateCollector:
                 data_kind="derivatives_context",
                 retrieval_run_id=run,
                 raw_hash=sha256_text(stable_json(raw)),
+                raw_payload=raw,
                 values=values,
             )
         ]

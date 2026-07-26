@@ -639,7 +639,11 @@ class ExecutionSettings(_SettingsBase):
     )
     manual_approval_phrase: SecretStr | None = None
     required_manual_approval_phrase: str = "I UNDERSTAND LIVE CRYPTO SPOT RISK"
-    maximum_live_order_eur: float | None = Field(default=None, gt=0.0)
+    maximum_live_order_eur: float = Field(default=5.0, gt=0.0, le=5.0)
+    maximum_live_total_eur: float = Field(default=5.0, gt=0.0, le=5.0)
+    maximum_live_open_positions: int = Field(default=1, ge=1, le=1)
+    live_canary_enabled: bool = False
+    live_canary_autoscale: bool = False
 
     @model_validator(mode="after")
     def enforce_spot_only(self) -> "ExecutionSettings":
@@ -658,6 +662,10 @@ class ExecutionSettings(_SettingsBase):
         enabled = sorted(name for name, value in forbidden.items() if value)
         if not self.spot_only or enabled:
             raise ValueError(f"forbidden execution capabilities enabled: {enabled}")
+        if self.maximum_live_order_eur > self.maximum_live_total_eur:
+            raise ValueError("live order cap exceeds total canary cap")
+        if self.live_canary_autoscale:
+            raise ValueError("live canary autoscaling is forbidden")
         return self
 
     def approval_phrase_matches(self) -> bool:
@@ -962,8 +970,8 @@ class Settings(BaseModel):
             failures.append("LIVE_BLOCKED_UNSAFE_CREDENTIAL_SCOPE")
         if not self.providers.bitvavo_ip_whitelist_confirmed:
             failures.append("LIVE_BLOCKED_IP_WHITELIST_UNCONFIRMED")
-        if self.execution.maximum_live_order_eur is None:
-            failures.append("LIVE_BLOCKED_MISSING_ORDER_CAP")
+        if not self.execution.live_canary_enabled:
+            failures.append("LIVE_BLOCKED_CANARY_DISABLED")
         for market in self.market_data.symbols:
             if self.shariah.eligibility(market).status is not EligibilityStatus.ALLOWED:
                 failures.append(f"LIVE_BLOCKED_ELIGIBILITY:{market}")

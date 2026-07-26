@@ -2843,6 +2843,35 @@ def command_macro(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def command_microstructure(
+    args: argparse.Namespace,
+    settings: Settings,
+) -> int:
+    from research.microstructure_preregistration import (
+        crowding_avoidance_plan,
+        write_crowding_avoidance_plan,
+    )
+
+    plan_path = (
+        settings.paths.lab_dir
+        / "plans"
+        / "crowding_avoidance_v1.json"
+    )
+    if args.microstructure_command == "plan":
+        emit(write_crowding_avoidance_plan(plan_path))
+        return 0
+    emit(
+        read_json(plan_path)
+        if plan_path.is_file()
+        else {
+            **crowding_avoidance_plan(),
+            "status": "NOT_PREREGISTERED",
+            "plan_path": str(plan_path),
+        }
+    )
+    return 0
+
+
 async def command_gex(args: argparse.Namespace, settings: Settings) -> int:
     from data.data_loader import DataLoader
     from data.database import Database
@@ -3157,6 +3186,22 @@ async def live_runtime(
         eur = Decimal(str(by_symbol.get("EUR", {}).get("available", "0")))
         base = args.market.split("-")[0]
         owned = Decimal(str(by_symbol.get(base, {}).get("available", "0")))
+        positive_non_eur = {
+            symbol
+            for symbol, values in by_symbol.items()
+            if symbol != "EUR"
+            and (
+                Decimal(str(values.get("available", "0")))
+                + Decimal(str(values.get("inOrder", "0")))
+            )
+            > 0
+        }
+        reconciled_open_positions = len(positive_non_eur)
+        reconciled_total_exposure = (
+            owned * Decimal(str(args.price))
+            if positive_non_eur <= {base}
+            else None
+        )
         snapshot = PortfolioSnapshot(
             equity_eur=float(eur),
             cash_eur=float(eur),
@@ -3170,6 +3215,11 @@ async def live_runtime(
             kill_switch_path=settings.paths.checkpoints_dir / "kill_switch.json",
         )
         if args.side == "BUY":
+            from risk.canary_guard import (
+                CanaryPolicy,
+                InstitutionalCanaryGuard,
+            )
+
             risk = manager.assess_entry(
                 market=args.market,
                 entry_price=args.price,
@@ -3178,6 +3228,27 @@ async def live_runtime(
                 live_mode=True,
             )
             quantity = min(Decimal(str(args.quantity)), risk.approved_quantity)
+            canary = InstitutionalCanaryGuard(
+                CanaryPolicy.from_settings(settings)
+            ).assess_buy(
+                requested_notional_eur=(
+                    quantity * Decimal(str(args.price))
+                ),
+                current_total_exposure_eur=(
+                    reconciled_total_exposure
+                ),
+                current_open_positions=reconciled_open_positions,
+                exchange_minimum_order_eur=Decimal("5"),
+            )
+            if not canary.approved:
+                result["failures"].append(canary.reason_code)
+                result["canary"] = canary
+                return 3, result
+            quantity = min(
+                quantity,
+                canary.approved_notional_eur
+                / Decimal(str(args.price)),
+            )
         else:
             risk = manager.assess_exit(
                 market=args.market,
@@ -3219,15 +3290,42 @@ async def live_runtime(
             capability=preflight.capability,
             estimated_price=Decimal(str(args.price)),
             reconciled_owned_quantity=owned,
+            reconciled_total_exposure_eur=(
+                reconciled_total_exposure
+            ),
+            reconciled_open_positions=reconciled_open_positions,
+            exchange_minimum_order_eur=Decimal("5"),
         )
         result["status"] = "SUBMITTED"
         return 0, result
 
 
 async def command_live_async(args: argparse.Namespace, settings: Settings) -> int:
+    if args.live_command == "canary-policy":
+        from risk.canary_guard import write_canary_policy_manifest
+
+        emit(
+            write_canary_policy_manifest(
+                settings,
+                settings.paths.lab_dir
+                / "manifests"
+                / "live_canary_policy_v1.json",
+            )
+        )
+        return 0
     if args.live_command == "status":
         failures = settings.static_live_preflight_failures()
-        emit({"live_ready": not failures, "failures": failures})
+        from risk.canary_guard import CanaryPolicy
+
+        emit(
+            {
+                "live_ready": not failures,
+                "failures": failures,
+                "canary_policy": CanaryPolicy.from_settings(
+                    settings
+                ).manifest(),
+            }
+        )
         return 0
     code, result = await live_runtime(
         args,
@@ -12401,6 +12499,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         emit(decision)
         return 0
     if section == "trials":
+        from research.evidence_accounting import (
+            audit_forward_evidence_accounting,
+        )
         from research.global_trial_accounting import (
             audit_global_trial_accounting,
         )
@@ -12408,13 +12509,21 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         storm_indexes = _reconcile_autopilot_storm_indexes(
             settings
         )
+        trial_accounting = audit_global_trial_accounting(
+            settings.paths.lab_dir,
+            persist=True,
+        )
+        forward_accounting = audit_forward_evidence_accounting(
+            settings.paths.lab_dir,
+            persist=True,
+        )
         emit(
             {
-                **audit_global_trial_accounting(
-                    settings.paths.lab_dir,
-                    persist=True,
-                ),
+                **trial_accounting,
                 "storm_epoch_indexes": storm_indexes,
+                "forward_evidence_accounting": (
+                    forward_accounting
+                ),
             }
         )
         return 0
@@ -15694,9 +15803,35 @@ async def _operational_cycle(
     candidate_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from data.orderbook_l2 import Level2OrderBook
+    from data.prospective_context import ProspectiveContextCollector
     from risk.risk_manager import OperationalDegradation
 
     cycle_at = utc_now()
+    context_collector = ProspectiveContextCollector(
+        checkpoint_path=(
+            settings.paths.checkpoints_dir
+            / "prospective_context_hourly.json"
+        ),
+        snapshot_directory=(
+            settings.paths.context_data_dir
+            / "prospective_hourly"
+        ),
+    )
+    try:
+        prospective_context = await context_collector.collect(
+            loader=loader,
+            markets=tuple(profile["markets"]),
+            observed_at=cycle_at,
+        )
+    except Exception as exc:
+        prospective_context = {
+            "status": "BLOCK_NEW_ENTRIES",
+            "reason_code": (
+                "PROSPECTIVE_CONTEXT_COLLECTION_FAILED:"
+                f"{type(exc).__name__}"
+            ),
+            "orders_generated": 0,
+        }
     market_results: list[dict[str, Any]] = []
     signal_records: list[dict[str, Any]] = []
     for market in profile["markets"]:
@@ -15929,6 +16064,21 @@ async def _operational_cycle(
     )
     degradation_status = degradation.evaluate(
         block_new_entries=(
+            (
+                (
+                    "PROSPECTIVE_CONTEXT_UNHEALTHY:"
+                    + str(
+                        prospective_context.get(
+                            "reason_code"
+                        )
+                        or prospective_context.get("status")
+                    ),
+                )
+                if prospective_context.get("status")
+                not in {"PASSED", "UP_TO_DATE"}
+                else ()
+            )
+            +
             tuple(
                 f"ORDERBOOK_INVALID:{row['market']}"
                 for row in market_results
@@ -15970,6 +16120,7 @@ async def _operational_cycle(
         "cycle_at": cycle_at,
         "markets": market_results,
         "signals": len(signal_records),
+        "prospective_context": prospective_context,
         "risk_state": degradation_status,
     }
 
@@ -15980,6 +16131,7 @@ def _operational_status(
     mode: str,
     profile: str,
 ) -> dict[str, Any]:
+    from data.collector_health import collector_health_report
     from data.database import Database
     from reporting.reports import write_operational_reports
     from risk.risk_manager import KillSwitch
@@ -16026,6 +16178,26 @@ def _operational_status(
                 "grace_seconds": grace_seconds,
             }
         counts = database.health()["table_counts"]
+        collector_health = collector_health_report(
+            settings=settings,
+            database=database,
+            service_id=service_id,
+            observed_at=now,
+        )
+        prospective_checkpoint_path = (
+            settings.paths.checkpoints_dir
+            / "prospective_context_hourly.json"
+        )
+        context_freshness = (
+            read_json(prospective_checkpoint_path)
+            if prospective_checkpoint_path.is_file()
+            else {
+                "status": "NOT_COLLECTED",
+                "reason_code": (
+                    "PROSPECTIVE_CONTEXT_CHECKPOINT_MISSING"
+                ),
+            }
+        )
         active = _active_candidate_record(settings, mode)
         kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
         heartbeat_at = heartbeat.get("heartbeat_at")
@@ -16057,7 +16229,8 @@ def _operational_status(
             "provider_health": provider_rows,
             "latest_closed_candles": latest_candles,
             "closed_candle_freshness": closed_candle_freshness,
-            "context_freshness": {},
+            "context_freshness": context_freshness,
+            "collector_health": collector_health,
             "latest_signals": latest_signals,
             "open_paper_positions": [],
             "cash": None,
@@ -16085,7 +16258,18 @@ def _operational_status(
             },
             provider_health=provider_rows,
         )
+        collector_health_path = (
+            _operation_directory(settings)
+            / "collector_health.json"
+        )
+        atomic_write_json(
+            collector_health_path,
+            collector_health,
+        )
         payload["reports"] = paths
+        payload["reports"]["collector_health_json"] = str(
+            collector_health_path
+        )
         return payload
     finally:
         database.close()
@@ -16266,6 +16450,49 @@ def _task_xml(settings: Settings, *, mode: str, profile: str) -> str:
         f"<Arguments>{html.escape(arguments)}</Arguments>"
         f"<WorkingDirectory>{html.escape(str(settings.paths.project_root))}</WorkingDirectory>"
         "</Exec></Actions></Task>"
+    )
+
+
+def _startup_launcher_path(settings: Settings) -> Path:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        raise RuntimeError("WINDOWS_APPDATA_UNAVAILABLE")
+    return (
+        Path(appdata)
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+        / f"{settings.operational.windows_task_name}.vbs"
+    )
+
+
+def _startup_launcher(
+    settings: Settings,
+    *,
+    mode: str,
+    profile: str,
+) -> str:
+    python = (
+        settings.paths.project_root
+        / ".venv"
+        / "Scripts"
+        / "python.exe"
+    )
+    main = settings.paths.project_root / "main.py"
+    command = (
+        f'"{python}" "{main}" operate start --mode {mode} '
+        f"--profile {profile} --continuous --resume"
+    )
+    escaped_command = command.replace('"', '""')
+    escaped_directory = str(
+        settings.paths.project_root
+    ).replace('"', '""')
+    return (
+        'Set shell = CreateObject("WScript.Shell")\r\n'
+        f'shell.CurrentDirectory = "{escaped_directory}"\r\n'
+        f'shell.Run "{escaped_command}", 0, False\r\n'
     )
 
 
@@ -16581,6 +16808,86 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             database.close()
         emit({"status": "RESET", "reason": args.reason})
         return 0
+    if action in {
+        "startup-install",
+        "startup-status",
+        "startup-remove",
+    }:
+        _operational_profile(settings, args.profile)
+        launcher_path = _startup_launcher_path(settings)
+        launcher = _startup_launcher(
+            settings,
+            mode=args.mode,
+            profile=args.profile,
+        )
+        if action == "startup-install" and args.dry_run:
+            emit(
+                {
+                    "status": "DRY_RUN",
+                    "launcher": str(launcher_path),
+                    "content_hash": stable_hash(
+                        launcher,
+                        length=64,
+                    ),
+                    "mode": args.mode,
+                    "profile": args.profile,
+                    "least_privilege": True,
+                    "hidden_window": True,
+                    "single_instance_lock": True,
+                    "live_orders": 0,
+                }
+            )
+            return 0
+        if action == "startup-status":
+            exists = launcher_path.is_file()
+            emit(
+                {
+                    "status": (
+                        "INSTALLED" if exists else "NOT_INSTALLED"
+                    ),
+                    "launcher": str(launcher_path),
+                    "content_hash": (
+                        sha256_file(launcher_path)
+                        if exists
+                        else None
+                    ),
+                    "mode": args.mode,
+                    "profile": args.profile,
+                    "least_privilege": True,
+                    "hidden_window": True,
+                    "single_instance_lock": True,
+                    "live_orders": 0,
+                }
+            )
+            return 0
+        if action == "startup-remove":
+            launcher_path.unlink(missing_ok=True)
+            emit(
+                {
+                    "status": "REMOVED",
+                    "launcher": str(launcher_path),
+                }
+            )
+            return 0
+        launcher_path.parent.mkdir(parents=True, exist_ok=True)
+        launcher_path.write_text(
+            launcher,
+            encoding="utf-8",
+        )
+        emit(
+            {
+                "status": "INSTALLED",
+                "launcher": str(launcher_path),
+                "content_hash": sha256_file(launcher_path),
+                "mode": args.mode,
+                "profile": args.profile,
+                "least_privilege": True,
+                "hidden_window": True,
+                "single_instance_lock": True,
+                "live_orders": 0,
+            }
+        )
+        return 0
     if action in {"task-install", "task-status", "task-remove"}:
         task_name = settings.operational.windows_task_name
         if action == "task-status":
@@ -16744,6 +17051,15 @@ def build_parser() -> argparse.ArgumentParser:
     macro_build.add_argument("--timeframes", default="1h,4h,12h,1d")
     macro.add_parser("inspect")
 
+    microstructure = commands.add_parser(
+        "microstructure"
+    ).add_subparsers(
+        dest="microstructure_command",
+        required=True,
+    )
+    microstructure.add_parser("plan")
+    microstructure.add_parser("status")
+
     gex = commands.add_parser("gex").add_subparsers(dest="gex_command", required=True)
     gex_collect = gex.add_parser("collect")
     gex_collect.add_argument("--underlying", choices=("BTC", "ETH"), default="BTC")
@@ -16905,6 +17221,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     live = commands.add_parser("live").add_subparsers(dest="live_command", required=True)
     live.add_parser("status")
+    live.add_parser("canary-policy")
     for name in ("preflight", "run"):
         selected = live.add_parser(name)
         selected.add_argument("--research-report")
@@ -16976,7 +17293,14 @@ def build_parser() -> argparse.ArgumentParser:
     reset_kill.add_argument("--profile", default="practical_spot_v1")
     reset_kill.add_argument("--reason", required=True)
     reset_kill.add_argument("--yes", action="store_true")
-    for name in ("task-install", "task-status", "task-remove"):
+    for name in (
+        "task-install",
+        "task-status",
+        "task-remove",
+        "startup-install",
+        "startup-status",
+        "startup-remove",
+    ):
         selected = operate.add_parser(name)
         selected.add_argument(
             "--mode",
@@ -17319,6 +17643,8 @@ async def dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return await command_orderbook(args, settings)
     if args.command == "macro":
         return command_macro(args, settings)
+    if args.command == "microstructure":
+        return command_microstructure(args, settings)
     if args.command == "gex":
         return await command_gex(args, settings)
     if args.command == "positions":

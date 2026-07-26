@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pytest
 
+from research.evidence_accounting import (
+    audit_forward_evidence_accounting,
+)
 from research.global_trial_accounting import (
     GlobalTrialAccountingError,
     audit_global_trial_accounting,
@@ -230,3 +233,62 @@ def test_global_accounting_index_corruption_fails_closed(
             lab_dir,
             persist=True,
         )
+
+
+def test_forward_observations_are_reported_but_not_counted_as_trials(
+    tmp_path: Path,
+) -> None:
+    lab_dir = _synthetic_lab(tmp_path)
+    observer = lab_dir / "observers" / "family" / "candidate.json"
+    atomic_write_json(
+        observer,
+        {
+            "family": "FAMILY",
+            "strategy_dna_hash": "dna",
+            "status": "FROZEN_FORWARD_RESEARCH",
+            "forward_observations": [
+                {"timestamp": "2026-07-27T00:00:00Z"},
+                {"timestamp": "2026-07-28T00:00:00Z"},
+            ],
+            "forward_decisions": [{"action": "NO_ENTRY"}],
+            "orders_generated": 0,
+        },
+    )
+
+    result = audit_forward_evidence_accounting(
+        lab_dir,
+        persist=True,
+    )
+
+    assert result["status"] == "PASSED"
+    assert result["historical_evaluation_trials"] == 1_723
+    assert result["global_multiple_testing_denominator"] == 1_723
+    assert result["forward_observation_count"] == 2
+    assert result["forward_decision_count"] == 1
+    assert result["forward_reselection_event_count"] == 0
+    assert not result[
+        "forward_observations_counted_in_multiple_testing"
+    ]
+
+
+def test_forward_reselection_is_an_integrity_failure(
+    tmp_path: Path,
+) -> None:
+    lab_dir = _synthetic_lab(tmp_path)
+    atomic_write_json(
+        lab_dir / "observers" / "family" / "candidate.json",
+        {
+            "strategy_dna_hash": "dna",
+            "forward_reselection_events": [
+                {"timestamp": "2026-07-27T00:00:00Z"}
+            ],
+        },
+    )
+
+    result = audit_forward_evidence_accounting(
+        lab_dir,
+        persist=False,
+    )
+
+    assert result["status"] == "FAILED"
+    assert result["forward_reselection_event_count"] == 1

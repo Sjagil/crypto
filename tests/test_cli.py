@@ -35,6 +35,8 @@ def test_required_command_families_are_registered() -> None:
         ["config", "validate"],
         ["eligibility", "check", "--market", "BTC-EUR"],
         ["data", "providers"],
+        ["microstructure", "plan"],
+        ["microstructure", "status"],
         ["scrape", "status"],
         ["features", "build"],
         ["strategies", "list"],
@@ -44,6 +46,7 @@ def test_required_command_families_are_registered() -> None:
         ["monte-carlo"],
         ["research"],
         ["paper", "status"],
+        ["live", "canary-policy"],
         ["live", "preflight"],
         ["operate", "preflight", "--mode", "shadow"],
         ["operate", "start", "--mode", "shadow", "--soak-minutes", "15"],
@@ -51,6 +54,8 @@ def test_required_command_families_are_registered() -> None:
         ["operate", "stop", "--mode", "shadow", "--wait-seconds", "30"],
         ["operate", "candidates"],
         ["operate", "task-install", "--dry-run"],
+        ["operate", "startup-install", "--mode", "shadow"],
+        ["operate", "startup-status", "--mode", "shadow"],
         ["lab", "campaign", "plan", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "plan", "--name", "institutional-rotation-v2"],
         ["lab", "campaign", "plan", "--name", "capital-utilization-v1"],
@@ -282,6 +287,29 @@ def test_required_command_families_are_registered() -> None:
         ]
     )
     assert full.command == "research"
+
+
+def test_startup_launcher_is_hidden_and_uses_exact_environment(
+    isolated_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from core.cli import (
+        _startup_launcher,
+        _startup_launcher_path,
+    )
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    path = _startup_launcher_path(isolated_settings)
+    launcher = _startup_launcher(
+        isolated_settings,
+        mode="shadow",
+        profile="practical_spot_v1",
+    )
+    assert path.name == "CryptoPracticalSpotShadow.vbs"
+    assert "operate start --mode shadow" in launcher
+    assert "--continuous --resume" in launcher
+    assert ", 0, False" in launcher
 
 
 def test_research_report_requires_matching_manifest(tmp_path) -> None:
