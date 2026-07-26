@@ -941,6 +941,18 @@ positive, but validation weakened, doubled-cost validation turned negative and
 PBO remained far above the gate. It is therefore frozen forward research, not
 a paper or live candidate.
 
+The classical regime router is governance-first and orderless. It classifies
+only completed daily candles using BTC EMA200 trend and slope, 14-day
+choppiness, 30-day volatility versus its 252-day baseline, and allowlisted
+market breadth. Risk-on changes require three consecutive closed-candle
+confirmations; risk-off or uncertain states move immediately to cash. A sleeve
+can receive risk only after its research, forward, and requested lifecycle
+gates have already passed. Allocation is capped at 40% total and 20% per
+sleeve with at least 60% cash. With no approved sleeve—or in a blocked
+regime—the router is deterministically 100% cash and cannot generate orders.
+Its decisions form a verified append-only SHA-256 chain in
+`output/lab/reports/regime_router_status_v1.json`.
+
 Every generated baseline is paired with deterministic one-dimensional
 sensitivity work for each tunable block parameter. Large grids use a documented
 deterministic non-default sample in QUICK mode; joint parameter work is handled

@@ -1439,6 +1439,9 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
+        "regime_router_status_v1.json": (
+            reports / "regime_router_status_v1.json"
+        ),
         "portfolio_breakout_forward_observer_v1.json": (
             reports / "portfolio_breakout_forward_observer_v1.json"
         ),

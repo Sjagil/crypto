@@ -5235,6 +5235,9 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         "paper_candidate_permitted": False,
         "live_ready": False,
     }
+    router_status = _autopilot_regime_router_stage(settings)
+    assert_orderless_research_payload(router_status)
+    aggregate["classical_regime_router"] = router_status
     forward_report = (
         settings.paths.lab_dir / "reports" / "portfolio_breakout_forward_observer_v1.json"
     )
@@ -5248,6 +5251,7 @@ def _autopilot_ledger_preflight_stage(
     """Verify every active append-only ledger before data or research runs."""
 
     from research.ledger_guard import audit_forward_ledgers
+    from research.regime_router import audit_router_decision_chain
 
     observer_root = settings.paths.lab_dir / "observers"
     active_directories = (
@@ -5274,11 +5278,184 @@ def _autopilot_ledger_preflight_stage(
         for path in sorted(directory.glob("*.json"))
     ]
     payload = audit_forward_ledgers(paths)
+    router_path = (
+        settings.paths.lab_dir
+        / "reports"
+        / "regime_router_status_v1.json"
+    )
+    router_audit = (
+        audit_router_decision_chain(
+            list(read_json(router_path).get("decisions") or [])
+        )
+        if router_path.is_file()
+        else {
+            "status": "NOT_STARTED",
+            "decision_count": 0,
+            "chain_root_hash": "0" * 64,
+        }
+    )
+    payload["regime_router_chain"] = router_audit
     report_path = (
         settings.paths.lab_dir
         / "reports"
         / "forward_ledger_preflight_v1.json"
     )
+    atomic_write_json(report_path, _json_ready(payload))
+    return {**payload, "report": str(report_path)}
+
+
+def _autopilot_regime_router_stage(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Classify the latest regime and route approved sleeves or cash."""
+
+    from core.autopilot import assert_orderless_research_payload
+    from research.portfolio_selection import RotationPortfolioPolicy
+    from research.regime_router import (
+        MarketRegime,
+        RegimeRouterPolicy,
+        RouterMode,
+        SleeveStyle,
+        append_router_decision,
+        apply_regime_hysteresis,
+        classify_latest_regime,
+        route_approved_sleeves,
+        sleeve_from_campaign_report,
+    )
+
+    reports = settings.paths.lab_dir / "reports"
+    source_specs = (
+        ("absolute_momentum_campaign_v1.json", SleeveStyle.TREND),
+        ("portfolio_breakout_campaign_v1.json", SleeveStyle.TREND),
+        (
+            "volatility_contraction_campaign_v1.json",
+            SleeveStyle.TREND,
+        ),
+        ("trend_pullback_campaign_v1.json", SleeveStyle.TREND),
+        ("range_expansion_4h_campaign_v1_1.json", SleeveStyle.TREND),
+        (
+            "sentiment_recovery_campaign_v1.json",
+            SleeveStyle.EVENT_CONTINUATION,
+        ),
+        ("residual_momentum_campaign_v1.json", SleeveStyle.TREND),
+        ("dual_asset_trend_campaign_v1.json", SleeveStyle.TREND),
+        (
+            "liquidity_sweep_campaign_v1.json",
+            SleeveStyle.LIQUIDITY_RECOVERY,
+        ),
+        (
+            "residual_reversal_campaign_v1.json",
+            SleeveStyle.MEAN_REVERSION,
+        ),
+        (
+            "peer_residual_reversal_campaign_v1.json",
+            SleeveStyle.MEAN_REVERSION,
+        ),
+        (
+            "btc_shock_diffusion_campaign_v1.json",
+            SleeveStyle.EVENT_CONTINUATION,
+        ),
+    )
+    sleeves = []
+    source_reports: dict[str, str] = {}
+    for filename, style in source_specs:
+        path = reports / filename
+        if not path.is_file():
+            continue
+        report = read_json(path)
+        assert_orderless_research_payload(report)
+        sleeves.append(
+            sleeve_from_campaign_report(report, style=style)
+        )
+        source_reports[filename] = sha256_file(path)
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: (
+            settings.paths.processed_data_dir
+            / f"{market}_1d.parquet"
+        )
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"missing regime-router datasets: {missing}"
+        )
+    frames = {
+        market: pd.read_parquet(path)
+        for market, path in paths.items()
+    }
+    data_hashes = {
+        market: sha256_file(path) for market, path in paths.items()
+    }
+    portfolio_policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.40,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.60,
+        minimum_history_observations=200,
+    )
+    router_policy = RegimeRouterPolicy()
+    classification = classify_latest_regime(
+        frames,
+        portfolio_policy=portfolio_policy,
+        router_policy=router_policy,
+    )
+    report_path = reports / "regime_router_status_v1.json"
+    previous = read_json(report_path) if report_path.is_file() else {}
+    regime_state = apply_regime_hysteresis(
+        MarketRegime(classification["raw_regime"]),
+        previous=previous.get("regime_state"),
+        policy=router_policy,
+    )
+    route = route_approved_sleeves(
+        sleeves,
+        active_regime=MarketRegime(
+            regime_state["active_regime"]
+        ),
+        mode=RouterMode.RESEARCH_OBSERVER,
+        policy=router_policy,
+    )
+    record = {
+        "decision_at": classification["decision_at"],
+        "raw_regime": classification["raw_regime"],
+        "active_regime": regime_state["active_regime"],
+        "transition": regime_state["transition"],
+        "allocations": route["allocations"],
+        "total_exposure": route["total_exposure"],
+        "cash_fraction": route["cash_fraction"],
+        "eligible_sleeves": route["eligible_sleeves"],
+        "data_fingerprint": stable_hash(data_hashes, length=64),
+        "policy_hash": router_policy.policy_hash,
+        "orders_generated": 0,
+    }
+    chain = append_router_decision(previous, record)
+    payload = {
+        "schema_version": "regime_router_status_v1",
+        "status": route["status"],
+        "router_version": "1.0.0",
+        "mode": RouterMode.RESEARCH_OBSERVER.value,
+        "classification": classification,
+        "regime_state": regime_state,
+        "route": route,
+        "router_policy": asdict(router_policy),
+        "router_policy_hash": router_policy.policy_hash,
+        "portfolio_policy": asdict(portfolio_policy),
+        "sleeves": [asdict(sleeve) for sleeve in sleeves],
+        "source_report_hashes": source_reports,
+        "data_hashes": data_hashes,
+        "decisions": chain["decisions"],
+        "decision_count": chain["decision_count"],
+        "chain_root_hash": chain["chain_root_hash"],
+        "latest_decision_deduplicated": chain["deduplicated"],
+        "ai_development_status": "AI_DEVELOPMENT_EMBARGOED",
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    assert_orderless_research_payload(payload)
     atomic_write_json(report_path, _json_ready(payload))
     return {**payload, "report": str(report_path)}
 
