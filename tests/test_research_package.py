@@ -717,3 +717,57 @@ def test_acceptance_summary_rejects_dual_trend_without_provenance() -> None:
 
     with pytest.raises(ValueError, match="provenance missing"):
         build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_includes_rejected_liquidity_sweep() -> None:
+    values = _inputs()
+    values["liquidity_sweep"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "LIQUIDITY_SWEEP_RECOVERY_V1",
+        "engine_version": "1.0.0",
+        "timeframe": "1d",
+        "generated_trial_count": 8,
+        "registered_unique_trials": 8,
+        "registered_epoch_records": 8,
+        "total_known_trials": 21_337,
+        "primary_strategy_id": "LS_F3_V15_H10",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.5143,
+        },
+        "pbo": 0.5143,
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 8,
+            "unique_epoch_record_count": 8,
+            "unique_strategy_dna_count": 8,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "signal_policy": {
+            "entry": "CONFIRMED_FRACTAL_LOW_SWEEP_AND_CLOSE_RECOVERY",
+        },
+        "forward_requirement": {
+            "minimum_closed_daily_observations": 365,
+            "minimum_rebalances": 30,
+        },
+        "holdout_status": (
+            "NO_GLOBALLY_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    liquidity = summary["liquidity_sweep"]
+    assert liquidity["registered_unique_trials"] == 8
+    assert liquidity["total_known_trials"] == 21_337
+    assert liquidity["pbo"] == 0.5143
+    assert liquidity["orders_generated"] == 0
+    assert liquidity["live_ready"] is False

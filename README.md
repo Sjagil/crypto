@@ -815,6 +815,25 @@ This family contributes exactly one strategy trial to the cumulative
 21,329-trial denominator; repeated evaluation on later data epochs remains
 separately hash-chained without becoming a new strategy trial.
 
+`python main.py lab campaign run --name liquidity-sweep-v1 --yes` runs the
+separately preregistered eight-DNA confirmed-fractal liquidity-sweep family.
+Signals use only fractal levels that became knowable after their full two- or
+three-bar right-side confirmation. A daily low must sweep the prior confirmed
+low and close back above it on sufficient spot volume while both the asset and
+BTC are above EMA200; execution is delayed to the next open. Positions exit on
+a bearish sweep, trend loss, recovery to the prior confirmed high, or the fixed
+10/20-day holding limit. Exposure remains capped at 40% total and 20% per asset
+with at least 60% cash.
+
+The development-selected `LS_F3_V15_H10` path was positive in development,
+validation, confirmation and double-cost counterparts, returning 14.4% with a
+1.175 period profit factor and 10.3% maximum drawdown. It nevertheless failed
+the minimum 100-rebalance gate with 74 events and failed DSR (0.213), White
+Reality Check (0.654), Hansen SPA (0.578), PBO (0.514) and both stochastic
+gates. The family is therefore retained only as an orderless positive
+diagnostic lead in the cumulative 21,337-strategy-trial history; all eight
+observers start at 0/365 forward days and paper/live remain blocked.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

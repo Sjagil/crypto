@@ -508,6 +508,26 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_liquidity_sweep_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "LIQUIDITY_SWEEP_RECOVERY_V1",
+            "generated_trial_count": 8,
+            "registered_unique_trials": 8,
+            "registered_epoch_records": 8,
+            "total_known_trials": 21_337,
+            "primary_strategy_id": "LS_F3_V15_H10",
+            "pbo": 0.5142857142857142,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -585,6 +605,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_dual_asset_trend_campaign"
     ]["pbo_applicable"]
+    assert (
+        result["parallel_liquidity_sweep_campaign"][
+            "total_known_trials"
+        ]
+        == 21_337
+    )
+    assert not result[
+        "parallel_liquidity_sweep_campaign"
+    ]["statistical_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

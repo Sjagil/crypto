@@ -3451,6 +3451,26 @@ def _run_dual_asset_trend_campaign(
     return run_dual_asset_trend_campaign(settings)
 
 
+def _liquidity_sweep_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.liquidity_sweep_campaign import (
+        liquidity_sweep_campaign_path,
+    )
+
+    return liquidity_sweep_campaign_path(settings)
+
+
+def _run_liquidity_sweep_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.liquidity_sweep_campaign import (
+        run_liquidity_sweep_campaign,
+    )
+
+    return run_liquidity_sweep_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4639,6 +4659,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in dual_trend_forward_summaries.values()
     )
+    liquidity_sweep_result = _run_liquidity_sweep_campaign(
+        settings
+    )
+    assert_orderless_research_payload(liquidity_sweep_result)
+    liquidity_sweep_report = read_json(
+        _liquidity_sweep_campaign_path(settings)
+    )
+    assert_orderless_research_payload(liquidity_sweep_report)
+    liquidity_sweep_forward_summaries = dict(
+        liquidity_sweep_report.get("forward_summaries") or {}
+    )
+    liquidity_sweep_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in liquidity_sweep_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4774,6 +4809,23 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_liquidity_sweep_observers": {
+            "campaign": "LIQUIDITY_SWEEP_RECOVERY_V1",
+            "status": liquidity_sweep_result["status"],
+            "observer_count": len(
+                liquidity_sweep_forward_summaries
+            ),
+            "forward_summaries": (
+                liquidity_sweep_forward_summaries
+            ),
+            "total_forward_observations": (
+                liquidity_sweep_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -4786,6 +4838,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + sentiment_forward_observations
             + residual_forward_observations
             + dual_trend_forward_observations
+            + liquidity_sweep_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4821,6 +4874,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "sentiment_recovery_v1",
         observer_root / "residual_momentum_v1",
         observer_root / "dual_asset_trend_v1",
+        observer_root / "liquidity_sweep_v1",
     )
     paths = [
         path
@@ -4915,6 +4969,7 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         settings
     )
     dual_asset_trend = _run_dual_asset_trend_campaign(settings)
+    liquidity_sweep = _run_liquidity_sweep_campaign(settings)
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -5225,6 +5280,38 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": dual_asset_trend[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_liquidity_sweep_campaign": {
+            "campaign": liquidity_sweep["campaign"],
+            "status": liquidity_sweep["status"],
+            "generated_trial_count": liquidity_sweep[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": liquidity_sweep[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": liquidity_sweep[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": liquidity_sweep[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": liquidity_sweep[
+                "primary_strategy_id"
+            ],
+            "pbo": liquidity_sweep["pbo"],
+            "economic_pass": liquidity_sweep[
+                "economic_pass"
+            ],
+            "statistical_pass": liquidity_sweep[
+                "statistical_pass"
+            ],
+            "observer_manifests": liquidity_sweep[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -11715,6 +11802,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         dual_asset_trend_campaign = (
             campaign_name == "dual-asset-trend-v1"
         )
+        liquidity_sweep_campaign = (
+            campaign_name == "liquidity-sweep-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -11743,6 +11833,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         or sentiment_recovery_campaign
                         or residual_momentum_campaign
                         or dual_asset_trend_campaign
+                        or liquidity_sweep_campaign
                         or portfolio_storm_campaign
                     )
                     else (
@@ -11827,6 +11918,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "RESIDUAL_MOMENTUM_V1"
         if dual_asset_trend_campaign:
             campaign_label = "DUAL_ASSET_TREND_V1"
+        if liquidity_sweep_campaign:
+            campaign_label = "LIQUIDITY_SWEEP_RECOVERY_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -11933,6 +12026,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_dual_asset_trend_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if liquidity_sweep_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_liquidity_sweep_campaign,
                         settings,
                     )
                 )
@@ -12435,6 +12536,52 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if liquidity_sweep_campaign:
+                from research.liquidity_sweep_campaign import (
+                    plan_liquidity_sweep_campaign,
+                )
+
+                plan = plan_liquidity_sweep_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_EVENT_DRIVEN_ALPHA_FAMILY"
+                        ),
+                        "economic_hypothesis": (
+                            "CONFIRMED_LIQUIDITY_SWEEP_RECOVERY"
+                        ),
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "base_known_trials": plan["base_known_trials"],
+                        "projected_total_known_trials": plan[
+                            "projected_total_known_trials"
+                        ],
+                        "strategy_dna_hashes": plan[
+                            "strategy_dna_hashes"
+                        ],
+                        "signal_policy": plan["signal_policy"],
+                        "known_limitations": plan[
+                            "known_limitations"
+                        ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
             if absolute_momentum_campaign:
                 from research.absolute_momentum import (
                     absolute_momentum_parameter_set,
@@ -12865,6 +13012,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_dual_asset_trend_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if liquidity_sweep_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 8,
+                            "reason_code": (
+                                "PREREGISTERED_LIQUIDITY_SWEEP_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_liquidity_sweep_campaign,
                         settings,
                     )
                 )
@@ -15460,6 +15627,7 @@ def build_parser() -> argparse.ArgumentParser:
         "sentiment-recovery-v1",
         "residual-momentum-v1",
         "dual-asset-trend-v1",
+        "liquidity-sweep-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -15519,6 +15687,7 @@ def build_parser() -> argparse.ArgumentParser:
             "sentiment-recovery-v1",
             "residual-momentum-v1",
             "dual-asset-trend-v1",
+            "liquidity-sweep-v1",
         ),
         default="cross-sectional-ensemble",
     )

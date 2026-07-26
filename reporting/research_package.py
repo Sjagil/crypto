@@ -96,6 +96,7 @@ def build_acceptance_summary(
     sentiment_recovery: dict[str, Any] | None = None,
     residual_momentum: dict[str, Any] | None = None,
     dual_asset_trend: dict[str, Any] | None = None,
+    liquidity_sweep: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -470,6 +471,36 @@ def build_acceptance_summary(
             raise ValueError(
                 "dual-asset trend discovery provenance missing"
             )
+    if liquidity_sweep is not None:
+        if (
+            liquidity_sweep.get("campaign")
+            != "LIQUIDITY_SWEEP_RECOVERY_V1"
+        ):
+            raise ValueError(
+                "liquidity-sweep campaign identity mismatch"
+            )
+        if int(liquidity_sweep.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "liquidity-sweep campaign contains orders"
+            )
+        if bool(liquidity_sweep.get("live_ready", False)):
+            raise ValueError(
+                "liquidity-sweep campaign contains live permission"
+            )
+        require_registry_accounting(
+            "liquidity sweep",
+            liquidity_sweep,
+        )
+        liquidity_primary = liquidity_sweep.get("primary_result")
+        if not isinstance(liquidity_primary, dict):
+            raise ValueError(
+                "liquidity-sweep primary result missing"
+            )
+        require_stochastic_validation(
+            "liquidity sweep",
+            [liquidity_primary],
+            container="gates",
+        )
     if portfolio_storm is not None:
         if portfolio_storm.get("status") != "COMPLETED_NOT_PROMOTED":
             raise ValueError("portfolio storm is incomplete")
@@ -1040,6 +1071,44 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if liquidity_sweep is not None:
+        summary["liquidity_sweep"] = {
+            "status": liquidity_sweep["status"],
+            "campaign": liquidity_sweep["campaign"],
+            "engine_version": liquidity_sweep["engine_version"],
+            "timeframe": liquidity_sweep["timeframe"],
+            "generated_trial_count": liquidity_sweep[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": liquidity_sweep[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": liquidity_sweep[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": liquidity_sweep[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": liquidity_sweep[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": liquidity_sweep[
+                "multiple_testing"
+            ],
+            "pbo": liquidity_sweep["pbo"],
+            "trial_registry": liquidity_sweep["trial_registry"],
+            "primary_result": liquidity_sweep["primary_result"],
+            "signal_policy": liquidity_sweep["signal_policy"],
+            "forward_requirement": liquidity_sweep[
+                "forward_requirement"
+            ],
+            "holdout_status": liquidity_sweep[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -1253,6 +1322,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "dual_asset_trend_plan_v1.json": (
             reports / "dual_asset_trend_plan_v1.json"
         ),
+        "liquidity_sweep_campaign_v1.json": (
+            reports / "liquidity_sweep_campaign_v1.json"
+        ),
+        "liquidity_sweep_campaign_v1.csv": (
+            reports / "liquidity_sweep_campaign_v1.csv"
+        ),
+        "liquidity_sweep_plan_v1.json": (
+            reports / "liquidity_sweep_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1462,6 +1540,27 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (dual_registry_directory / "records").glob("*.json")
     ):
         paths[f"dual_asset_trend_trial_{record.name}"] = record
+    liquidity_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "liquidity_sweep_v1"
+    )
+    for observer in sorted(
+        liquidity_observer_directory.glob("*.json")
+    ):
+        paths[f"liquidity_sweep_observer_{observer.name}"] = observer
+    liquidity_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "liquidity_sweep_v1"
+    )
+    paths["liquidity_sweep_registry_index.json"] = (
+        liquidity_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (liquidity_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"liquidity_sweep_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1572,6 +1671,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         ],
         dual_asset_trend=payloads[
             "dual_asset_trend_campaign_v1.json"
+        ],
+        liquidity_sweep=payloads[
+            "liquidity_sweep_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
