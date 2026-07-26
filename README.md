@@ -931,6 +931,16 @@ registered as forward research only. Its historical selection failed PBO,
 White Reality Check, Hansen SPA and DSR, so no parameter repair or promotion is
 permitted.
 
+`BTC_SHOCK_DIFFUSION_V1` is a four-DNA classical cross-asset lead-lag
+family. It estimates each ETH/SOL/LINK beta only from observations preceding a
+large completed-close BTC shock, then holds at most two positive
+beta-implied underreactors for three or five days. Signals require causal
+EMA200 trend confirmation, execute at the next open, retain at least 60% cash,
+and have no order authority. The development-selected path was historically
+positive, but validation weakened, doubled-cost validation turned negative and
+PBO remained far above the gate. It is therefore frozen forward research, not
+a paper or live candidate.
+
 Every generated baseline is paired with deterministic one-dimensional
 sensitivity work for each tunable block parameter. Large grids use a documented
 deterministic non-default sample in QUICK mode; joint parameter work is handled

@@ -1427,6 +1427,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "peer_residual_reversal_plan_v1.json": (
             reports / "peer_residual_reversal_plan_v1.json"
         ),
+        "btc_shock_diffusion_campaign_v1.json": (
+            reports / "btc_shock_diffusion_campaign_v1.json"
+        ),
+        "btc_shock_diffusion_campaign_v1.csv": (
+            reports / "btc_shock_diffusion_campaign_v1.csv"
+        ),
+        "btc_shock_diffusion_plan_v1.json": (
+            reports / "btc_shock_diffusion_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1726,6 +1735,31 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (peer_residual_registry_directory / "records").glob("*.json")
     ):
         paths[f"peer_residual_reversal_trial_{record.name}"] = record
+    shock_diffusion_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "btc_shock_diffusion_v1"
+    )
+    for observer in sorted(
+        shock_diffusion_observer_directory.glob("*.json")
+    ):
+        paths[f"btc_shock_diffusion_observer_{observer.name}"] = (
+            observer
+        )
+    shock_diffusion_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "btc_shock_diffusion_v1"
+    )
+    paths["btc_shock_diffusion_registry_index.json"] = (
+        shock_diffusion_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (shock_diffusion_registry_directory / "records").glob(
+            "*.json"
+        )
+    ):
+        paths[f"btc_shock_diffusion_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
