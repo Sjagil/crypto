@@ -3471,6 +3471,26 @@ def _run_liquidity_sweep_campaign(
     return run_liquidity_sweep_campaign(settings)
 
 
+def _residual_reversal_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.residual_reversal_campaign import (
+        residual_reversal_campaign_path,
+    )
+
+    return residual_reversal_campaign_path(settings)
+
+
+def _run_residual_reversal_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.residual_reversal_campaign import (
+        run_residual_reversal_campaign,
+    )
+
+    return run_residual_reversal_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4674,6 +4694,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in liquidity_sweep_forward_summaries.values()
     )
+    residual_reversal_result = _run_residual_reversal_campaign(
+        settings
+    )
+    assert_orderless_research_payload(residual_reversal_result)
+    residual_reversal_report = read_json(
+        _residual_reversal_campaign_path(settings)
+    )
+    assert_orderless_research_payload(residual_reversal_report)
+    residual_reversal_forward_summaries = dict(
+        residual_reversal_report.get("forward_summaries") or {}
+    )
+    residual_reversal_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in residual_reversal_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4826,6 +4861,23 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_residual_reversal_observers": {
+            "campaign": "RESIDUAL_REVERSAL_V1",
+            "status": residual_reversal_result["status"],
+            "observer_count": len(
+                residual_reversal_forward_summaries
+            ),
+            "forward_summaries": (
+                residual_reversal_forward_summaries
+            ),
+            "total_forward_observations": (
+                residual_reversal_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -4839,6 +4891,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + residual_forward_observations
             + dual_trend_forward_observations
             + liquidity_sweep_forward_observations
+            + residual_reversal_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4875,6 +4928,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "residual_momentum_v1",
         observer_root / "dual_asset_trend_v1",
         observer_root / "liquidity_sweep_v1",
+        observer_root / "residual_reversal_v1",
     )
     paths = [
         path
@@ -4970,6 +5024,7 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     )
     dual_asset_trend = _run_dual_asset_trend_campaign(settings)
     liquidity_sweep = _run_liquidity_sweep_campaign(settings)
+    residual_reversal = _run_residual_reversal_campaign(settings)
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -5312,6 +5367,38 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": liquidity_sweep[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_residual_reversal_campaign": {
+            "campaign": residual_reversal["campaign"],
+            "status": residual_reversal["status"],
+            "generated_trial_count": residual_reversal[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": residual_reversal[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": residual_reversal[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": residual_reversal[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": residual_reversal[
+                "primary_strategy_id"
+            ],
+            "pbo": residual_reversal["pbo"],
+            "economic_pass": residual_reversal[
+                "economic_pass"
+            ],
+            "statistical_pass": residual_reversal[
+                "statistical_pass"
+            ],
+            "observer_manifests": residual_reversal[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -11805,6 +11892,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         liquidity_sweep_campaign = (
             campaign_name == "liquidity-sweep-v1"
         )
+        residual_reversal_campaign = (
+            campaign_name == "residual-reversal-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -11834,6 +11924,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         or residual_momentum_campaign
                         or dual_asset_trend_campaign
                         or liquidity_sweep_campaign
+                        or residual_reversal_campaign
                         or portfolio_storm_campaign
                     )
                     else (
@@ -11920,6 +12011,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "DUAL_ASSET_TREND_V1"
         if liquidity_sweep_campaign:
             campaign_label = "LIQUIDITY_SWEEP_RECOVERY_V1"
+        if residual_reversal_campaign:
+            campaign_label = "RESIDUAL_REVERSAL_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -12034,6 +12127,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_liquidity_sweep_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if residual_reversal_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_residual_reversal_campaign,
                         settings,
                     )
                 )
@@ -12582,6 +12683,52 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if residual_reversal_campaign:
+                from research.residual_reversal_campaign import (
+                    plan_residual_reversal_campaign,
+                )
+
+                plan = plan_residual_reversal_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_RESIDUAL_REVERSAL_FAMILY"
+                        ),
+                        "economic_hypothesis": (
+                            "BTC_BETA_RESIDUAL_MEAN_REVERSION"
+                        ),
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "base_known_trials": plan["base_known_trials"],
+                        "projected_total_known_trials": plan[
+                            "projected_total_known_trials"
+                        ],
+                        "strategy_dna_hashes": plan[
+                            "strategy_dna_hashes"
+                        ],
+                        "signal_policy": plan["signal_policy"],
+                        "known_limitations": plan[
+                            "known_limitations"
+                        ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
             if absolute_momentum_campaign:
                 from research.absolute_momentum import (
                     absolute_momentum_parameter_set,
@@ -13032,6 +13179,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_liquidity_sweep_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if residual_reversal_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 8,
+                            "reason_code": (
+                                "PREREGISTERED_RESIDUAL_REVERSAL_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_residual_reversal_campaign,
                         settings,
                     )
                 )
@@ -15628,6 +15795,7 @@ def build_parser() -> argparse.ArgumentParser:
         "residual-momentum-v1",
         "dual-asset-trend-v1",
         "liquidity-sweep-v1",
+        "residual-reversal-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -15688,6 +15856,7 @@ def build_parser() -> argparse.ArgumentParser:
             "residual-momentum-v1",
             "dual-asset-trend-v1",
             "liquidity-sweep-v1",
+            "residual-reversal-v1",
         ),
         default="cross-sectional-ensemble",
     )

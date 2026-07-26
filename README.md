@@ -485,6 +485,10 @@ python main.py lab campaign plan --name signal-synthesis-storm-v1 --storm-trials
 python main.py lab campaign run --name signal-synthesis-storm-v1 --storm-trials 5000 --yes
 python main.py lab campaign status --name signal-synthesis-storm-v1
 python main.py lab campaign report --name signal-synthesis-storm-v1
+python main.py lab campaign plan --name residual-reversal-v1
+python main.py lab campaign run --name residual-reversal-v1 --yes
+python main.py lab campaign report --name residual-reversal-v1
+python main.py lab campaign observe --name residual-reversal-v1
 python main.py lab campaign autopilot
 python main.py lab campaign autopilot --mode status
 python main.py lab campaign autopilot --run-research --refresh-data
@@ -833,6 +837,25 @@ Reality Check (0.654), Hansen SPA (0.578), PBO (0.514) and both stochastic
 gates. The family is therefore retained only as an orderless positive
 diagnostic lead in the cumulative 21,337-strategy-trial history; all eight
 observers start at 0/365 forward days and paper/live remain blocked.
+
+`python main.py lab campaign run --name residual-reversal-v1 --yes` runs the
+separately preregistered eight-DNA BTC-beta residual mean-reversion family.
+The strictly prior 30/60-day rolling BTC beta is removed from each altcoin
+return. Three- or five-day residual shocks are standardized against a strictly
+prior 90-day distribution; only unusually negative ETH/SOL/LINK residuals are
+bought while BTC remains above its causal EMA200. Signals execute at the next
+daily open, BTC itself is never traded, and exposure remains capped at 40%
+total and 20% per asset.
+
+The development-selected `RR_B60_H5_Z20` path returned 45.8% net with 5.7%
+CAGR, 1.09 Sharpe, 1.979 period profit factor and 4.3% maximum drawdown.
+Development, validation, confirmation and every double-cost counterpart were
+positive. PBO (0.029), Hansen SPA (0.029), White Reality Check (0.065) and
+normal/stressed Monte Carlo plus Dirichlet gates passed. Promotion remains
+blocked because DSR is 0.402, only 65 rebalance events exist versus the fixed
+100-event minimum, and no globally untouched historical holdout remains.
+All eight DNA rows are retained in the cumulative 21,345-strategy-trial
+history with separate 0/365 orderless forward observers.
 
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable

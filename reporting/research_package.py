@@ -97,6 +97,7 @@ def build_acceptance_summary(
     residual_momentum: dict[str, Any] | None = None,
     dual_asset_trend: dict[str, Any] | None = None,
     liquidity_sweep: dict[str, Any] | None = None,
+    residual_reversal: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -499,6 +500,36 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "liquidity sweep",
             [liquidity_primary],
+            container="gates",
+        )
+    if residual_reversal is not None:
+        if (
+            residual_reversal.get("campaign")
+            != "RESIDUAL_REVERSAL_V1"
+        ):
+            raise ValueError(
+                "residual-reversal campaign identity mismatch"
+            )
+        if int(residual_reversal.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "residual-reversal campaign contains orders"
+            )
+        if bool(residual_reversal.get("live_ready", False)):
+            raise ValueError(
+                "residual-reversal campaign contains live permission"
+            )
+        require_registry_accounting(
+            "residual reversal",
+            residual_reversal,
+        )
+        reversal_primary = residual_reversal.get("primary_result")
+        if not isinstance(reversal_primary, dict):
+            raise ValueError(
+                "residual-reversal primary result missing"
+            )
+        require_stochastic_validation(
+            "residual reversal",
+            [reversal_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -1109,6 +1140,44 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if residual_reversal is not None:
+        summary["residual_reversal"] = {
+            "status": residual_reversal["status"],
+            "campaign": residual_reversal["campaign"],
+            "engine_version": residual_reversal["engine_version"],
+            "timeframe": residual_reversal["timeframe"],
+            "generated_trial_count": residual_reversal[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": residual_reversal[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": residual_reversal[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": residual_reversal[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": residual_reversal[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": residual_reversal[
+                "multiple_testing"
+            ],
+            "pbo": residual_reversal["pbo"],
+            "trial_registry": residual_reversal["trial_registry"],
+            "primary_result": residual_reversal["primary_result"],
+            "signal_policy": residual_reversal["signal_policy"],
+            "forward_requirement": residual_reversal[
+                "forward_requirement"
+            ],
+            "holdout_status": residual_reversal[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -1330,6 +1399,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         ),
         "liquidity_sweep_plan_v1.json": (
             reports / "liquidity_sweep_plan_v1.json"
+        ),
+        "residual_reversal_campaign_v1.json": (
+            reports / "residual_reversal_campaign_v1.json"
+        ),
+        "residual_reversal_campaign_v1.csv": (
+            reports / "residual_reversal_campaign_v1.csv"
+        ),
+        "residual_reversal_plan_v1.json": (
+            reports / "residual_reversal_plan_v1.json"
         ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
@@ -1561,6 +1639,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (liquidity_registry_directory / "records").glob("*.json")
     ):
         paths[f"liquidity_sweep_trial_{record.name}"] = record
+    reversal_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "residual_reversal_v1"
+    )
+    for observer in sorted(
+        reversal_observer_directory.glob("*.json")
+    ):
+        paths[f"residual_reversal_observer_{observer.name}"] = (
+            observer
+        )
+    reversal_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "residual_reversal_v1"
+    )
+    paths["residual_reversal_registry_index.json"] = (
+        reversal_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (reversal_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"residual_reversal_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1674,6 +1775,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         ],
         liquidity_sweep=payloads[
             "liquidity_sweep_campaign_v1.json"
+        ],
+        residual_reversal=payloads[
+            "residual_reversal_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
