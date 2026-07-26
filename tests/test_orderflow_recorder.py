@@ -613,9 +613,9 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
                             "open_interest": 1000,
                             "basis": 1.5,
                             "perpetual_premium": 0.0001,
-                            "index_price": 100,
+                            "index_price": 110,
                             "perpetual_base_volume_24h": 2000,
-                            "perpetual_quote_volume_24h": 200000,
+                            "perpetual_quote_volume_24h": 220000,
                             "liquidation_status": (
                                 "UNAVAILABLE_PUBLIC_ENDPOINT"
                             ),
@@ -655,8 +655,8 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     market = result["snapshot"]["markets"][0]
     assert market["perpetual_spot_volume_ratio"] == pytest.approx(2)
     assert market["perpetual_spot_quote_volume_ratio"] == pytest.approx(2)
-    assert market["implied_usdt_per_eur"] == pytest.approx(1)
-    assert market["spot_quote_volume_24h_usdt"] == pytest.approx(100000)
+    assert market["implied_usdt_per_eur"] == pytest.approx(1.1)
+    assert market["spot_quote_volume_24h_usdt"] == pytest.approx(110000)
     assert market["quote_currency_conversion_status"] == "AVAILABLE"
     assert market["volume_ratio_method"] == (
         "MEXC_PERPETUAL_USDT_AMOUNT24_DIVIDED_BY_"
