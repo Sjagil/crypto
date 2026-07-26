@@ -359,6 +359,8 @@ class ContentAddressedTrialRegistry:
         index = self.index()
         previous_hash = "0" * 64
         seen: set[str] = set()
+        strategy_dna_hashes: set[str] = set()
+        data_fingerprints: set[str] = set()
         for sequence, raw_entry in enumerate(
             index["entries"],
             start=1,
@@ -397,6 +399,8 @@ class ContentAddressedTrialRegistry:
                 raise StrategyRegistryIntegrityError(
                     "STRATEGY_REGISTRY_RECORD_CORRUPT"
                 )
+            strategy_dna_hashes.add(str(record["strategy_dna_hash"]))
+            data_fingerprints.add(str(record["data_fingerprint"]))
             previous_hash = record_hash
         if previous_hash != index.get("root_hash"):
             raise StrategyRegistryIntegrityError(
@@ -409,7 +413,14 @@ class ContentAddressedTrialRegistry:
         return {
             "status": "PASSED",
             "campaign_id": self.campaign_id,
+            # Backward-compatible name: a trial record is one immutable
+            # strategy-DNA evaluation on one specific data epoch.
             "unique_trial_count": len(seen),
+            "unique_epoch_record_count": len(seen),
+            "unique_strategy_dna_count": len(strategy_dna_hashes),
+            "unique_data_fingerprint_count": len(data_fingerprints),
+            "strategy_dna_hashes": sorted(strategy_dna_hashes),
+            "data_fingerprints": sorted(data_fingerprints),
             "root_hash": previous_hash,
             "index_path": str(self.index_path),
             "orders_generated": 0,

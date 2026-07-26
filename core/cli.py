@@ -4976,6 +4976,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                     "registered_unique_plateau_trials"
                 ]
             ),
+            "registered_epoch_records": absolute_momentum_plateau[
+                "registered_epoch_records"
+            ],
             "total_known_trials": absolute_momentum_plateau[
                 "total_known_trials"
             ],
@@ -5008,6 +5011,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             "registered_unique_trials": volatility_contraction[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": volatility_contraction[
+                "registered_epoch_records"
+            ],
             "total_known_trials": volatility_contraction[
                 "total_known_trials"
             ],
@@ -5036,6 +5042,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             ],
             "registered_unique_trials": multi_alpha_ensemble[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": multi_alpha_ensemble[
+                "registered_epoch_records"
             ],
             "total_known_trials": multi_alpha_ensemble[
                 "total_known_trials"
@@ -5070,6 +5079,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             "registered_unique_trials": trend_pullback[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": trend_pullback[
+                "registered_epoch_records"
+            ],
             "total_known_trials": trend_pullback[
                 "total_known_trials"
             ],
@@ -5096,6 +5108,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             ],
             "registered_unique_trials": range_expansion_4h[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": range_expansion_4h[
+                "registered_epoch_records"
             ],
             "total_known_trials": range_expansion_4h[
                 "total_known_trials"
@@ -5126,6 +5141,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             "registered_unique_trials": sentiment_recovery[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": sentiment_recovery[
+                "registered_epoch_records"
+            ],
             "total_known_trials": sentiment_recovery[
                 "total_known_trials"
             ],
@@ -5155,6 +5173,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             "registered_unique_trials": residual_momentum[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": residual_momentum[
+                "registered_epoch_records"
+            ],
             "total_known_trials": residual_momentum[
                 "total_known_trials"
             ],
@@ -5183,6 +5204,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
             ],
             "registered_unique_trials": dual_asset_trend[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": dual_asset_trend[
+                "registered_epoch_records"
             ],
             "total_known_trials": dual_asset_trend[
                 "total_known_trials"
@@ -8248,7 +8272,7 @@ def _run_absolute_momentum_plateau_campaign(
     )
     total_known_trials = (
         base_known_trials
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -8573,7 +8597,10 @@ def _run_absolute_momentum_plateau_campaign(
         "generated_trial_count": len(candidates),
         "base_known_trials": base_known_trials,
         "registered_unique_plateau_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "total_known_trials": total_known_trials,
         "plateau_eligible_count": int(
@@ -8645,6 +8672,9 @@ def _run_absolute_momentum_plateau_campaign(
         "generated_trial_count": len(candidates),
         "registered_unique_plateau_trials": payload[
             "registered_unique_plateau_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "plateau_eligible_count": payload[
@@ -8896,7 +8926,7 @@ def _run_volatility_contraction_campaign(
     )
     total_known_trials = (
         base_known_trials
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -9175,7 +9205,10 @@ def _run_volatility_contraction_campaign(
         },
         "generated_trial_count": len(candidates),
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": base_known_trials,
         "total_known_trials": total_known_trials,
@@ -9257,6 +9290,9 @@ def _run_volatility_contraction_campaign(
         "generated_trial_count": len(candidates),
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": primary_name,
@@ -9503,7 +9539,7 @@ def _run_trend_pullback_campaign(
     )
     total_known_trials = (
         base_known_trials
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -9770,7 +9806,10 @@ def _run_trend_pullback_campaign(
         },
         "generated_trial_count": len(candidates),
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": base_known_trials,
         "total_known_trials": total_known_trials,
@@ -9842,6 +9881,9 @@ def _run_trend_pullback_campaign(
         "generated_trial_count": len(candidates),
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": primary_name,
@@ -10109,7 +10151,7 @@ def _run_range_expansion_4h_campaign(
     )
     total_known_trials = (
         base_known_trials
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -10397,7 +10439,10 @@ def _run_range_expansion_4h_campaign(
         },
         "generated_trial_count": len(candidates),
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": base_known_trials,
         "total_known_trials": total_known_trials,
@@ -10478,6 +10523,9 @@ def _run_range_expansion_4h_campaign(
         "generated_trial_count": len(candidates),
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": primary_name,
@@ -10769,7 +10817,7 @@ def _run_multi_alpha_ensemble_campaign(
     )
     total_known_trials = (
         base_known_trials
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     matrix = pd.DataFrame(
         {"MULTI_ALPHA_FIXED_V1": development_returns}
@@ -11049,7 +11097,10 @@ def _run_multi_alpha_ensemble_campaign(
         },
         "generated_trial_count": 1,
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": base_known_trials,
         "total_known_trials": total_known_trials,
@@ -11123,6 +11174,9 @@ def _run_multi_alpha_ensemble_campaign(
         "generated_trial_count": 1,
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",

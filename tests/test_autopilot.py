@@ -352,6 +352,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "ABSOLUTE_MOMENTUM_PLATEAU_V1",
             "generated_trial_count": 117,
             "registered_unique_plateau_trials": 117,
+            "registered_epoch_records": 234,
             "total_known_trials": 16_832,
             "plateau_eligible_count": 81,
             "standard_pbo": 0.4857142857142857,
@@ -370,6 +371,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "VOLATILITY_CONTRACTION_V1",
             "generated_trial_count": 16,
             "registered_unique_trials": 16,
+            "registered_epoch_records": 32,
             "total_known_trials": 16_848,
             "primary_strategy_id": (
                 "VCB_V20_Q20_E55_X20_T10"
@@ -391,6 +393,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "MULTI_ALPHA_ENSEMBLE_V1",
             "generated_trial_count": 1,
             "registered_unique_trials": 1,
+            "registered_epoch_records": 2,
             "total_known_trials": 16_849,
             "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
             "economic_pass": False,
@@ -410,6 +413,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "TREND_PULLBACK_V1",
             "generated_trial_count": 12,
             "registered_unique_trials": 12,
+            "registered_epoch_records": 24,
             "total_known_trials": 16_861,
             "primary_strategy_id": "TP_Z20_E15_EMA100",
             "pbo": 0.5571428571428572,
@@ -429,6 +433,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "RANGE_EXPANSION_4H_V1_1",
             "generated_trial_count": 16,
             "registered_unique_trials": 16,
+            "registered_epoch_records": 32,
             "total_known_trials": 16_877,
             "primary_strategy_id": (
                 "RE4H_E60_X30_R15_V15_EMA600"
@@ -450,6 +455,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "SENTIMENT_RECOVERY_V1",
             "generated_trial_count": 8,
             "registered_unique_trials": 8,
+            "registered_epoch_records": 16,
             "total_known_trials": 21_320,
             "primary_strategy_id": "SR_F20_D5_EMA100",
             "pbo": 0.25,
@@ -469,6 +475,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "RESIDUAL_MOMENTUM_V1",
             "generated_trial_count": 8,
             "registered_unique_trials": 8,
+            "registered_epoch_records": 16,
             "total_known_trials": 21_328,
             "primary_strategy_id": "RM_R60_B180_EMA200",
             "pbo": 0.42857142857142855,
@@ -488,6 +495,7 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "campaign": "DUAL_ASSET_TREND_V1",
             "generated_trial_count": 1,
             "registered_unique_trials": 1,
+            "registered_epoch_records": 2,
             "total_known_trials": 21_329,
             "primary_strategy_id": "DAT_EMA200_COV60_VOL15",
             "pbo": None,

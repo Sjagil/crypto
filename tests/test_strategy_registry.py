@@ -102,6 +102,35 @@ def test_registry_is_content_addressed_idempotent_and_auditable(
     assert first["trial_id"] == second["trial_id"]
     assert audit["status"] == "PASSED"
     assert audit["unique_trial_count"] == 1
+    assert audit["unique_epoch_record_count"] == 1
+    assert audit["unique_strategy_dna_count"] == 1
+    assert audit["unique_data_fingerprint_count"] == 1
+
+
+def test_registry_separates_strategy_dna_from_data_epochs(tmp_path) -> None:
+    registry = ContentAddressedTrialRegistry(
+        tmp_path,
+        campaign_id="PLATEAU_V1",
+    )
+    shared = {
+        "strategy_family": "absolute_momentum",
+        "strategy_dna_hash": "dna",
+        "parameters": {"windows": (20, 60, 120)},
+        "metrics_at_birth": {"development_sharpe": 1.0},
+        "return_path_hash": "returns",
+        "selection_metadata": {"plateau_eligible": True},
+    }
+
+    registry.register(data_fingerprint="epoch-one", **shared)
+    registry.register(data_fingerprint="epoch-two", **shared)
+    audit = registry.audit()
+
+    assert audit["unique_trial_count"] == 2
+    assert audit["unique_epoch_record_count"] == 2
+    assert audit["unique_strategy_dna_count"] == 1
+    assert audit["unique_data_fingerprint_count"] == 2
+    assert audit["strategy_dna_hashes"] == ["dna"]
+    assert audit["data_fingerprints"] == ["epoch-one", "epoch-two"]
 
 
 def test_registry_rejects_record_and_chain_revision(tmp_path) -> None:

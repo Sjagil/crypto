@@ -692,7 +692,10 @@ volatility-lookback and volatility-budget trials, evaluates the complete
 Gaussian N±2 horizon neighbourhood, and selects only on development data.
 Every trial is written once to a content-addressed, hash-chained registry under
 `output/lab/strategy_registry/absolute_momentum_plateau_v1/`. Repeating the
-same data and DNA is idempotent; changed data creates a new trial identity.
+same data and DNA is idempotent; changed data creates a new immutable
+data-epoch record for the same strategy DNA. Strategy-DNA counts determine the
+multiple-testing denominator. Data-epoch records are reported separately and
+never inflate that denominator.
 Plateau smoothing is a robustness diagnostic, never a way to override DSR,
 White Reality Check, Hansen SPA, standard PBO, plateau-selection PBO or the
 untouched-forward requirement. The campaign is orderless, uses at most 20%
@@ -808,6 +811,9 @@ explicitly not applicable to a single fixed DNA, but that is not recorded as a
 pass. Because the simple benchmark was already observed before this policy was
 declared, only genuine forward evidence can resolve its discovery
 contamination. The orderless observer starts at 0/365 days.
+This family contributes exactly one strategy trial to the cumulative
+21,329-trial denominator; repeated evaluation on later data epochs remains
+separately hash-chained without becoming a new strategy trial.
 
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable

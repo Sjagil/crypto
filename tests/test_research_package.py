@@ -253,6 +253,7 @@ def test_acceptance_summary_includes_fail_closed_plateau_campaign() -> None:
         "engine_version": "1.0.0",
         "generated_trial_count": 117,
         "registered_unique_plateau_trials": 117,
+        "registered_epoch_records": 234,
         "total_known_trials": 16_832,
         "plateau_eligible_count": 81,
         "primary_strategy_id": "AMPS_P01_V90_T04",
@@ -262,7 +263,9 @@ def test_acceptance_summary_includes_fail_closed_plateau_campaign() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 117,
+            "unique_trial_count": 234,
+            "unique_epoch_record_count": 234,
+            "unique_strategy_dna_count": 117,
         },
         "primary_result": {
             "gates": {
@@ -297,6 +300,7 @@ def test_acceptance_summary_includes_rejected_contraction_family() -> None:
         "engine_version": "1.0.0",
         "generated_trial_count": 16,
         "registered_unique_trials": 16,
+        "registered_epoch_records": 32,
         "total_known_trials": 16_848,
         "primary_strategy_id": "VCB_V20_Q20_E55_X20_T10",
         "multiple_testing": {
@@ -304,7 +308,9 @@ def test_acceptance_summary_includes_rejected_contraction_family() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 16,
+            "unique_trial_count": 32,
+            "unique_epoch_record_count": 32,
+            "unique_strategy_dna_count": 16,
         },
         "primary_result": {
             "gates": {
@@ -340,6 +346,7 @@ def test_acceptance_summary_includes_rejected_multi_alpha_ensemble() -> None:
         "engine_version": "1.0.0",
         "generated_trial_count": 1,
         "registered_unique_trials": 1,
+        "registered_epoch_records": 2,
         "total_known_trials": 16_849,
         "primary_strategy_id": "MULTI_ALPHA_FIXED_V1",
         "multiple_testing": {
@@ -347,7 +354,9 @@ def test_acceptance_summary_includes_rejected_multi_alpha_ensemble() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 1,
+            "unique_trial_count": 2,
+            "unique_epoch_record_count": 2,
+            "unique_strategy_dna_count": 1,
         },
         "primary_result": {
             "gates": {
@@ -383,6 +392,7 @@ def test_acceptance_summary_includes_rejected_trend_pullback() -> None:
         "engine_version": "1.0.0",
         "generated_trial_count": 12,
         "registered_unique_trials": 12,
+        "registered_epoch_records": 24,
         "total_known_trials": 16_861,
         "primary_strategy_id": "TP_Z20_E15_EMA100",
         "multiple_testing": {
@@ -390,7 +400,9 @@ def test_acceptance_summary_includes_rejected_trend_pullback() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 12,
+            "unique_trial_count": 24,
+            "unique_epoch_record_count": 24,
+            "unique_strategy_dna_count": 12,
         },
         "primary_result": {
             "gates": {
@@ -426,6 +438,7 @@ def test_acceptance_summary_includes_rejected_4h_range_expansion() -> None:
         "periods_per_day": 6,
         "generated_trial_count": 16,
         "registered_unique_trials": 16,
+        "registered_epoch_records": 32,
         "total_known_trials": 16_877,
         "primary_strategy_id": (
             "RE4H_E60_X30_R15_V15_EMA600"
@@ -435,7 +448,9 @@ def test_acceptance_summary_includes_rejected_4h_range_expansion() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 16,
+            "unique_trial_count": 32,
+            "unique_epoch_record_count": 32,
+            "unique_strategy_dna_count": 16,
         },
         "primary_result": {
             "gates": {
@@ -478,6 +493,7 @@ def test_acceptance_summary_includes_rejected_sentiment_recovery() -> None:
         "timeframe": "1d",
         "generated_trial_count": 8,
         "registered_unique_trials": 8,
+        "registered_epoch_records": 16,
         "total_known_trials": 21_320,
         "primary_strategy_id": "SR_F20_D5_EMA100",
         "multiple_testing": {
@@ -485,7 +501,9 @@ def test_acceptance_summary_includes_rejected_sentiment_recovery() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 8,
+            "unique_trial_count": 16,
+            "unique_epoch_record_count": 16,
+            "unique_strategy_dna_count": 8,
         },
         "primary_result": {
             "gates": {
@@ -546,6 +564,7 @@ def test_acceptance_summary_includes_rejected_residual_momentum() -> None:
         "timeframe": "1d",
         "generated_trial_count": 8,
         "registered_unique_trials": 8,
+        "registered_epoch_records": 16,
         "total_known_trials": 21_328,
         "primary_strategy_id": "RM_R60_B180_EMA200",
         "multiple_testing": {
@@ -553,7 +572,9 @@ def test_acceptance_summary_includes_rejected_residual_momentum() -> None:
         },
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 8,
+            "unique_trial_count": 16,
+            "unique_epoch_record_count": 16,
+            "unique_strategy_dna_count": 8,
         },
         "primary_result": {
             "gates": {
@@ -612,6 +633,7 @@ def test_acceptance_summary_includes_discovery_informed_dual_trend() -> None:
         "timeframe": "1d",
         "generated_trial_count": 1,
         "registered_unique_trials": 1,
+        "registered_epoch_records": 2,
         "total_known_trials": 21_329,
         "primary_strategy_id": "DAT_EMA200_COV60_VOL15",
         "multiple_testing": {
@@ -622,7 +644,9 @@ def test_acceptance_summary_includes_discovery_informed_dual_trend() -> None:
         ),
         "trial_registry": {
             "status": "PASSED",
-            "unique_trial_count": 1,
+            "unique_trial_count": 2,
+            "unique_epoch_record_count": 2,
+            "unique_strategy_dna_count": 1,
         },
         "selection_integrity": {
             "discovery_informed": True,
@@ -676,8 +700,11 @@ def test_acceptance_summary_rejects_dual_trend_without_provenance() -> None:
         "trial_registry": {
             "status": "PASSED",
             "unique_trial_count": 1,
+            "unique_epoch_record_count": 1,
+            "unique_strategy_dna_count": 1,
         },
         "registered_unique_trials": 1,
+        "registered_epoch_records": 1,
         "primary_result": {
             "gates": {
                 "stochastic_validation": {"passed": False},

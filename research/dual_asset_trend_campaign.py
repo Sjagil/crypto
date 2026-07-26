@@ -452,7 +452,7 @@ def run_dual_asset_trend_campaign(
     registry_audit = registry.audit()
     total_known_trials = (
         DUAL_ASSET_TREND_BASE_KNOWN_TRIALS
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     matrix = development_returns.to_frame(
         name=DUAL_ASSET_TREND_POLICY_NAME
@@ -747,7 +747,10 @@ def run_dual_asset_trend_campaign(
         },
         "generated_trial_count": 1,
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": DUAL_ASSET_TREND_BASE_KNOWN_TRIALS,
         "total_known_trials": total_known_trials,
@@ -818,6 +821,9 @@ def run_dual_asset_trend_campaign(
         "generated_trial_count": 1,
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": DUAL_ASSET_TREND_POLICY_NAME,

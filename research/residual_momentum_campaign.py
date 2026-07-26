@@ -495,7 +495,7 @@ def run_residual_momentum_campaign(
     registry_audit = registry.audit()
     total_known_trials = (
         RESIDUAL_MOMENTUM_BASE_KNOWN_TRIALS
-        + int(registry_audit["unique_trial_count"])
+        + int(registry_audit["unique_strategy_dna_count"])
     )
     multiple = multiple_testing_bootstrap(
         matrix,
@@ -786,7 +786,10 @@ def run_residual_momentum_campaign(
         },
         "generated_trial_count": len(candidates),
         "registered_unique_trials": int(
-            registry_audit["unique_trial_count"]
+            registry_audit["unique_strategy_dna_count"]
+        ),
+        "registered_epoch_records": int(
+            registry_audit["unique_epoch_record_count"]
         ),
         "base_known_trials": RESIDUAL_MOMENTUM_BASE_KNOWN_TRIALS,
         "total_known_trials": total_known_trials,
@@ -862,6 +865,9 @@ def run_residual_momentum_campaign(
         "generated_trial_count": len(candidates),
         "registered_unique_trials": payload[
             "registered_unique_trials"
+        ],
+        "registered_epoch_records": payload[
+            "registered_epoch_records"
         ],
         "total_known_trials": total_known_trials,
         "primary_strategy_id": primary_name,

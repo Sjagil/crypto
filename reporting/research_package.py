@@ -123,6 +123,33 @@ def build_acceptance_summary(
                 f"{label} rows lack formal Monte Carlo/Dirichlet evidence: {missing}"
             )
 
+    def require_registry_accounting(
+        label: str,
+        artifact: dict[str, Any],
+        *,
+        strategy_count_field: str = "registered_unique_trials",
+    ) -> None:
+        registry = artifact.get("trial_registry") or {}
+        if registry.get("status") != "PASSED":
+            raise ValueError(f"{label} registry audit failed")
+        strategy_count = int(
+            registry.get("unique_strategy_dna_count") or 0
+        )
+        epoch_count = int(
+            registry.get("unique_epoch_record_count") or 0
+        )
+        legacy_epoch_count = int(
+            registry.get("unique_trial_count") or 0
+        )
+        if strategy_count != int(artifact.get(strategy_count_field) or 0):
+            raise ValueError(f"{label} strategy-DNA count mismatch")
+        if epoch_count != int(
+            artifact.get("registered_epoch_records") or 0
+        ):
+            raise ValueError(f"{label} data-epoch record count mismatch")
+        if legacy_epoch_count != epoch_count or epoch_count < strategy_count:
+            raise ValueError(f"{label} registry count semantics invalid")
+
     identity = str(lead["immutable_identity"])
     dna_hash = str(lead["strategy_dna_hash"])
     if lead.get("status") != "FROZEN_RESEARCH_LEAD":
@@ -210,20 +237,11 @@ def build_acceptance_summary(
             raise ValueError(
                 "absolute momentum plateau campaign contains live permission"
             )
-        registry = absolute_momentum_plateau.get("trial_registry") or {}
-        if registry.get("status") != "PASSED":
-            raise ValueError(
-                "absolute momentum plateau registry audit failed"
-            )
-        if int(registry.get("unique_trial_count") or 0) != int(
-            absolute_momentum_plateau.get(
-                "registered_unique_plateau_trials"
-            )
-            or 0
-        ):
-            raise ValueError(
-                "absolute momentum plateau trial count mismatch"
-            )
+        require_registry_accounting(
+            "absolute momentum plateau",
+            absolute_momentum_plateau,
+            strategy_count_field="registered_unique_plateau_trials",
+        )
         primary = absolute_momentum_plateau.get("primary_result")
         if not isinstance(primary, dict):
             raise ValueError(
@@ -252,24 +270,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "volatility contraction campaign contains live permission"
             )
-        contraction_registry = (
-            volatility_contraction.get("trial_registry") or {}
+        require_registry_accounting(
+            "volatility contraction",
+            volatility_contraction,
         )
-        if contraction_registry.get("status") != "PASSED":
-            raise ValueError(
-                "volatility contraction registry audit failed"
-            )
-        if int(
-            contraction_registry.get("unique_trial_count") or 0
-        ) != int(
-            volatility_contraction.get(
-                "registered_unique_trials"
-            )
-            or 0
-        ):
-            raise ValueError(
-                "volatility contraction trial count mismatch"
-            )
         contraction_primary = volatility_contraction.get(
             "primary_result"
         )
@@ -298,17 +302,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "multi-alpha ensemble campaign contains live permission"
             )
-        ensemble_registry = multi_alpha_ensemble.get("trial_registry") or {}
-        if ensemble_registry.get("status") != "PASSED":
-            raise ValueError(
-                "multi-alpha ensemble registry audit failed"
-            )
-        if int(ensemble_registry.get("unique_trial_count") or 0) != int(
-            multi_alpha_ensemble.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "multi-alpha ensemble trial count mismatch"
-            )
+        require_registry_accounting(
+            "multi-alpha ensemble",
+            multi_alpha_ensemble,
+        )
         ensemble_primary = multi_alpha_ensemble.get("primary_result")
         if not isinstance(ensemble_primary, dict):
             raise ValueError(
@@ -332,17 +329,7 @@ def build_acceptance_summary(
             raise ValueError(
                 "trend pullback campaign contains live permission"
             )
-        pullback_registry = trend_pullback.get("trial_registry") or {}
-        if pullback_registry.get("status") != "PASSED":
-            raise ValueError(
-                "trend pullback registry audit failed"
-            )
-        if int(pullback_registry.get("unique_trial_count") or 0) != int(
-            trend_pullback.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "trend pullback trial count mismatch"
-            )
+        require_registry_accounting("trend pullback", trend_pullback)
         pullback_primary = trend_pullback.get("primary_result")
         if not isinstance(pullback_primary, dict):
             raise ValueError(
@@ -369,17 +356,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "4h range-expansion campaign contains live permission"
             )
-        range_registry = range_expansion_4h.get("trial_registry") or {}
-        if range_registry.get("status") != "PASSED":
-            raise ValueError(
-                "4h range-expansion registry audit failed"
-            )
-        if int(range_registry.get("unique_trial_count") or 0) != int(
-            range_expansion_4h.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "4h range-expansion trial count mismatch"
-            )
+        require_registry_accounting(
+            "4h range expansion",
+            range_expansion_4h,
+        )
         range_primary = range_expansion_4h.get("primary_result")
         if not isinstance(range_primary, dict):
             raise ValueError(
@@ -406,21 +386,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "sentiment recovery campaign contains live permission"
             )
-        sentiment_registry = (
-            sentiment_recovery.get("trial_registry") or {}
+        require_registry_accounting(
+            "sentiment recovery",
+            sentiment_recovery,
         )
-        if sentiment_registry.get("status") != "PASSED":
-            raise ValueError(
-                "sentiment recovery registry audit failed"
-            )
-        if int(
-            sentiment_registry.get("unique_trial_count") or 0
-        ) != int(
-            sentiment_recovery.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "sentiment recovery trial count mismatch"
-            )
         sentiment_primary = sentiment_recovery.get(
             "primary_result"
         )
@@ -449,21 +418,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "residual momentum campaign contains live permission"
             )
-        residual_registry = (
-            residual_momentum.get("trial_registry") or {}
+        require_registry_accounting(
+            "residual momentum",
+            residual_momentum,
         )
-        if residual_registry.get("status") != "PASSED":
-            raise ValueError(
-                "residual momentum registry audit failed"
-            )
-        if int(
-            residual_registry.get("unique_trial_count") or 0
-        ) != int(
-            residual_momentum.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "residual momentum trial count mismatch"
-            )
         residual_primary = residual_momentum.get("primary_result")
         if not isinstance(residual_primary, dict):
             raise ValueError(
@@ -490,17 +448,10 @@ def build_acceptance_summary(
             raise ValueError(
                 "dual-asset trend campaign contains live permission"
             )
-        dual_registry = dual_asset_trend.get("trial_registry") or {}
-        if dual_registry.get("status") != "PASSED":
-            raise ValueError(
-                "dual-asset trend registry audit failed"
-            )
-        if int(dual_registry.get("unique_trial_count") or 0) != int(
-            dual_asset_trend.get("registered_unique_trials") or 0
-        ):
-            raise ValueError(
-                "dual-asset trend trial count mismatch"
-            )
+        require_registry_accounting(
+            "dual-asset trend",
+            dual_asset_trend,
+        )
         dual_primary = dual_asset_trend.get("primary_result")
         if not isinstance(dual_primary, dict):
             raise ValueError(
@@ -798,6 +749,9 @@ def build_acceptance_summary(
                     "registered_unique_plateau_trials"
                 ]
             ),
+            "registered_epoch_records": absolute_momentum_plateau[
+                "registered_epoch_records"
+            ],
             "total_known_trials": absolute_momentum_plateau[
                 "total_known_trials"
             ],
@@ -838,6 +792,9 @@ def build_acceptance_summary(
                     "registered_unique_trials"
                 ]
             ),
+            "registered_epoch_records": volatility_contraction[
+                "registered_epoch_records"
+            ],
             "total_known_trials": volatility_contraction[
                 "total_known_trials"
             ],
@@ -871,6 +828,9 @@ def build_acceptance_summary(
             "registered_unique_trials": multi_alpha_ensemble[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": multi_alpha_ensemble[
+                "registered_epoch_records"
+            ],
             "total_known_trials": multi_alpha_ensemble[
                 "total_known_trials"
             ],
@@ -901,6 +861,9 @@ def build_acceptance_summary(
             "registered_unique_trials": trend_pullback[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": trend_pullback[
+                "registered_epoch_records"
+            ],
             "total_known_trials": trend_pullback[
                 "total_known_trials"
             ],
@@ -929,6 +892,9 @@ def build_acceptance_summary(
             ],
             "registered_unique_trials": range_expansion_4h[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": range_expansion_4h[
+                "registered_epoch_records"
             ],
             "total_known_trials": range_expansion_4h[
                 "total_known_trials"
@@ -962,6 +928,9 @@ def build_acceptance_summary(
             ],
             "registered_unique_trials": sentiment_recovery[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": sentiment_recovery[
+                "registered_epoch_records"
             ],
             "total_known_trials": sentiment_recovery[
                 "total_known_trials"
@@ -1005,6 +974,9 @@ def build_acceptance_summary(
             "registered_unique_trials": residual_momentum[
                 "registered_unique_trials"
             ],
+            "registered_epoch_records": residual_momentum[
+                "registered_epoch_records"
+            ],
             "total_known_trials": residual_momentum[
                 "total_known_trials"
             ],
@@ -1038,6 +1010,9 @@ def build_acceptance_summary(
             ],
             "registered_unique_trials": dual_asset_trend[
                 "registered_unique_trials"
+            ],
+            "registered_epoch_records": dual_asset_trend[
+                "registered_epoch_records"
             ],
             "total_known_trials": dual_asset_trend[
                 "total_known_trials"
