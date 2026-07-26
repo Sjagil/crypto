@@ -791,6 +791,24 @@ the simpler BTC/ETH trend benchmark. All eight trials remain in the immutable
 21,328-trial denominator; its 0/365-day observer is orderless and cannot
 promote.
 
+`python main.py lab campaign run --name dual-asset-trend-v1 --yes` evaluates
+one fixed, discovery-informed BTC/ETH strategy rather than selecting another
+historical winner. BTC and ETH require EMA200 trends; a backward-only 60-day
+full covariance matrix scales equal active-asset weights toward 15% annualized
+volatility. Entries rebalance after the Sunday close, daily trend exits execute
+at the next open, and exposure remains capped at 40% total and 20% per asset.
+
+The fixed `DAT_EMA200_COV60_VOL15` path returned 86.3% with 9.5% CAGR, 0.87
+Sharpe, 14.8% average exposure and 213 rebalances. Development, validation,
+confirmation and their double-cost counterparts were all positive. DSR
+(0.987), White Reality Check (0.018) and Hansen SPA (0.018) passed. It still
+failed the 20% drawdown limit at 22.2%, validation PF at 1.136, both stochastic
+gates and the uncontaminated-selection/untouched-holdout gates. PBO is
+explicitly not applicable to a single fixed DNA, but that is not recorded as a
+pass. Because the simple benchmark was already observed before this policy was
+declared, only genuine forward evidence can resolve its discovery
+contamination. The orderless observer starts at 0/365 days.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

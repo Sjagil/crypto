@@ -95,6 +95,7 @@ def build_acceptance_summary(
     range_expansion_4h: dict[str, Any] | None = None,
     sentiment_recovery: dict[str, Any] | None = None,
     residual_momentum: dict[str, Any] | None = None,
+    dual_asset_trend: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -473,6 +474,51 @@ def build_acceptance_summary(
             [residual_primary],
             container="gates",
         )
+    if dual_asset_trend is not None:
+        if (
+            dual_asset_trend.get("campaign")
+            != "DUAL_ASSET_TREND_V1"
+        ):
+            raise ValueError(
+                "dual-asset trend campaign identity mismatch"
+            )
+        if int(dual_asset_trend.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "dual-asset trend campaign contains orders"
+            )
+        if bool(dual_asset_trend.get("live_ready", False)):
+            raise ValueError(
+                "dual-asset trend campaign contains live permission"
+            )
+        dual_registry = dual_asset_trend.get("trial_registry") or {}
+        if dual_registry.get("status") != "PASSED":
+            raise ValueError(
+                "dual-asset trend registry audit failed"
+            )
+        if int(dual_registry.get("unique_trial_count") or 0) != int(
+            dual_asset_trend.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "dual-asset trend trial count mismatch"
+            )
+        dual_primary = dual_asset_trend.get("primary_result")
+        if not isinstance(dual_primary, dict):
+            raise ValueError(
+                "dual-asset trend primary result missing"
+            )
+        require_stochastic_validation(
+            "dual-asset trend",
+            [dual_primary],
+            container="gates",
+        )
+        if not bool(
+            dual_asset_trend.get("selection_integrity", {}).get(
+                "discovery_informed"
+            )
+        ):
+            raise ValueError(
+                "dual-asset trend discovery provenance missing"
+            )
     if portfolio_storm is not None:
         if portfolio_storm.get("status") != "COMPLETED_NOT_PROMOTED":
             raise ValueError("portfolio storm is incomplete")
@@ -981,6 +1027,44 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if dual_asset_trend is not None:
+        summary["dual_asset_trend"] = {
+            "status": dual_asset_trend["status"],
+            "campaign": dual_asset_trend["campaign"],
+            "engine_version": dual_asset_trend["engine_version"],
+            "timeframe": dual_asset_trend["timeframe"],
+            "generated_trial_count": dual_asset_trend[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": dual_asset_trend[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": dual_asset_trend[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": dual_asset_trend[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": dual_asset_trend[
+                "multiple_testing"
+            ],
+            "pbo_policy": dual_asset_trend["pbo_policy"],
+            "trial_registry": dual_asset_trend["trial_registry"],
+            "primary_result": dual_asset_trend["primary_result"],
+            "risk_policy": dual_asset_trend["risk_policy"],
+            "discovery_governance": dual_asset_trend[
+                "discovery_governance"
+            ],
+            "forward_requirement": dual_asset_trend[
+                "forward_requirement"
+            ],
+            "holdout_status": dual_asset_trend[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -1185,6 +1269,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "residual_momentum_plan_v1.json": (
             reports / "residual_momentum_plan_v1.json"
         ),
+        "dual_asset_trend_campaign_v1.json": (
+            reports / "dual_asset_trend_campaign_v1.json"
+        ),
+        "dual_asset_trend_campaign_v1.csv": (
+            reports / "dual_asset_trend_campaign_v1.csv"
+        ),
+        "dual_asset_trend_plan_v1.json": (
+            reports / "dual_asset_trend_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1373,6 +1466,27 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (residual_registry_directory / "records").glob("*.json")
     ):
         paths[f"residual_momentum_trial_{record.name}"] = record
+    dual_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "dual_asset_trend_v1"
+    )
+    for observer in sorted(dual_observer_directory.glob("*.json")):
+        paths[f"dual_asset_trend_observer_{observer.name}"] = (
+            observer
+        )
+    dual_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "dual_asset_trend_v1"
+    )
+    paths["dual_asset_trend_registry_index.json"] = (
+        dual_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (dual_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"dual_asset_trend_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1480,6 +1594,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         ],
         residual_momentum=payloads[
             "residual_momentum_campaign_v1.json"
+        ],
+        dual_asset_trend=payloads[
+            "dual_asset_trend_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],

@@ -480,6 +480,26 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_dual_asset_trend_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "DUAL_ASSET_TREND_V1",
+            "generated_trial_count": 1,
+            "registered_unique_trials": 1,
+            "total_known_trials": 21_329,
+            "primary_strategy_id": "DAT_EMA200_COV60_VOL15",
+            "pbo": None,
+            "pbo_applicable": False,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -548,6 +568,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_residual_momentum_campaign"
     ]["statistical_pass"]
+    assert (
+        result["parallel_dual_asset_trend_campaign"][
+            "total_known_trials"
+        ]
+        == 21_329
+    )
+    assert not result[
+        "parallel_dual_asset_trend_campaign"
+    ]["pbo_applicable"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

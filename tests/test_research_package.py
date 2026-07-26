@@ -601,3 +601,92 @@ def test_acceptance_summary_rejects_residual_order_generation() -> None:
 
     with pytest.raises(ValueError, match="contains orders"):
         build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_includes_discovery_informed_dual_trend() -> None:
+    values = _inputs()
+    values["dual_asset_trend"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "DUAL_ASSET_TREND_V1",
+        "engine_version": "1.0.0",
+        "timeframe": "1d",
+        "generated_trial_count": 1,
+        "registered_unique_trials": 1,
+        "total_known_trials": 21_329,
+        "primary_strategy_id": "DAT_EMA200_COV60_VOL15",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": None,
+        },
+        "pbo_policy": (
+            "NOT_APPLICABLE_SINGLE_FIXED_DNA_NO_WITHIN_FAMILY_SELECTION"
+        ),
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 1,
+        },
+        "selection_integrity": {
+            "discovery_informed": True,
+            "historical_selection_uncontaminated": False,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "risk_policy": {
+            "risk_model": "FULL_ROLLING_COVARIANCE",
+            "target_annualized_volatility": 0.15,
+        },
+        "discovery_governance": {
+            "discovery_informed": True,
+            "historical_selection_uncontaminated": False,
+        },
+        "forward_requirement": {
+            "minimum_closed_daily_observations": 365,
+            "minimum_rebalances": 30,
+        },
+        "holdout_status": (
+            "NO_GLOBALLY_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    dual = summary["dual_asset_trend"]
+    assert dual["registered_unique_trials"] == 1
+    assert dual["total_known_trials"] == 21_329
+    assert dual["discovery_governance"][
+        "historical_selection_uncontaminated"
+    ] is False
+    assert dual["orders_generated"] == 0
+    assert dual["live_ready"] is False
+
+
+def test_acceptance_summary_rejects_dual_trend_without_provenance() -> None:
+    values = _inputs()
+    values["dual_asset_trend"] = {
+        "campaign": "DUAL_ASSET_TREND_V1",
+        "orders_generated": 0,
+        "live_ready": False,
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 1,
+        },
+        "registered_unique_trials": 1,
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+            },
+        },
+        "selection_integrity": {
+            "discovery_informed": False,
+        },
+    }
+
+    with pytest.raises(ValueError, match="provenance missing"):
+        build_acceptance_summary(**values)
