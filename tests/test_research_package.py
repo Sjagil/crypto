@@ -133,6 +133,21 @@ def test_acceptance_summary_keeps_positive_research_fail_closed() -> None:
     assert not summary["promotion"]["live_ready"]
 
 
+def test_acceptance_summary_does_not_label_failed_economics_as_pass() -> None:
+    values = _inputs()
+    values["institutional_audit"]["economic_gates_passed"] = False
+    values["institutional_audit"]["status"] = (
+        "STRICT_ALLOWED_POLICY_NOT_QUALIFIED"
+    )
+    summary = build_acceptance_summary(**values)
+    assert summary["status"] == "RESEARCH_PROMOTION_BLOCKED"
+    assert "economic" in summary["failed_gate_groups"]
+    assert not summary["validation"]["economic_gates_passed"]
+    assert not summary["promotion"]["shadow_candidate"]
+    assert not summary["promotion"]["paper_candidate_permitted"]
+    assert not summary["promotion"]["live_ready"]
+
+
 def test_acceptance_summary_includes_global_trial_accounting() -> None:
     values = _inputs()
     values["global_trial_accounting"] = {

@@ -527,7 +527,23 @@ cash, and at least 90 real daily observations before an asset can rank. Reports
 separate scheduled rebalances, changed portfolios, buy/sell fills, holding
 episodes, weekly effective sample size, daily/weekly returns, and asset-trade,
 closed-position, portfolio-period and rebalance-episode profit factors. Exact
-asset PnL attribution is reconciled to final equity.
+asset PnL attribution is reconciled to final equity. The audit also rebuilds
+all 160 original family paths and reports DSR for daily raw, daily HAC, weekly
+raw and weekly ESS samples while retaining all 1,240 known trials. PBO is
+reported both by nominal DNA and by exact unique return path with midrank tie
+handling. The formal value is always the worst valid result.
+
+The economic comparison uses the strategy's actual time-varying daily
+exposure, a point-in-time equal-weight allowed universe and the same calendar
+and costs. Validation, confirmation and double-cost confirmation each require
+a positive paired block-bootstrap lower bound. PnL concentration is reported
+by asset, year, causal BTC/volatility/breadth regime and top-five position
+episodes. These diagnostics cannot be used to select a new threshold
+retroactively.
+
+```bash
+python main.py lab campaign audit --name cross-sectional-ensemble
+```
 
 `institutional-rotation-v2` is a separate 48-combination continuation family;
 it cannot overwrite the original frozen lead. Its DSR accounts for all prior

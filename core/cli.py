@@ -7592,8 +7592,15 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
     from research.portfolio_selection import (
         PORTFOLIO_METRICS_VERSION,
         backtest_rotation,
+        ensemble_rotation_parameter_grid,
         rotation_benchmark_suite,
         rotation_period_metrics,
+    )
+    from research.statistical_evidence import (
+        conservative_dsr_audit,
+        exposure_matched_alpha_audit,
+        pnl_concentration_audit,
+        unique_return_path_pbo,
     )
 
     frozen, parameters, markets, paths, frames = _frozen_rotation_inputs(settings)
@@ -7639,6 +7646,67 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         spread_bps=settings.costs.spread_bps,
         portfolio_policy=policy,
     )
+    selection_grid = ensemble_rotation_parameter_grid(
+        gross_exposure=min(
+            0.25,
+            settings.operational.maximum_portfolio_exposure,
+        ),
+        minimum_cash=(
+            settings.operational.reserve_cash_fraction
+        ),
+        maximum_positions=settings.operational.maximum_positions,
+    )
+    development_trial_returns: dict[str, pd.Series] = {}
+    for trial_parameters in selection_grid:
+        trial_result = backtest_rotation(
+            frames,
+            trial_parameters,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+        )
+        _, trial_returns = rotation_period_metrics(
+            trial_result.equity_curve,
+            start=periods["development"][0],
+            end=periods["development"][1],
+        )
+        development_trial_returns[
+            trial_parameters.dna_hash
+        ] = trial_returns
+    selection_matrix = pd.concat(
+        development_trial_returns,
+        axis=1,
+    ).dropna(how="any")
+    _, candidate_development_returns = rotation_period_metrics(
+        normal.equity_curve,
+        start=periods["development"][0],
+        end=periods["development"][1],
+    )
+    known_trial_count = int(
+        source_report["multiple_testing"]["known_trial_count"]
+    )
+    dsr_audit = conservative_dsr_audit(
+        candidate_development_returns,
+        selection_matrix,
+        total_trials=known_trial_count,
+    )
+    pbo_audit = unique_return_path_pbo(selection_matrix)
+    alpha_audit = exposure_matched_alpha_audit(
+        normal,
+        stressed,
+        frames,
+        normal_one_way_cost=float(
+            normal.cost_breakdown["one_way_cost_rate"]
+        ),
+        stressed_one_way_cost=float(
+            stressed.cost_breakdown["one_way_cost_rate"]
+        ),
+        periods=periods,
+        bootstrap_samples=2_000,
+        block_size=10,
+        seed=settings.app.random_seed,
+    )
+    concentration_audit = pnl_concentration_audit(normal)
     checks = {
         "source_universe_allowed_only": tuple(source_report["markets"]) == markets,
         "all_periods_net_positive": all(
@@ -7664,8 +7732,66 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         "asset_pnl_reconciled": normal.integrity["asset_pnl_reconciled"],
         "next_open_execution": normal.integrity["decision_at_close_execution_next_open"],
         "terminal_liquidation": normal.integrity["terminal_liquidation_recorded"],
+        "validation_profit_factor": (
+            float(
+                period_results["validation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_profit_factor
+        ),
+        "confirmation_profit_factor": (
+            float(
+                period_results["confirmation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_profit_factor
+        ),
+        "double_cost_confirmation_profit_factor": (
+            float(
+                stressed_period_results["confirmation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_stressed_profit_factor
+        ),
+        "maximum_drawdown": (
+            abs(float(normal.metrics["maximum_drawdown"]))
+            <= settings.research.maximum_drawdown
+        ),
+        "minimum_calmar": (
+            float(normal.metrics["calmar"]) >= 0.75
+        ),
+        "exposure_matched_alpha": bool(alpha_audit["passed"]),
     }
     economic_pass = all(checks.values())
+    historical_statistical_checks = {
+        "conservative_dsr": bool(dsr_audit["passed"]),
+        "worst_valid_pbo": bool(pbo_audit["passed"]),
+        "white_reality_check": (
+            float(
+                source_report["multiple_testing"][
+                    "white_reality_check_pvalue"
+                ]
+            )
+            <= settings.research.maximum_white_reality_check_pvalue
+        ),
+        "hansen_spa": (
+            float(
+                source_report["multiple_testing"][
+                    "hansen_spa_pvalue"
+                ]
+            )
+            <= settings.research.maximum_hansen_spa_pvalue
+        ),
+        "original_frozen_gate_set": bool(
+            frozen["robustness"]["statistical_gates_passed"]
+        ),
+    }
+    historical_statistical_pass = all(
+        historical_statistical_checks.values()
+    )
     execution_identity = normal.summary()["execution_identity"]
     payload = {
         "status": (
@@ -7703,9 +7829,18 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         "periods": period_results,
         "stressed_periods": stressed_period_results,
         "asset_pnl_attribution": normal.metrics["asset_pnl_attribution"],
+        "pnl_concentration": concentration_audit,
         "benchmarks_and_ablations": benchmarks,
+        "exposure_matched_alpha": alpha_audit,
+        "conservative_dsr": dsr_audit,
+        "pbo_return_path_audit": pbo_audit,
+        "historical_statistical_checks": (
+            historical_statistical_checks
+        ),
         "historical_multiple_testing": source_report["multiple_testing"],
-        "historical_statistical_gates_passed": frozen["robustness"]["statistical_gates_passed"],
+        "historical_statistical_gates_passed": (
+            historical_statistical_pass
+        ),
         "statistical_recalculation_note": (
             "The original 160-strategy multiple-testing matrix already used only "
             "BTC-EUR, ETH-EUR, SOL-EUR and LINK-EUR. This fixed-policy reproduction "
@@ -7729,7 +7864,9 @@ def _run_rotation_institutional_audit(settings: Settings) -> dict[str, Any]:
         "status": payload["status"],
         "execution_identity": execution_identity,
         "economic_gates_passed": economic_pass,
-        "historical_statistical_gates_passed": False,
+        "historical_statistical_gates_passed": (
+            historical_statistical_pass
+        ),
         "report": str(report_path),
         "benchmark_csv": str(benchmark_csv),
         "paper_candidate_permitted": False,

@@ -655,14 +655,28 @@ def build_acceptance_summary(
         )
     )
     forward_pass = forward["status"] == "FORWARD_PASS"
+    failed_gate_groups = [
+        name
+        for name, passed in (
+            ("economic", economic_pass),
+            ("statistical", statistical_pass),
+            ("forward", forward_pass),
+        )
+        if not passed
+    ]
     summary = {
         "generated_at": utc_iso(),
         "source_commit": source_commit,
         "status": (
             "RESEARCH_PROMOTION_GATES_PASS"
             if economic_pass and statistical_pass and forward_pass
-            else "ECONOMIC_RESEARCH_PASS_STATISTICAL_FAILED_FORWARD_COLLECTING"
+            else (
+                "ECONOMIC_RESEARCH_PASS_STATISTICAL_FAILED_FORWARD_COLLECTING"
+                if economic_pass
+                else "RESEARCH_PROMOTION_BLOCKED"
+            )
         ),
+        "failed_gate_groups": failed_gate_groups,
         "candidate": {
             "immutable_identity": identity,
             "strategy_dna_hash": dna_hash,
@@ -689,6 +703,18 @@ def build_acceptance_summary(
             "checks": institutional_audit["checks"],
             "metrics": institutional_audit["normal"]["metrics"],
             "stressed_metrics": institutional_audit["stressed"]["metrics"],
+            "conservative_dsr": institutional_audit.get(
+                "conservative_dsr"
+            ),
+            "pbo_return_path_audit": institutional_audit.get(
+                "pbo_return_path_audit"
+            ),
+            "exposure_matched_alpha": institutional_audit.get(
+                "exposure_matched_alpha"
+            ),
+            "pnl_concentration": institutional_audit.get(
+                "pnl_concentration"
+            ),
         },
         "continuation_family": {
             "status": continuation["status"],
