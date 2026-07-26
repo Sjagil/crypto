@@ -37,6 +37,8 @@ def test_required_command_families_are_registered() -> None:
         ["data", "providers"],
         ["microstructure", "plan"],
         ["microstructure", "status"],
+        ["microstructure", "data-status"],
+        ["microstructure", "audit"],
         ["scrape", "status"],
         ["features", "build"],
         ["strategies", "list"],

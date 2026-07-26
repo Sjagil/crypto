@@ -3243,13 +3243,30 @@ class ContinuousDataService:
                 if once or self._drain_requested or self._stop_requested:
                     break
                 self._wake.clear()
-                try:
-                    await asyncio.wait_for(
-                        self._wake.wait(),
-                        timeout=interval_seconds,
+                wait_deadline = (
+                    asyncio.get_running_loop().time()
+                    + interval_seconds
+                )
+                while (
+                    not self._stop_requested
+                    and not self._drain_requested
+                    and self.state != "PAUSED"
+                ):
+                    self._apply_control_request()
+                    remaining = (
+                        wait_deadline
+                        - asyncio.get_running_loop().time()
                     )
-                except TimeoutError:
-                    pass
+                    if remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            self._wake.wait(),
+                            timeout=min(1.0, remaining),
+                        )
+                        break
+                    except TimeoutError:
+                        continue
             self.state = "DRAINED" if self._drain_requested else "STOPPED"
             self._heartbeat(
                 reason_code=("SERVICE_DRAINED" if self._drain_requested else "SERVICE_STOPPED")

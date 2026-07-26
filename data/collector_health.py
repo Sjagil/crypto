@@ -113,7 +113,18 @@ def collector_health_report(
     disk = shutil.disk_usage(settings.paths.data_dir)
     free_disk_gb = disk.free / 1024**3
     raw_root = settings.paths.data_dir / "raw"
-    bytes_written = _bytes_in((raw_root,))
+    orderflow_root = (
+        settings.paths.context_data_dir / "orderflow_stream"
+    )
+    bytes_written = _bytes_in((raw_root, orderflow_root))
+    maximum_storage_gb = float(
+        getattr(
+            settings.market_data,
+            "maximum_storage_gb",
+            50.0,
+        )
+    )
+    maximum_storage_bytes = maximum_storage_gb * 1024**3
     lag_limit = max(
         180.0,
         float(settings.operational.cycle_seconds) * 3.0,
@@ -128,6 +139,8 @@ def collector_health_report(
     if gap_count:
         reason_codes.append("GAP_DETECTED")
     if free_disk_gb < settings.market_data.minimum_free_disk_gb:
+        reason_codes.append("STORAGE_BLOCKED")
+    if bytes_written >= maximum_storage_bytes:
         reason_codes.append("STORAGE_BLOCKED")
     status = (
         "STORAGE_BLOCKED"
@@ -164,6 +177,12 @@ def collector_health_report(
         "reconnect_count": reconnect_count,
         "gap_count": gap_count,
         "bytes_written": bytes_written,
+        "maximum_storage_bytes": maximum_storage_bytes,
+        "storage_utilization": (
+            bytes_written / maximum_storage_bytes
+            if maximum_storage_bytes
+            else None
+        ),
         "free_disk_space_gb": free_disk_gb,
         "minimum_free_disk_space_gb": (
             settings.market_data.minimum_free_disk_gb

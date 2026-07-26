@@ -1073,7 +1073,20 @@ predeclared 90/180/365-day checkpoints.
 ```bash
 python main.py microstructure plan
 python main.py microstructure status
+python main.py microstructure data-status
+python main.py microstructure audit
 ```
+
+The continuous shadow service additionally records Bitvavo public trade,
+ticker, and order-book WebSocket events. Records are segmented by UTC hour and
+joined by a cross-segment SHA-256 chain. Trades preserve exchange time,
+collector arrival time, aggressor side, base and quote quantity, sequence, and
+raw-payload hash. Closed-hour snapshots report delta/CVD inputs, order-book
+imbalance, microprice, spread, funding, open interest, basis, and
+perpetual/spot volume. A mid-hour start, sequence gap, reconnect, dropped
+message, or missing stream is recorded as `DATA_GAP`; nothing is interpolated.
+Backtesting remains forbidden until `microstructure data-status` proves at
+least 90 consecutive complete days.
 
 The classical regime router is governance-first and orderless. It classifies
 only completed daily candles using BTC EMA200 trend and slope, 14-day

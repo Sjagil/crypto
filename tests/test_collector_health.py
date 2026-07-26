@@ -40,9 +40,11 @@ def _settings(tmp_path):
     paths = SimpleNamespace(
         checkpoints_dir=tmp_path / "checkpoints",
         data_dir=tmp_path / "data",
+        context_data_dir=tmp_path / "data" / "context",
     )
     paths.checkpoints_dir.mkdir()
     (paths.data_dir / "raw").mkdir(parents=True)
+    paths.context_data_dir.mkdir(parents=True)
     (paths.data_dir / "raw" / "event.json").write_text(
         "{}",
         encoding="utf-8",

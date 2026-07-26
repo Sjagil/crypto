@@ -200,6 +200,36 @@ async def test_continuous_service_pause_resume_drain_and_state_payload(
 
 
 @pytest.mark.asyncio
+async def test_continuous_service_polls_external_stop_during_interval(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    service = ContinuousDataService(
+        settings,
+        heartbeat_seconds=0.01,
+        service_id="operate-shadow",
+        mode="shadow",
+    )
+    first_cycle = asyncio.Event()
+
+    async def operation() -> None:
+        first_cycle.set()
+
+    task = asyncio.create_task(
+        service.start(operation, interval_seconds=60.0, once=False)
+    )
+    await asyncio.wait_for(first_cycle.wait(), timeout=1.0)
+    service.control_path.write_text(
+        '{"action":"STOP"}',
+        encoding="utf-8",
+    )
+    await asyncio.wait_for(task, timeout=2.0)
+    assert service.status()["state"] == "STOPPED"
+    assert service.status()["stop_requested"]
+
+
+@pytest.mark.asyncio
 async def test_kraken_payload_rate_limit_retries_without_stop_iteration(
     isolated_settings: Settings,
     tmp_path,

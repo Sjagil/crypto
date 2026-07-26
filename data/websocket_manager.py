@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 import aiohttp
@@ -25,6 +26,33 @@ BITVAVO_WS = "wss://ws.bitvavo.com/v2/"
 KRAKEN_WS = "wss://ws.kraken.com/v2"
 MEXC_WS = "wss://wbs-api.mexc.com/ws"
 LOGGER = logging.getLogger("crypto.websocket")
+
+
+def _trade_payload(
+    *,
+    trade_id: Any,
+    price: Any,
+    quantity: Any,
+    side: Any,
+    raw_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve the economically relevant trade fields without inventing data."""
+
+    try:
+        quote_quantity = str(Decimal(str(price)) * Decimal(str(quantity)))
+    except (InvalidOperation, TypeError, ValueError):
+        quote_quantity = None
+    normalized_side = str(side or "").casefold()
+    return {
+        "trade_id": trade_id,
+        "price": price,
+        "base_quantity": quantity,
+        "quantity": quantity,
+        "quote_quantity": quote_quantity,
+        "aggressor_side": normalized_side or None,
+        "side": normalized_side or None,
+        "raw_payload_hash": sha256_text(stable_json(raw_payload)),
+    }
 
 
 def _protobuf_fields(payload: bytes) -> dict[int, list[int | bytes]]:
@@ -144,7 +172,16 @@ def _timestamp(value: Any, *, milliseconds: bool = False) -> datetime:
     if value is None:
         return utc_now()
     if isinstance(value, (int, float)):
-        number = float(value) / (1_000 if milliseconds or value > 10_000_000_000 else 1)
+        number = float(value)
+        magnitude = abs(number)
+        if magnitude >= 100_000_000_000_000_000:
+            number /= 1_000_000_000
+        elif magnitude >= 100_000_000_000_000:
+            number /= 1_000_000
+        elif magnitude >= 100_000_000_000:
+            number /= 1_000
+        elif milliseconds:
+            number /= 1_000
         return datetime.fromtimestamp(number, tz=UTC)
     text = str(value).replace("Z", "+00:00")
     parsed = datetime.fromisoformat(text)
@@ -547,19 +584,22 @@ class WebSocketManager:
                 "best_bid": raw.get("bestBid"),
                 "best_ask": raw.get("bestAsk"),
                 "volume_24h": raw.get("volume"),
+                "raw_payload_hash": sha256_text(stable_json(raw)),
             }
         elif event == "trade":
-            payload = {
-                "trade_id": raw.get("id"),
-                "price": raw.get("price"),
-                "quantity": raw.get("amount"),
-                "side": raw.get("side"),
-            }
+            payload = _trade_payload(
+                trade_id=raw.get("id"),
+                price=raw.get("price"),
+                quantity=raw.get("amount"),
+                side=raw.get("side"),
+                raw_payload=raw,
+            )
         else:
             payload = {
                 "bids": raw.get("bids", []),
                 "asks": raw.get("asks", []),
                 "checksum": raw.get("checksum"),
+                "raw_payload_hash": sha256_text(stable_json(raw)),
             }
         return [
             self._event(
@@ -603,14 +643,18 @@ class WebSocketManager:
                     "best_bid": item.get("bid"),
                     "best_ask": item.get("ask"),
                     "volume_24h": item.get("volume"),
+                    "raw_payload_hash": sha256_text(
+                        stable_json(item)
+                    ),
                 }
             elif channel == "trade":
-                payload = {
-                    "trade_id": item.get("trade_id"),
-                    "price": item.get("price"),
-                    "quantity": item.get("qty"),
-                    "side": item.get("side"),
-                }
+                payload = _trade_payload(
+                    trade_id=item.get("trade_id"),
+                    price=item.get("price"),
+                    quantity=item.get("qty"),
+                    side=item.get("side"),
+                    raw_payload=item,
+                )
             elif channel == "ohlc":
                 payload = {
                     "interval": item.get("interval"),
@@ -625,6 +669,9 @@ class WebSocketManager:
                     "bids": item.get("bids", []),
                     "asks": item.get("asks", []),
                     "checksum": item.get("checksum"),
+                    "raw_payload_hash": sha256_text(
+                        stable_json(item)
+                    ),
                 }
             events.append(
                 self._event(
@@ -688,15 +735,21 @@ class WebSocketManager:
             elif mapping is StreamEventType.TRADE:
                 trade_type = item.get("tradeType")
                 normalized_items.append(
-                    {
-                        "trade_id": item.get("tradeId"),
-                        "price": item.get("price"),
-                        "quantity": item.get("quantity"),
-                        "side": "buy" if trade_type == 1 else "sell",
-                    }
+                    _trade_payload(
+                        trade_id=item.get("tradeId"),
+                        price=item.get("price"),
+                        quantity=item.get("quantity"),
+                        side=(
+                            "buy" if trade_type == 1 else "sell"
+                        ),
+                        raw_payload=item,
+                    )
                 )
             else:
                 normalized_items.append(item)
+        raw_payload_hash = sha256_text(stable_json(raw))
+        for item in normalized_items:
+            item.setdefault("raw_payload_hash", raw_payload_hash)
         items = normalized_items
         return [
             self._event(

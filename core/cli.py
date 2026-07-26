@@ -2860,6 +2860,51 @@ def command_microstructure(
     if args.microstructure_command == "plan":
         emit(write_crowding_avoidance_plan(plan_path))
         return 0
+    if args.microstructure_command == "data-status":
+        readiness_path = (
+            _operation_directory(settings)
+            / "microstructure_readiness.json"
+        )
+        stream_path = (
+            settings.paths.checkpoints_dir
+            / "orderflow_stream_chain.json"
+        )
+        emit(
+            {
+                "status": "READY"
+                if readiness_path.is_file()
+                else "NOT_COLLECTED",
+                "readiness": (
+                    read_json(readiness_path)
+                    if readiness_path.is_file()
+                    else None
+                ),
+                "stream": (
+                    read_json(stream_path)
+                    if stream_path.is_file()
+                    else None
+                ),
+                "orders_generated": 0,
+            }
+        )
+        return 0
+    if args.microstructure_command == "audit":
+        from data.orderflow_recorder import (
+            verify_orderflow_ledger,
+        )
+
+        audit = verify_orderflow_ledger(
+            settings.paths.context_data_dir
+            / "orderflow_stream"
+        )
+        report_path = (
+            settings.paths.lab_dir
+            / "reports"
+            / "orderflow_integrity_audit_v1.json"
+        )
+        atomic_write_json(report_path, audit)
+        emit({**audit, "report": str(report_path)})
+        return 0 if audit["status"] == "PASSED" else 2
     emit(
         read_json(plan_path)
         if plan_path.is_file()
@@ -15801,6 +15846,7 @@ async def _operational_cycle(
     profile: dict[str, Any],
     candidate_id: str | None,
     candidate_identity: Mapping[str, Any] | None = None,
+    orderflow_stream_health: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from data.orderbook_l2 import Level2OrderBook
     from data.prospective_context import ProspectiveContextCollector
@@ -16079,6 +16125,21 @@ async def _operational_cycle(
                 else ()
             )
             +
+            (
+                (
+                    "ORDERFLOW_STREAM_UNHEALTHY:"
+                    + str(
+                        (orderflow_stream_health or {}).get(
+                            "state"
+                        )
+                        or "NOT_STARTED"
+                    ),
+                )
+                if (orderflow_stream_health or {}).get("state")
+                != "CONNECTED"
+                else ()
+            )
+            +
             tuple(
                 f"ORDERBOOK_INVALID:{row['market']}"
                 for row in market_results
@@ -16198,6 +16259,48 @@ def _operational_status(
                 ),
             }
         )
+        orderflow_checkpoint_path = (
+            settings.paths.checkpoints_dir
+            / "orderflow_stream_chain.json"
+        )
+        orderflow_stream = (
+            read_json(orderflow_checkpoint_path)
+            if orderflow_checkpoint_path.is_file()
+            else {
+                "status": "NOT_COLLECTED",
+                "reason_code": (
+                    "ORDERFLOW_STREAM_CHECKPOINT_MISSING"
+                ),
+            }
+        )
+        orderflow_health_path = (
+            _operation_directory(settings)
+            / "orderflow_stream_health.json"
+        )
+        orderflow_stream_health = (
+            read_json(orderflow_health_path)
+            if orderflow_health_path.is_file()
+            else {
+                "status": "NOT_COLLECTED",
+                "reason_codes": [
+                    "ORDERFLOW_STREAM_HEALTH_MISSING"
+                ],
+            }
+        )
+        microstructure_readiness_path = (
+            _operation_directory(settings)
+            / "microstructure_readiness.json"
+        )
+        microstructure_readiness = (
+            read_json(microstructure_readiness_path)
+            if microstructure_readiness_path.is_file()
+            else {
+                "status": "NOT_COLLECTED",
+                "backtest_permitted": False,
+                "paper_permitted": False,
+                "live_permitted": False,
+            }
+        )
         active = _active_candidate_record(settings, mode)
         kill_switch = KillSwitch(settings.paths.checkpoints_dir / "kill_switch.json")
         heartbeat_at = heartbeat.get("heartbeat_at")
@@ -16230,6 +16333,13 @@ def _operational_status(
             "latest_closed_candles": latest_candles,
             "closed_candle_freshness": closed_candle_freshness,
             "context_freshness": context_freshness,
+            "orderflow_stream": orderflow_stream,
+            "orderflow_stream_health": (
+                orderflow_stream_health
+            ),
+            "microstructure_readiness": (
+                microstructure_readiness
+            ),
             "collector_health": collector_health,
             "latest_signals": latest_signals,
             "open_paper_positions": [],
@@ -16281,6 +16391,11 @@ async def _operate_start(
 ) -> int:
     from data.data_loader import ContinuousDataService, DataLoader
     from data.database import Database
+    from data.orderflow_recorder import (
+        HashChainedOrderflowLedger,
+        ProspectiveOrderflowRecorder,
+    )
+    from data.websocket_manager import WebSocketManager
 
     if args.mode == "live":
         raise ExecutionBlocked("operate live remains blocked in this phase")
@@ -16320,6 +16435,79 @@ async def _operate_start(
     service.active_candidate = candidate_id
     service.kill_switch_state = "INACTIVE"
     service.next_scheduled_operation = "RISK_RECONCILIATION_THEN_NEXT_CLOSED_1H_CANDLE"
+    stream_manager = WebSocketManager(
+        queue_size=max(
+            20_000,
+            settings.market_data.websocket_queue_size,
+        ),
+        inactivity_timeout=(
+            settings.market_data.websocket_inactivity_seconds
+        ),
+    )
+    orderflow_ledger = HashChainedOrderflowLedger(
+        root=(
+            settings.paths.context_data_dir
+            / "orderflow_stream"
+        ),
+        checkpoint_path=(
+            settings.paths.checkpoints_dir
+            / "orderflow_stream_chain.json"
+        ),
+        maximum_storage_bytes=int(
+            settings.market_data.maximum_storage_gb * 1024**3
+        ),
+    )
+    orderflow_recorder = ProspectiveOrderflowRecorder(
+        ledger=orderflow_ledger,
+        database=database,
+        markets=tuple(profile["markets"]),
+        feature_directory=(
+            settings.paths.context_data_dir
+            / "microstructure_hourly"
+        ),
+        readiness_path=(
+            _operation_directory(settings)
+            / "microstructure_readiness.json"
+        ),
+        health_path=(
+            _operation_directory(settings)
+            / "orderflow_stream_health.json"
+        ),
+        positioning_directory=(
+            settings.paths.context_data_dir
+            / "prospective_hourly"
+        ),
+        flush_seconds=0.5,
+        batch_size=1_000,
+    )
+    stream_subscriptions = {
+        "bitvavo": {
+            "ticker": list(profile["markets"]),
+            "trades": list(profile["markets"]),
+            "book": list(profile["markets"]),
+        }
+    }
+    orderflow_task: asyncio.Task[None] | None = None
+    stream_counter_baseline = {
+        "sequence_gaps": 0,
+        "dropped_messages": 0,
+        "reconnects": 0,
+    }
+
+    async def seed_orderflow_books() -> None:
+        for market in profile["markets"]:
+            snapshot = await loader.download_orderbook_snapshot(
+                provider="bitvavo",
+                market=market,
+                depth=min(
+                    100,
+                    settings.market_data.orderbook_maximum_depth,
+                ),
+                persist=True,
+                mode=args.mode,
+            )
+            orderflow_recorder.seed_orderbook(snapshot)
+
     started = time.monotonic()
     soak_seconds = max(0.0, float(args.soak_minutes or 0.0) * 60.0)
     last_cycle: dict[str, Any] = {}
@@ -16330,8 +16518,62 @@ async def _operate_start(
     completed = False
 
     async def cycle() -> None:
-        nonlocal last_cycle
+        nonlocal last_cycle, stream_counter_baseline
         try:
+            if orderflow_task is not None and orderflow_task.done():
+                exception = orderflow_task.exception()
+                raise RuntimeError(
+                    "ORDERFLOW_RECORDER_STOPPED:"
+                    + (
+                        type(exception).__name__
+                        if exception is not None
+                        else "UNEXPECTED_COMPLETION"
+                    )
+                )
+            stream_health = stream_manager.health("bitvavo")
+            unhealthy_state = stream_health["state"] in {
+                "FAILED",
+                "STOPPED",
+                "STALE",
+            }
+            new_counter_anomaly = any(
+                int(stream_health.get(counter) or 0)
+                > stream_counter_baseline[counter]
+                for counter in stream_counter_baseline
+            )
+            if unhealthy_state or new_counter_anomaly:
+                await orderflow_recorder.pause()
+                try:
+                    if unhealthy_state:
+                        await stream_manager.stop()
+                        while not stream_manager.queue.empty():
+                            stream_manager.queue.get_nowait()
+                        await stream_manager.start(
+                            stream_subscriptions
+                        )
+                    await seed_orderflow_books()
+                    recovered_health = stream_manager.health(
+                        "bitvavo"
+                    )
+                    stream_counter_baseline = {
+                        counter: int(
+                            recovered_health.get(counter) or 0
+                        )
+                        for counter in stream_counter_baseline
+                    }
+                    orderflow_recorder.acknowledge_stream_recovery(
+                        recovered_health
+                    )
+                finally:
+                    orderflow_recorder.resume()
+                stream_health = {
+                    **recovered_health,
+                    "state": (
+                        "RESYNCHRONIZED_AFTER_STREAM_ANOMALY"
+                    ),
+                }
+            elif stream_health["state"] != "CONNECTED":
+                stream_health = stream_manager.health("bitvavo")
             last_cycle = await _operational_cycle(
                 settings,
                 database=database,
@@ -16340,6 +16582,7 @@ async def _operate_start(
                 profile=profile,
                 candidate_id=candidate_id,
                 candidate_identity=candidate_identity,
+                orderflow_stream_health=stream_health,
             )
             service.kill_switch_state = last_cycle["risk_state"]["state"]
         except Exception as exc:
@@ -16368,6 +16611,20 @@ async def _operate_start(
 
     once = not args.continuous and not soak_seconds
     try:
+        await stream_manager.start(stream_subscriptions)
+        await seed_orderflow_books()
+        initial_stream_health = stream_manager.health("bitvavo")
+        stream_counter_baseline = {
+            counter: int(initial_stream_health.get(counter) or 0)
+            for counter in stream_counter_baseline
+        }
+        orderflow_recorder.acknowledge_stream_recovery(
+            initial_stream_health
+        )
+        orderflow_task = asyncio.create_task(
+            orderflow_recorder.run(stream_manager),
+            name="prospective-orderflow-recorder",
+        )
         await service.start(
             cycle,
             interval_seconds=settings.operational.cycle_seconds,
@@ -16375,6 +16632,10 @@ async def _operate_start(
         )
         completed = True
     finally:
+        await stream_manager.stop()
+        orderflow_recorder.stop()
+        if orderflow_task is not None:
+            await orderflow_task
         acceptance_completed = completed and (
             not soak_seconds or time.monotonic() - started >= soak_seconds
         )
@@ -17059,6 +17320,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     microstructure.add_parser("plan")
     microstructure.add_parser("status")
+    microstructure.add_parser("data-status")
+    microstructure.add_parser("audit")
 
     gex = commands.add_parser("gex").add_subparsers(dest="gex_command", required=True)
     gex_collect = gex.add_parser("collect")
