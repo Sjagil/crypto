@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from reporting.research_package import build_acceptance_summary
+from reporting.research_package import (
+    _readme,
+    build_acceptance_summary,
+)
 
 
 def _inputs() -> dict:
@@ -146,6 +149,49 @@ def test_acceptance_summary_does_not_label_failed_economics_as_pass() -> None:
     assert not summary["promotion"]["shadow_candidate"]
     assert not summary["promotion"]["paper_candidate_permitted"]
     assert not summary["promotion"]["live_ready"]
+
+
+def test_package_readme_distinguishes_positive_return_from_economic_pass() -> None:
+    summary = {
+        "validation": {
+            "economic_gates_passed": False,
+            "statistical_gates_passed": False,
+            "forward_passed": False,
+        },
+        "failed_gate_groups": [
+            "economic",
+            "statistical",
+            "forward",
+        ],
+        "strict_policy_reproduction": {
+            "metrics": {
+                "net_return": 1.5,
+                "annualized_return": 0.14,
+                "sharpe": 1.13,
+                "maximum_drawdown": -0.15,
+                "portfolio_period_effective_sample_size": 323,
+                "closed_position_episodes": 121,
+            },
+            "conservative_dsr": {"formal_probability": 0.33},
+            "pbo_return_path_audit": {
+                "formal_worst_valid_pbo": 0.80
+            },
+            "exposure_matched_alpha": {
+                "normal_periods": {
+                    "validation": {"ci_lower_95": -0.001},
+                    "confirmation": {"ci_lower_95": -0.002},
+                },
+                "double_cost_confirmation": {
+                    "ci_lower_95": -0.003
+                },
+            },
+        },
+    }
+    rendered = _readme(summary)
+    assert "Formal economic qualification: FAILED" in rendered
+    assert "not a formal economic pass" in rendered
+    assert "economically positive" not in rendered
+    assert "economic, statistical, forward" in rendered
 
 
 def test_acceptance_summary_includes_global_trial_accounting() -> None:

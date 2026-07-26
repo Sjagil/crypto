@@ -1967,7 +1967,34 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
 
 
 def _readme(summary: dict[str, Any]) -> str:
-    metrics = summary["strict_policy_reproduction"]["metrics"]
+    strict = summary["strict_policy_reproduction"]
+    metrics = strict["metrics"]
+    dsr = dict(strict.get("conservative_dsr") or {})
+    pbo = dict(strict.get("pbo_return_path_audit") or {})
+    alpha = dict(strict.get("exposure_matched_alpha") or {})
+    alpha_periods = dict(alpha.get("normal_periods") or {})
+    validation_alpha = dict(alpha_periods.get("validation") or {})
+    confirmation_alpha = dict(
+        alpha_periods.get("confirmation") or {}
+    )
+    stressed_alpha = dict(
+        alpha.get("double_cost_confirmation") or {}
+    )
+    economic_status = (
+        "PASSED"
+        if summary["validation"]["economic_gates_passed"]
+        else "FAILED"
+    )
+    statistical_status = (
+        "PASSED"
+        if summary["validation"]["statistical_gates_passed"]
+        else "FAILED"
+    )
+    forward_status = (
+        "PASSED"
+        if summary["validation"]["forward_passed"]
+        else "COLLECTING_OR_FAILED"
+    )
     return f"""# Crypto rotation research acceptance package
 
 This package preserves the committed source and complete evidence for the
@@ -1981,10 +2008,21 @@ frozen cross-sectional rotation research lead.
 - Maximum drawdown: {metrics["maximum_drawdown"]:.4%}
 - Weekly effective sample size: {metrics["portfolio_period_effective_sample_size"]}
 - Closed holding episodes: {metrics["closed_position_episodes"]}
+- Formal economic qualification: {economic_status}
+- Formal statistical qualification: {statistical_status}
+- Forward qualification: {forward_status}
+- Conservative DSR: {float(dsr.get("formal_probability") or 0.0):.6f}
+- Worst valid PBO: {float(pbo.get("formal_worst_valid_pbo") or 0.0):.6f}
+- Validation exposure-matched alpha CI lower: {float(validation_alpha.get("ci_lower_95") or 0.0):.8f}
+- Confirmation exposure-matched alpha CI lower: {float(confirmation_alpha.get("ci_lower_95") or 0.0):.8f}
+- Double-cost confirmation alpha CI lower: {float(stressed_alpha.get("ci_lower_95") or 0.0):.8f}
 
-The result is economically positive after normal and stressed costs. Statistical
-multiple-testing gates and genuine future-forward requirements do not pass.
-Shadow, paper and live promotion therefore remain disabled.
+Historical net returns remain positive after normal and stressed costs, but
+that is not a formal economic pass: the exposure-matched paired-bootstrap
+lower bounds are not positive. Conservative DSR, PBO, White Reality Check,
+Hansen SPA and genuine future-forward requirements also do not pass. Failed
+gate groups: {", ".join(summary["failed_gate_groups"])}. Shadow, paper and live
+promotion therefore remain disabled.
 
 `ACCEPTANCE.json` is the machine-readable conclusion. `MANIFEST.json` inventories
 all evidence with SHA-256. `SOURCE_COMMIT.txt` and `source-*.zip` identify the
