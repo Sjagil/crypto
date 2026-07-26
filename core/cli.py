@@ -15929,7 +15929,7 @@ async def _operate_preflight(
     )
     database.migrate()
     try:
-        health = database.health()
+        health = database.health(include_table_counts=False)
         checks["database"] = health
         if health["status"] != "PASSED":
             failures.append("DATABASE_UNHEALTHY")

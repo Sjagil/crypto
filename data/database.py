@@ -469,16 +469,31 @@ class Database:
                 if row.latest is not None
             }
 
-    def health(self) -> dict[str, Any]:
+    def health(
+        self,
+        *,
+        include_table_counts: bool = True,
+    ) -> dict[str, Any]:
+        """Probe database health without forcing a full inventory scan."""
+
         total_started = time.perf_counter()
         read_started = time.perf_counter()
         with self.engine.connect() as connection:
             connection.execute(text("SELECT 1"))
             version = connection.scalar(select(func.max(self.version.c.version)))
-            counts = {
-                name: int(connection.scalar(select(func.count()).select_from(table)) or 0)
-                for name, table in self.tables.items()
-            }
+            counts = (
+                {
+                    name: int(
+                        connection.scalar(
+                            select(func.count()).select_from(table)
+                        )
+                        or 0
+                    )
+                    for name, table in self.tables.items()
+                }
+                if include_table_counts
+                else {}
+            )
             journal_mode = None
             wal_checkpoint = None
             if self.engine.dialect.name == "sqlite":

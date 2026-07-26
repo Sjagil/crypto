@@ -429,15 +429,17 @@ def test_bitvavo_ticker24h_preserves_comparable_spot_volume() -> None:
         "bitvavo",
         {
             "event": "ticker24h",
-            "data": {
-                "market": "BTC-EUR",
-                "timestamp": 1_785_084_800_000,
-                "last": "50000",
-                "bid": "49999",
-                "ask": "50001",
-                "volume": "123.45",
-                "volumeQuote": "6172500",
-            },
+            "data": [
+                {
+                    "market": "BTC-EUR",
+                    "timestamp": 1_785_084_800_000,
+                    "last": "50000",
+                    "bid": "49999",
+                    "ask": "50001",
+                    "volume": "123.45",
+                    "volumeQuote": "6172500",
+                }
+            ],
         },
     )
     assert len(parsed) == 1

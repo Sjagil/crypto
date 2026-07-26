@@ -550,11 +550,49 @@ class WebSocketManager:
         self, raw: Mapping[str, Any]
     ) -> list[NormalizedStreamEvent]:
         event = raw.get("event")
-        event_payload = (
-            dict(raw.get("data") or {})
-            if event == "ticker24h"
-            else dict(raw)
-        )
+        if event == "ticker24h":
+            raw_rows = raw.get("data") or []
+            rows = (
+                [dict(raw_rows)]
+                if isinstance(raw_rows, Mapping)
+                else [
+                    dict(item)
+                    for item in raw_rows
+                    if isinstance(item, Mapping)
+                ]
+            )
+            return [
+                self._event(
+                    provider="bitvavo",
+                    event_type=StreamEventType.TICKER,
+                    source_symbol=str(item["market"]),
+                    timestamp=_timestamp(
+                        item.get("timestamp"),
+                        milliseconds=True,
+                    ),
+                    payload={
+                        "last_price": item.get("last"),
+                        "best_bid": item.get("bid"),
+                        "best_ask": item.get("ask"),
+                        "volume_24h": item.get("volume"),
+                        "quote_volume_24h": item.get(
+                            "volumeQuote"
+                        ),
+                        "ticker_kind": "24H",
+                        "raw_payload_hash": sha256_text(
+                            stable_json(
+                                {
+                                    "event": event,
+                                    "data": item,
+                                }
+                            )
+                        ),
+                    },
+                )
+                for item in rows
+                if item.get("market")
+            ]
+        event_payload = dict(raw)
         market = str(event_payload.get("market", ""))
         timestamp = _timestamp(
             event_payload.get("timestamp"),
@@ -562,7 +600,6 @@ class WebSocketManager:
         )
         mapping = {
             "ticker": StreamEventType.TICKER,
-            "ticker24h": StreamEventType.TICKER,
             "trade": StreamEventType.TRADE,
             "candle": StreamEventType.CANDLE,
             "book": StreamEventType.ORDERBOOK_DELTA,
@@ -587,7 +624,7 @@ class WebSocketManager:
                 )
                 for item in raw.get("candle", [])
             ]
-        if event in {"ticker", "ticker24h"}:
+        if event == "ticker":
             payload = {
                 "last_price": (
                     event_payload.get("price")
@@ -605,9 +642,7 @@ class WebSocketManager:
                 "quote_volume_24h": event_payload.get(
                     "volumeQuote"
                 ),
-                "ticker_kind": (
-                    "24H" if event == "ticker24h" else "BOOK"
-                ),
+                "ticker_kind": "BOOK",
                 "raw_payload_hash": sha256_text(stable_json(raw)),
             }
         elif event == "trade":
