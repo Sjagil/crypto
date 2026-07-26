@@ -2905,6 +2905,16 @@ def command_microstructure(
         atomic_write_json(report_path, audit)
         emit({**audit, "report": str(report_path)})
         return 0 if audit["status"] == "PASSED" else 2
+    if args.microstructure_command == "readiness-report":
+        from reporting.prospective_readiness import (
+            write_prospective_readiness_report,
+        )
+
+        report_path, report = (
+            write_prospective_readiness_report(settings)
+        )
+        emit({**report, "report": str(report_path)})
+        return 0
     emit(
         read_json(plan_path)
         if plan_path.is_file()
@@ -16743,8 +16753,8 @@ def _startup_launcher(
     )
     main = settings.paths.project_root / "main.py"
     command = (
-        f'"{python}" "{main}" operate start --mode {mode} '
-        f"--profile {profile} --continuous --resume"
+        f'"{python}" "{main}" operate supervise --mode {mode} '
+        f"--profile {profile}"
     )
     escaped_command = command.replace('"', '""')
     escaped_directory = str(
@@ -16754,6 +16764,13 @@ def _startup_launcher(
         'Set shell = CreateObject("WScript.Shell")\r\n'
         f'shell.CurrentDirectory = "{escaped_directory}"\r\n'
         f'shell.Run "{escaped_command}", 0, False\r\n'
+    )
+
+
+def _supervisor_disabled_path(settings: Settings) -> Path:
+    return (
+        settings.paths.checkpoints_dir
+        / "collector_supervisor.disabled"
     )
 
 
@@ -16806,6 +16823,46 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
         )
         emit(result)
         return 0 if not result["failures"] else 2
+    if action in {"supervise", "supervisor-status"}:
+        from data.service_supervisor import CollectorSupervisor
+
+        supervisor = CollectorSupervisor(
+            checkpoints_directory=(
+                settings.paths.checkpoints_dir
+            ),
+            operations_directory=_operation_directory(settings),
+        )
+        if action == "supervisor-status":
+            emit(supervisor.status())
+            return 0
+        if args.mode != "shadow":
+            raise ExecutionBlocked(
+                "collector supervisor is shadow-only"
+            )
+        python = (
+            settings.paths.project_root
+            / ".venv"
+            / "Scripts"
+            / "python.exe"
+        )
+        main = settings.paths.project_root / "main.py"
+        result = supervisor.run(
+            [
+                str(python),
+                str(main),
+                "operate",
+                "start",
+                "--mode",
+                "shadow",
+                "--profile",
+                args.profile,
+                "--continuous",
+                "--resume",
+            ],
+            working_directory=settings.paths.project_root,
+        )
+        emit(result)
+        return 0
     if action == "start":
         return await _operate_start(args, settings)
     if action in {"status", "health", "report"}:
@@ -16822,6 +16879,19 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
 
         service_id = _operation_service_id(args.mode)
         lock_path = settings.paths.checkpoints_dir / "data_service.lock"
+        if action == "stop" and args.mode == "shadow":
+            atomic_write_json(
+                _supervisor_disabled_path(settings),
+                {
+                    "schema_version": (
+                        "collector_supervisor_control_v1"
+                    ),
+                    "status": "DISABLED",
+                    "reason_code": "INTENTIONAL_OPERATOR_STOP",
+                    "requested_at": utc_now(),
+                    "mode": args.mode,
+                },
+            )
         lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
         if lock_inspection["available"]:
             emit(
@@ -17101,6 +17171,16 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             return 0
         if action == "startup-status":
             exists = launcher_path.is_file()
+            from data.service_supervisor import CollectorSupervisor
+
+            supervisor = CollectorSupervisor(
+                checkpoints_directory=(
+                    settings.paths.checkpoints_dir
+                ),
+                operations_directory=(
+                    _operation_directory(settings)
+                ),
+            )
             emit(
                 {
                     "status": (
@@ -17117,11 +17197,25 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                     "least_privilege": True,
                     "hidden_window": True,
                     "single_instance_lock": True,
+                    "crash_restart_supervisor": (
+                        supervisor.status()
+                    ),
                     "live_orders": 0,
                 }
             )
             return 0
         if action == "startup-remove":
+            atomic_write_json(
+                _supervisor_disabled_path(settings),
+                {
+                    "schema_version": (
+                        "collector_supervisor_control_v1"
+                    ),
+                    "status": "DISABLED",
+                    "reason_code": "STARTUP_REMOVED",
+                    "requested_at": utc_now(),
+                },
+            )
             launcher_path.unlink(missing_ok=True)
             emit(
                 {
@@ -17130,6 +17224,9 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                 }
             )
             return 0
+        _supervisor_disabled_path(settings).unlink(
+            missing_ok=True
+        )
         launcher_path.parent.mkdir(parents=True, exist_ok=True)
         launcher_path.write_text(
             launcher,
@@ -17322,6 +17419,7 @@ def build_parser() -> argparse.ArgumentParser:
     microstructure.add_parser("status")
     microstructure.add_parser("data-status")
     microstructure.add_parser("audit")
+    microstructure.add_parser("readiness-report")
 
     gex = commands.add_parser("gex").add_subparsers(dest="gex_command", required=True)
     gex_collect = gex.add_parser("collect")
@@ -17539,6 +17637,17 @@ def build_parser() -> argparse.ArgumentParser:
     operate_start.add_argument("--continuous", action="store_true")
     operate_start.add_argument("--resume", action="store_true")
     operate_start.add_argument("--soak-minutes", type=float, default=0.0)
+    operate_supervise = operate.add_parser("supervise")
+    operate_supervise.add_argument(
+        "--mode",
+        choices=("shadow",),
+        default="shadow",
+    )
+    operate_supervise.add_argument(
+        "--profile",
+        default="practical_spot_v1",
+    )
+    operate.add_parser("supervisor-status")
     operate.add_parser("candidates")
     candidate_inspect = operate.add_parser("candidate-inspect")
     candidate_inspect.add_argument("--id", required=True)

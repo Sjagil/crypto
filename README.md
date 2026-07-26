@@ -1057,12 +1057,16 @@ backfilled from today's data.
 
 Task Scheduler remains the preferred Windows service mechanism. Where local
 policy blocks task creation, a least-privilege hidden per-user logon launcher
-can be installed. The existing single-instance lock prevents duplicate
-collectors.
+can be installed. The launcher starts a separate least-privilege supervisor:
+it monitors the single-instance collector lock, archives only provably stale
+locks and restarts an unexpectedly exited shadow collector after 30 seconds.
+An explicit `operate stop --mode shadow` writes a durable disable marker, so
+an intentional stop is never automatically undone.
 
 ```bash
 python main.py operate startup-install --mode shadow --profile practical_spot_v1
 python main.py operate startup-status --mode shadow --profile practical_spot_v1
+python main.py operate supervisor-status
 ```
 
 The first new positioning family is deliberately small rather than another
@@ -1075,6 +1079,7 @@ python main.py microstructure plan
 python main.py microstructure status
 python main.py microstructure data-status
 python main.py microstructure audit
+python main.py microstructure readiness-report
 ```
 
 The continuous shadow service additionally records Bitvavo public trade,

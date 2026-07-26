@@ -39,6 +39,7 @@ def test_required_command_families_are_registered() -> None:
         ["microstructure", "status"],
         ["microstructure", "data-status"],
         ["microstructure", "audit"],
+        ["microstructure", "readiness-report"],
         ["scrape", "status"],
         ["features", "build"],
         ["strategies", "list"],
@@ -58,6 +59,7 @@ def test_required_command_families_are_registered() -> None:
         ["operate", "task-install", "--dry-run"],
         ["operate", "startup-install", "--mode", "shadow"],
         ["operate", "startup-status", "--mode", "shadow"],
+        ["operate", "supervisor-status"],
         ["lab", "campaign", "plan", "--name", "cross-sectional-ensemble"],
         ["lab", "campaign", "plan", "--name", "institutional-rotation-v2"],
         ["lab", "campaign", "plan", "--name", "capital-utilization-v1"],
@@ -309,8 +311,7 @@ def test_startup_launcher_is_hidden_and_uses_exact_environment(
         profile="practical_spot_v1",
     )
     assert path.name == "CryptoPracticalSpotShadow.vbs"
-    assert "operate start --mode shadow" in launcher
-    assert "--continuous --resume" in launcher
+    assert "operate supervise --mode shadow" in launcher
     assert ", 0, False" in launcher
 
 
