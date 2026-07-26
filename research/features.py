@@ -560,23 +560,219 @@ def optional_garch_forecast(close: pd.Series) -> pd.Series:
 
 
 def volume_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Build causal candle-volume features without inventing trade direction.
+
+    ``volume`` is base-asset candle volume.  When the venue does not provide a
+    native quote-volume column, ``estimated_quote_volume`` is the close-price
+    conversion of that base volume.  Candle-directional volume is deliberately
+    labelled as a proxy; it is not CVD, taker delta, footprint, or order flow.
+    """
+
     output = pd.DataFrame(index=data.index)
-    volume_mean = data["volume"].rolling(20).mean()
+    volume = pd.to_numeric(data["volume"], errors="raise").astype(float)
+    close = pd.to_numeric(data["close"], errors="raise").astype(float)
+    high = pd.to_numeric(data["high"], errors="raise").astype(float)
+    low = pd.to_numeric(data["low"], errors="raise").astype(float)
+    typical = (high + low + close) / 3.0
+    native_quote = data.get("quote_volume")
+    if native_quote is None:
+        quote_volume = close * volume
+        quote_volume_source = "ESTIMATED_CLOSE_TIMES_BASE_VOLUME"
+    else:
+        quote_volume = pd.to_numeric(native_quote, errors="raise").astype(float)
+        quote_volume_source = "NATIVE_VENUE_QUOTE_VOLUME"
+
+    output["base_volume"] = volume
+    output["estimated_quote_volume"] = quote_volume
+    output["log_base_volume"] = np.log1p(volume.clip(lower=0.0))
+    output["log_quote_volume"] = np.log1p(quote_volume.clip(lower=0.0))
+    for period in (5, 20, 50):
+        output[f"volume_average_{period}"] = volume.rolling(
+            period,
+            min_periods=period,
+        ).mean()
+    volume_mean = output["volume_average_20"]
     output["volume_average_20"] = volume_mean
-    output["volume_zscore_20"] = rolling_zscore(data["volume"], 20)
-    output["relative_volume_20"] = data["volume"] / volume_mean.replace(0, np.nan)
-    output["obv"] = (np.sign(data["close"].diff()).fillna(0.0) * data["volume"]).cumsum()
-    money_flow_multiplier = ((data["close"] - data["low"]) - (data["high"] - data["close"])) / (
-        data["high"] - data["low"]
-    ).replace(0, np.nan)
-    output["chaikin_money_flow_20"] = (money_flow_multiplier * data["volume"]).rolling(
+    output["volume_zscore_20"] = rolling_zscore(
+        output["log_base_volume"],
+        20,
+    )
+    output["relative_volume_20"] = volume / volume_mean.replace(0, np.nan)
+    output["quote_relative_volume_20"] = quote_volume / quote_volume.rolling(
+        20,
+        min_periods=20,
+    ).mean().replace(0, np.nan)
+    output["volume_rate_of_change_10"] = volume.pct_change(10)
+    output["volume_oscillator_5_20"] = (
+        output["volume_average_5"] / volume_mean.replace(0, np.nan) - 1.0
+    )
+    fast_volume = volume.ewm(
+        span=12,
+        adjust=False,
+        min_periods=12,
+    ).mean()
+    slow_volume = volume.ewm(
+        span=26,
+        adjust=False,
+        min_periods=26,
+    ).mean()
+    output["volume_macd"] = fast_volume - slow_volume
+    output["volume_macd_signal"] = output["volume_macd"].ewm(
+        span=9,
+        adjust=False,
+        min_periods=9,
+    ).mean()
+    output["volume_macd_histogram"] = (
+        output["volume_macd"] - output["volume_macd_signal"]
+    )
+
+    direction = np.sign(close.diff()).fillna(0.0)
+    directional_volume = direction * volume
+    output["up_volume"] = volume.where(direction > 0.0, 0.0)
+    output["down_volume"] = volume.where(direction < 0.0, 0.0)
+    output["candle_directional_volume_proxy"] = directional_volume
+    output["cumulative_directional_volume_proxy"] = (
+        directional_volume.cumsum()
+    )
+    output["obv"] = output["cumulative_directional_volume_proxy"]
+    output["obv_change_20"] = output["obv"].diff(20)
+
+    price_return = close.pct_change(fill_method=None).replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+    output["price_volume_trend"] = (
+        volume * price_return.fillna(0.0)
+    ).cumsum()
+    candle_range = (high - low).replace(0.0, np.nan)
+    money_flow_multiplier = (
+        (close - low) - (high - close)
+    ) / candle_range
+    money_flow_volume = money_flow_multiplier * volume
+    output["accumulation_distribution_line"] = (
+        money_flow_volume.fillna(0.0).cumsum()
+    )
+    output["chaikin_money_flow_20"] = money_flow_volume.rolling(
         20
-    ).sum() / data["volume"].rolling(20).sum().replace(0, np.nan)
-    typical = (data["high"] + data["low"] + data["close"]) / 3.0
-    output["vwap_20"] = (typical * data["volume"]).rolling(20).sum() / data["volume"].rolling(
-        20
-    ).sum().replace(0, np.nan)
+    ).sum() / volume.rolling(20).sum().replace(0, np.nan)
+
+    negative_volume_return = price_return.where(
+        volume < volume.shift(1),
+        0.0,
+    ).fillna(0.0)
+    positive_volume_return = price_return.where(
+        volume > volume.shift(1),
+        0.0,
+    ).fillna(0.0)
+    output["negative_volume_index"] = (
+        1.0 + negative_volume_return
+    ).cumprod() * 1_000.0
+    output["positive_volume_index"] = (
+        1.0 + positive_volume_return
+    ).cumprod() * 1_000.0
+    raw_force = close.diff() * volume
+    output["force_index_1"] = raw_force
+    output["force_index_13"] = raw_force.ewm(
+        span=13,
+        adjust=False,
+        min_periods=13,
+    ).mean()
+    midpoint_move = ((high + low) / 2.0).diff()
+    output["ease_of_movement_1"] = (
+        midpoint_move * candle_range / volume.replace(0.0, np.nan)
+    )
+    output["ease_of_movement_14"] = output[
+        "ease_of_movement_1"
+    ].rolling(14, min_periods=14).mean()
+    output["volume_zone_oscillator_14"] = (
+        100.0
+        * directional_volume.rolling(14, min_periods=14).sum()
+        / volume.rolling(14, min_periods=14).sum().replace(0.0, np.nan)
+    )
+
+    trend = np.sign(typical.diff()).replace(0.0, np.nan).ffill().fillna(0.0)
+    daily_measurement = high - low
+    cumulative_measurement = np.zeros(len(data), dtype=float)
+    dm_values = daily_measurement.fillna(0.0).to_numpy(dtype=float)
+    trend_values = trend.to_numpy(dtype=float)
+    for index in range(1, len(data)):
+        cumulative_measurement[index] = (
+            cumulative_measurement[index - 1] + dm_values[index]
+            if trend_values[index] == trend_values[index - 1]
+            else dm_values[index - 1] + dm_values[index]
+        )
+    measurement = pd.Series(
+        cumulative_measurement,
+        index=data.index,
+        dtype=float,
+    ).replace(0.0, np.nan)
+    volume_force = (
+        volume
+        * trend
+        * (2.0 * (daily_measurement / measurement) - 1.0).abs()
+        * 100.0
+    )
+    output["klinger_volume_oscillator"] = volume_force.ewm(
+        span=34,
+        adjust=False,
+        min_periods=34,
+    ).mean() - volume_force.ewm(
+        span=55,
+        adjust=False,
+        min_periods=55,
+    ).mean()
+    output["klinger_signal_13"] = output[
+        "klinger_volume_oscillator"
+    ].ewm(
+        span=13,
+        adjust=False,
+        min_periods=13,
+    ).mean()
+
+    output["vwap_20"] = (
+        (typical * volume).rolling(20, min_periods=20).sum()
+        / volume.rolling(20, min_periods=20).sum().replace(0.0, np.nan)
+    )
     output["anchored_vwap"] = anchored_vwap(data)
+    output["amihud_illiquidity_20"] = (
+        price_return.abs()
+        / quote_volume.replace(0.0, np.nan)
+    ).rolling(20, min_periods=20).mean()
+    if isinstance(data.index, pd.DatetimeIndex):
+        slot = pd.MultiIndex.from_arrays(
+            [
+                data.index.dayofweek,
+                data.index.hour,
+                data.index.minute,
+            ]
+        )
+        slot_baseline = volume.groupby(slot).transform(
+            lambda values: values.shift(1).rolling(
+                20,
+                min_periods=5,
+            ).median()
+        )
+        output["time_of_week_relative_volume_20"] = (
+            volume / slot_baseline.replace(0.0, np.nan)
+        )
+    else:
+        output["time_of_week_relative_volume_20"] = np.nan
+
+    output.attrs["quote_volume_source"] = quote_volume_source
+    output.attrs["directional_volume_semantics"] = (
+        "CANDLE_DIRECTION_PROXY_NOT_TRADE_DELTA_OR_CVD"
+    )
+    output.attrs["unavailable_without_trade_or_l2_history"] = (
+        "true_buy_sell_delta",
+        "cvd",
+        "footprint",
+        "stacked_imbalance",
+        "absorption",
+        "vpin",
+        "volume_profile_poc_vah_val_hvn_lvn",
+        "historical_order_book_imbalance",
+        "historical_microprice",
+    )
     return output
 
 

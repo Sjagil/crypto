@@ -988,6 +988,38 @@ DSR, White Reality Check, and Hansen SPA were positive under the authoritative
 an untouched holdout and forward sample. The DNA remains registered and
 orderlessly observable; it has no paper/live permission.
 
+`VOLUME_STRATEGY_CATALOG_V1` is a preregistered 1,275-trial classical
+campaign over 51 real Bitvavo EUR asset/timeframe datasets. It covers 11
+assets, 5m/15m/1h/4h/1d, and five distinct families: Donchian plus RVOL,
+trend pullback dry-up/recovery, volume-contraction breakout, OBV plus CMF,
+and VWAP plus MFI reclaim. Every market/timeframe/family has a fixed
+five-point parameter neighborhood scored with the immutable Gaussian
+`[0.05, 0.25, 0.40, 0.25, 0.05]` kernel. All 1,275 trials count globally;
+only the 500 BTC/ETH/SOL/LINK trials can ever be considered for promotion.
+
+```bash
+python main.py lab campaign plan --name volume-strategy-catalog-v1
+python main.py lab campaign run --name volume-strategy-catalog-v1 --yes
+python main.py lab campaign report --name volume-strategy-catalog-v1
+```
+
+The real campaign rejected its allowed-universe diagnostic winner. The
+LINK-EUR 4h VWAP/MFI-reclaim path earned +16.31% in development but lost
+5.06% in validation, 3.38% in confirmation, and 6.09% in double-cost
+confirmation. Its complete parameter plateau failed, DSR was 0, plateau
+selection PBO was 0.767, and White Reality Check/Hansen SPA were
+approximately 0.996/0.984. Timeframe-specific diagnostics likewise rejected
+promotion: 4h was the closest cohort (White 0.064) but failed SPA (0.384),
+PBO (0.292), and confirmation.
+
+The existing shadow microstructure recorder stores real Bitvavo trades,
+nonce-valid L2 snapshots, spread, depth, microprice, book imbalance and taker
+imbalance. Its current history spans only hours, not enough for a causal
+order-flow backtest. CVD, footprint, stacked imbalance, absorption, VPIN and
+POC/VAH/VAL/HVN/LVN strategies therefore remain fail-closed until at least
+90 days and 100,000 real observations exist; candle-direction volume is
+explicitly labelled as a proxy and is never presented as trade delta.
+
 AI, neural networks, reinforcement learning, and other learned-model work
 remain explicitly embargoed until a classical strategy passes the historical
 statistical gates, completes its frozen forward sample, and demonstrates

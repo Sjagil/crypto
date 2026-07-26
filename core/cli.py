@@ -3592,6 +3592,26 @@ def _run_multi_horizon_trend_campaign(
     return run_multi_horizon_trend_campaign(settings)
 
 
+def _volume_strategy_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.volume_strategy_campaign import (
+        volume_strategy_campaign_path,
+    )
+
+    return volume_strategy_campaign_path(settings)
+
+
+def _run_volume_strategy_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.volume_strategy_campaign import (
+        run_volume_strategy_campaign,
+    )
+
+    return run_volume_strategy_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -12874,6 +12894,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         multi_horizon_trend_campaign = (
             campaign_name == "multi-horizon-trend-v1"
         )
+        volume_strategy_campaign = (
+            campaign_name == "volume-strategy-catalog-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -12882,36 +12905,40 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             "institutional-rotation-v2",
         }
         campaign_timeframes = (
-            ("1h", "4h", "1d")
-            if signal_synthesis_storm_campaign
+            ("5m", "15m", "1h", "4h", "1d")
+            if volume_strategy_campaign
             else (
-                ("4h",)
-                if range_expansion_4h_campaign
+                ("1h", "4h", "1d")
+                if signal_synthesis_storm_campaign
                 else (
-                    ("1d",)
-                    if (
-                        rotation_campaign
-                        or capital_utilization_campaign
-                        or diversified_rotation_campaign
-                        or breakout_portfolio_campaign
-                        or absolute_momentum_campaign
-                        or absolute_momentum_plateau_campaign
-                        or volatility_contraction_campaign
-                        or multi_alpha_ensemble_campaign
-                        or trend_pullback_campaign
-                        or sentiment_recovery_campaign
-                        or residual_momentum_campaign
-                        or dual_asset_trend_campaign
-                        or liquidity_sweep_campaign
-                        or residual_reversal_campaign
-                        or macro_liquidity_campaign
-                        or multi_horizon_trend_campaign
-                        or portfolio_storm_campaign
-                    )
+                    ("4h",)
+                    if range_expansion_4h_campaign
                     else (
-                        ("1h",)
-                        if formal_campaign
-                        else ("5m", "15m")
+                        ("1d",)
+                        if (
+                            rotation_campaign
+                            or capital_utilization_campaign
+                            or diversified_rotation_campaign
+                            or breakout_portfolio_campaign
+                            or absolute_momentum_campaign
+                            or absolute_momentum_plateau_campaign
+                            or volatility_contraction_campaign
+                            or multi_alpha_ensemble_campaign
+                            or trend_pullback_campaign
+                            or sentiment_recovery_campaign
+                            or residual_momentum_campaign
+                            or dual_asset_trend_campaign
+                            or liquidity_sweep_campaign
+                            or residual_reversal_campaign
+                            or macro_liquidity_campaign
+                            or multi_horizon_trend_campaign
+                            or portfolio_storm_campaign
+                        )
+                        else (
+                            ("1h",)
+                            if formal_campaign
+                            else ("5m", "15m")
+                        )
                     )
                 )
             )
@@ -12998,6 +13025,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "MACRO_LIQUIDITY_ROTATION_V1"
         if multi_horizon_trend_campaign:
             campaign_label = "MULTI_HORIZON_TREND_V1"
+        if volume_strategy_campaign:
+            campaign_label = "VOLUME_STRATEGY_CATALOG_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -13825,6 +13854,57 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if volume_strategy_campaign:
+                from research.volume_strategy_campaign import (
+                    plan_volume_strategy_campaign,
+                )
+
+                plan = plan_volume_strategy_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_MULTI_ASSET_MULTI_TIMEFRAME_"
+                            "VOLUME_PLATEAU_SEARCH"
+                        ),
+                        "economic_hypothesis": plan[
+                            "economic_hypothesis"
+                        ],
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "allowed_universe_trial_count": plan[
+                            "allowed_universe_trial_count"
+                        ],
+                        "discovery_only_trial_count": plan[
+                            "discovery_only_trial_count"
+                        ],
+                        "market_timeframe_pairs": len(
+                            plan[
+                                "available_market_timeframe_pairs"
+                            ]
+                        ),
+                        "markets": plan["markets"],
+                        "timeframes": plan["timeframes"],
+                        "archetypes": plan["archetypes"],
+                        "plateau_kernel": plan["plateau_kernel"],
+                        "execution_policy": plan["execution_policy"],
+                        "orderflow_data_blockers": plan[
+                            "orderflow_data_blockers"
+                        ],
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
             if absolute_momentum_campaign:
                 from research.absolute_momentum import (
                     absolute_momentum_parameter_set,
@@ -14339,6 +14419,34 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if volume_strategy_campaign:
+                if not args.yes:
+                    from research.volume_strategy_campaign import (
+                        plan_volume_strategy_campaign,
+                    )
+
+                    plan = plan_volume_strategy_campaign(settings)
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": plan[
+                                "trial_count"
+                            ],
+                            "reason_code": (
+                                "PREREGISTERED_VOLUME_CATALOG_FAMILY"
+                            ),
+                            "orders_generated": 0,
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_volume_strategy_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -14652,6 +14760,20 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if volume_strategy_campaign:
+                report_path = _volume_strategy_campaign_path(
+                    settings
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -14912,6 +15034,23 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             if multi_horizon_trend_campaign:
                 report_path = _multi_horizon_trend_campaign_path(
+                    settings
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if volume_strategy_campaign:
+                report_path = _volume_strategy_campaign_path(
                     settings
                 )
                 emit(
@@ -16971,6 +17110,7 @@ def build_parser() -> argparse.ArgumentParser:
         "residual-reversal-v1",
         "macro-liquidity-v1",
         "multi-horizon-trend-v1",
+        "volume-strategy-catalog-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
