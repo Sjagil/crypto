@@ -92,6 +92,7 @@ def build_acceptance_summary(
     volatility_contraction: dict[str, Any] | None = None,
     multi_alpha_ensemble: dict[str, Any] | None = None,
     trend_pullback: dict[str, Any] | None = None,
+    range_expansion_4h: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -347,6 +348,43 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "trend pullback",
             [pullback_primary],
+            container="gates",
+        )
+    if range_expansion_4h is not None:
+        if (
+            range_expansion_4h.get("campaign")
+            != "RANGE_EXPANSION_4H_V1_1"
+        ):
+            raise ValueError(
+                "4h range-expansion campaign identity mismatch"
+            )
+        if int(range_expansion_4h.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "4h range-expansion campaign contains orders"
+            )
+        if bool(range_expansion_4h.get("live_ready", False)):
+            raise ValueError(
+                "4h range-expansion campaign contains live permission"
+            )
+        range_registry = range_expansion_4h.get("trial_registry") or {}
+        if range_registry.get("status") != "PASSED":
+            raise ValueError(
+                "4h range-expansion registry audit failed"
+            )
+        if int(range_registry.get("unique_trial_count") or 0) != int(
+            range_expansion_4h.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "4h range-expansion trial count mismatch"
+            )
+        range_primary = range_expansion_4h.get("primary_result")
+        if not isinstance(range_primary, dict):
+            raise ValueError(
+                "4h range-expansion primary result missing"
+            )
+        require_stochastic_validation(
+            "4h range expansion",
+            [range_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -745,6 +783,40 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if range_expansion_4h is not None:
+        summary["range_expansion_4h"] = {
+            "status": range_expansion_4h["status"],
+            "campaign": range_expansion_4h["campaign"],
+            "engine_version": range_expansion_4h["engine_version"],
+            "timeframe": range_expansion_4h["timeframe"],
+            "periods_per_day": range_expansion_4h[
+                "periods_per_day"
+            ],
+            "generated_trial_count": range_expansion_4h[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": range_expansion_4h[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": range_expansion_4h[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": range_expansion_4h[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": range_expansion_4h[
+                "multiple_testing"
+            ],
+            "trial_registry": range_expansion_4h["trial_registry"],
+            "primary_result": range_expansion_4h["primary_result"],
+            "forward_requirement": range_expansion_4h[
+                "forward_requirement"
+            ],
+            "holdout_status": range_expansion_4h["holdout_status"],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -919,6 +991,18 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "trend_pullback_plan_v1.json": (
             reports / "trend_pullback_plan_v1.json"
         ),
+        "range_expansion_4h_campaign_v1_1.json": (
+            reports / "range_expansion_4h_campaign_v1_1.json"
+        ),
+        "range_expansion_4h_campaign_v1_1.csv": (
+            reports / "range_expansion_4h_campaign_v1_1.csv"
+        ),
+        "range_expansion_4h_plan_v1.json": (
+            reports / "range_expansion_4h_plan_v1.json"
+        ),
+        "range_expansion_4h_plan_v1_1.json": (
+            reports / "range_expansion_4h_plan_v1_1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1042,6 +1126,25 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (pullback_registry_directory / "records").glob("*.json")
     ):
         paths[f"trend_pullback_trial_{record.name}"] = record
+    range_4h_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "range_expansion_4h_v1_1"
+    )
+    for observer in sorted(range_4h_observer_directory.glob("*.json")):
+        paths[f"range_expansion_4h_observer_{observer.name}"] = observer
+    range_4h_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "range_expansion_4h_v1_1"
+    )
+    paths["range_expansion_4h_registry_index.json"] = (
+        range_4h_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (range_4h_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"range_expansion_4h_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1141,6 +1244,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
             "multi_alpha_ensemble_campaign_v1.json"
         ],
         trend_pullback=payloads["trend_pullback_campaign_v1.json"],
+        range_expansion_4h=payloads[
+            "range_expansion_4h_campaign_v1_1.json"
+        ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],
         autopilot_state=payloads.get("autopilot_state.json"),

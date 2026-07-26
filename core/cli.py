@@ -3381,6 +3381,16 @@ def _trend_pullback_campaign_path(settings: Settings) -> Path:
     )
 
 
+def _range_expansion_4h_campaign_path(
+    settings: Settings,
+) -> Path:
+    return (
+        settings.paths.lab_dir
+        / "reports"
+        / "range_expansion_4h_campaign_v1_1.json"
+    )
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -4513,6 +4523,23 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in pullback_forward_summaries.values()
     )
+    range_4h_result = _run_range_expansion_4h_campaign(settings)
+    assert_orderless_research_payload(range_4h_result)
+    range_4h_report = read_json(
+        _range_expansion_4h_campaign_path(settings)
+    )
+    assert_orderless_research_payload(range_4h_report)
+    range_4h_forward_summaries = dict(
+        range_4h_report.get("forward_summaries") or {}
+    )
+    range_4h_forward_observations = sum(
+        int(
+            summary.get("closed_4h_observations")
+            or summary.get("closed_daily_observations")
+            or 0
+        )
+        for summary in range_4h_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4596,6 +4623,19 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_range_expansion_4h_observers": {
+            "campaign": "RANGE_EXPANSION_4H_V1_1",
+            "status": range_4h_result["status"],
+            "observer_count": len(range_4h_forward_summaries),
+            "forward_summaries": range_4h_forward_summaries,
+            "total_forward_observations": (
+                range_4h_forward_observations
+            ),
+            "observation_timeframe": "4h",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -4604,6 +4644,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + contraction_forward_observations
             + ensemble_forward_observations
             + pullback_forward_observations
+            + range_4h_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4635,6 +4676,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "volatility_contraction_v1",
         observer_root / "multi_alpha_ensemble_v1",
         observer_root / "trend_pullback_v1",
+        observer_root / "range_expansion_4h_v1_1",
     )
     paths = [
         path
@@ -4719,6 +4761,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         _run_multi_alpha_ensemble_campaign(settings)
     )
     trend_pullback = _run_trend_pullback_campaign(settings)
+    range_expansion_4h = _run_range_expansion_4h_campaign(
+        settings
+    )
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -4886,6 +4931,35 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": trend_pullback[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_range_expansion_4h_campaign": {
+            "campaign": range_expansion_4h["campaign"],
+            "status": range_expansion_4h["status"],
+            "generated_trial_count": range_expansion_4h[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": range_expansion_4h[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": range_expansion_4h[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": range_expansion_4h[
+                "primary_strategy_id"
+            ],
+            "pbo": range_expansion_4h["pbo"],
+            "economic_pass": range_expansion_4h[
+                "economic_pass"
+            ],
+            "statistical_pass": range_expansion_4h[
+                "statistical_pass"
+            ],
+            "observer_manifests": range_expansion_4h[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -5078,6 +5152,7 @@ def _portfolio_stochastic_validation(
     normal_equity: pd.Series,
     stressed_equity: pd.Series,
     seed_offset: int,
+    expected_block_length: int = 10,
 ) -> dict[str, Any]:
     """Run immutable Monte Carlo and Dirichlet gates on two net return paths."""
 
@@ -5089,7 +5164,7 @@ def _portfolio_stochastic_validation(
     policy = policy_from_research_settings(
         settings.research,
         seed=settings.app.random_seed,
-        expected_block_length=10,
+        expected_block_length=expected_block_length,
     )
     normal_returns = normal_equity.pct_change(fill_method=None).dropna().to_numpy(dtype=float)
     stressed_returns = stressed_equity.pct_change(fill_method=None).dropna().to_numpy(dtype=float)
@@ -9544,6 +9619,642 @@ def _run_trend_pullback_campaign(
     }
 
 
+def _run_range_expansion_4h_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    """Run the preregistered 4h range/volume expansion family."""
+
+    from research.forward_observer import (
+        ForwardPerformanceGatePolicy,
+        build_rotation_forward_evidence,
+        merge_portfolio_forward_manifest,
+    )
+    from research.optimization import multiple_testing_bootstrap
+    from research.portfolio_selection import RotationPortfolioPolicy
+    from research.range_expansion_4h import (
+        FOUR_HOUR_PERIODS_PER_DAY,
+        RANGE_EXPANSION_4H_ENGINE_VERSION,
+        RANGE_EXPANSION_4H_FAMILY,
+        backtest_range_expansion_4h,
+        range_expansion_4h_parameter_set,
+        range_expansion_4h_period_metrics,
+        relabel_4h_forward_summary,
+    )
+    from research.strategy_registry import (
+        ContentAddressedTrialRegistry,
+    )
+
+    markets = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    paths = {
+        market: settings.paths.processed_data_dir
+        / f"{market}_4h.parquet"
+        for market in markets
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"missing 4h range-expansion datasets: {missing}"
+        )
+    data_hashes = {
+        market: sha256_file(path) for market, path in paths.items()
+    }
+    data_fingerprint = stable_hash(data_hashes, length=64)
+    frames = {
+        market: pd.read_parquet(path)
+        for market, path in paths.items()
+    }
+    policy = RotationPortfolioPolicy(
+        allowed_markets=markets,
+        maximum_total_exposure=0.40,
+        maximum_position_exposure=0.20,
+        minimum_cash=0.60,
+        minimum_history_observations=180,
+    )
+    periods = {
+        "development": ("2019-12-01", "2023-12-31T23:59:59Z"),
+        "validation": ("2024-01-01", "2025-06-30T23:59:59Z"),
+        "confirmation": (
+            "2025-07-01",
+            "2026-07-25T20:00:00Z",
+        ),
+    }
+    candidates = range_expansion_4h_parameter_set()
+    report_path = _range_expansion_4h_campaign_path(settings)
+    plan_path = report_path.with_name(
+        "range_expansion_4h_plan_v1_1.json"
+    )
+    search_space_hash = stable_hash(
+        [candidate.dna_hash for candidate in candidates],
+        length=64,
+    )
+    expected_plan = {
+        "schema_version": "range_expansion_4h_plan_v1_1",
+        "status": "PREREGISTERED_NOT_RUN",
+        "campaign": "RANGE_EXPANSION_4H_V1_1",
+        "strategy_family": RANGE_EXPANSION_4H_FAMILY,
+        "engine_version": RANGE_EXPANSION_4H_ENGINE_VERSION,
+        "timeframe": "4h",
+        "periods_per_day": FOUR_HOUR_PERIODS_PER_DAY,
+        "economic_hypothesis": (
+            "A 4h close beyond a strictly prior channel has incremental "
+            "trend information when true range and volume expand against "
+            "strictly prior baselines inside long-horizon asset/BTC trends."
+        ),
+        "trial_count": len(candidates),
+        "strategy_dna_hashes": [
+            candidate.dna_hash for candidate in candidates
+        ],
+        "strategy_dna": [
+            asdict(candidate) for candidate in candidates
+        ],
+        "search_space_hash": search_space_hash,
+        "selection_basis": (
+            "DEVELOPMENT_SHARPE_ONLY_WITH_ALL_TRIALS_ACCOUNTED"
+        ),
+        "periods": periods,
+        "portfolio_policy": asdict(policy),
+        "execution_calendar_policy": (
+            "COMMON_MARKET_INTERSECTION_NO_IMPUTATION"
+        ),
+        "bootstrap_block_bars": 42,
+        "forward_requirement": {
+            "minimum_closed_4h_bars": 365 * FOUR_HOUR_PERIODS_PER_DAY,
+            "minimum_calendar_days_equivalent": 365,
+            "minimum_rebalances": 30,
+        },
+        "known_limitations": [
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS",
+            "EXCHANGE_GAPS_ARE_NOT_IMPUTED",
+            "V1_PREFLIGHT_FAILED_BEFORE_TRIAL_REGISTRATION",
+            "FORWARD_EVIDENCE_REQUIRED",
+            "NO_AUTOMATIC_PROMOTION",
+        ],
+        "orders_generated": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    if plan_path.is_file():
+        stored = read_json(plan_path)
+        for field in (
+            "campaign",
+            "engine_version",
+            "trial_count",
+            "strategy_dna_hashes",
+            "search_space_hash",
+            "periods",
+            "portfolio_policy",
+            "execution_calendar_policy",
+            "bootstrap_block_bars",
+            "forward_requirement",
+        ):
+            if _json_ready(stored.get(field)) != _json_ready(
+                expected_plan.get(field)
+            ):
+                raise RuntimeError(
+                    f"RANGE_EXPANSION_4H_PLAN_DRIFT:{field}"
+                )
+    else:
+        atomic_write_json(plan_path, _json_ready(expected_plan))
+
+    def candidate_name(candidate: Any) -> str:
+        range_code = int(candidate.range_expansion_multiple * 10)
+        volume_code = int(candidate.relative_volume_multiple * 10)
+        return (
+            f"RE4H_E{candidate.entry_lookback}_"
+            f"X{candidate.exit_lookback}_R{range_code:02d}_"
+            f"V{volume_code:02d}_EMA{candidate.asset_ema_period}"
+        )
+
+    results: dict[str, Any] = {}
+    by_name: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    development_returns: dict[str, pd.Series] = {}
+    for candidate in candidates:
+        name = candidate_name(candidate)
+        by_name[name] = candidate
+        result = backtest_range_expansion_4h(
+            frames,
+            candidate,
+            fee_rate=settings.costs.default_fee,
+            slippage_bps=settings.costs.slippage_bps,
+            spread_bps=settings.costs.spread_bps,
+            portfolio_policy=policy,
+        )
+        results[name] = result
+        period_metrics: dict[str, Any] = {}
+        for period, bounds in periods.items():
+            metrics, period_returns = (
+                range_expansion_4h_period_metrics(
+                    result.equity_curve,
+                    start=bounds[0],
+                    end=bounds[1],
+                )
+            )
+            period_metrics[period] = metrics
+            if period == "development":
+                development_returns[name] = period_returns
+        rows.append(
+            {
+                "strategy_id": name,
+                "strategy_dna_hash": candidate.dna_hash,
+                "parameters": asdict(candidate),
+                "normal": result.summary(),
+                "periods": period_metrics,
+            }
+        )
+    matrix = pd.concat(development_returns, axis=1).dropna(how="any")
+    if matrix.empty or matrix.shape[1] != len(candidates):
+        raise RuntimeError("RANGE_EXPANSION_4H_RETURN_MATRIX_INVALID")
+
+    registry = ContentAddressedTrialRegistry(
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "range_expansion_4h_v1_1",
+        campaign_id="RANGE_EXPANSION_4H_V1_1",
+    )
+    development_order = sorted(
+        results,
+        key=lambda name: (
+            -float(
+                next(
+                    row
+                    for row in rows
+                    if row["strategy_id"] == name
+                )["periods"]["development"]["sharpe"]
+            ),
+            name,
+        ),
+    )
+    for rank, name in enumerate(development_order, start=1):
+        row = next(
+            item for item in rows if item["strategy_id"] == name
+        )
+        row["development_selection_rank"] = rank
+        development = development_returns[name]
+        row["registration"] = registry.register(
+            data_fingerprint=data_fingerprint,
+            strategy_family=RANGE_EXPANSION_4H_FAMILY,
+            strategy_dna_hash=str(row["strategy_dna_hash"]),
+            parameters=row["parameters"],
+            metrics_at_birth={
+                **row["periods"]["development"],
+                "full_sample_metrics": row["normal"]["metrics"],
+            },
+            return_path_hash=stable_hash(
+                [
+                    round(float(value), 15)
+                    for value in development.to_numpy(dtype=float)
+                ],
+                length=64,
+            ),
+            selection_metadata={
+                "selection_basis": "DEVELOPMENT_SHARPE_ONLY",
+                "development_rank": rank,
+                "validation_used": False,
+                "confirmation_used": False,
+            },
+        )
+    registry_audit = registry.audit()
+    pullback_path = _trend_pullback_campaign_path(settings)
+    base_known_trials = (
+        int(
+            read_json(pullback_path).get(
+                "total_known_trials",
+                16_861,
+            )
+        )
+        if pullback_path.is_file()
+        else 16_861
+    )
+    total_known_trials = (
+        base_known_trials
+        + int(registry_audit["unique_trial_count"])
+    )
+    multiple = multiple_testing_bootstrap(
+        matrix,
+        bootstrap_samples=(
+            settings.research.multiple_testing_bootstrap_samples
+        ),
+        block_size=max(
+            42,
+            settings.research.multiple_testing_block_size,
+        ),
+        seed=settings.app.random_seed,
+        known_trial_count=total_known_trials,
+    )
+    primary_name = development_order[0]
+    primary_candidate = by_name[primary_name]
+    normal = results[primary_name]
+    stressed = backtest_range_expansion_4h(
+        frames,
+        primary_candidate,
+        fee_rate=(
+            settings.costs.default_fee
+            * settings.costs.stressed_cost_multiplier
+        ),
+        slippage_bps=(
+            settings.costs.slippage_bps
+            * settings.costs.stressed_cost_multiplier
+        ),
+        spread_bps=(
+            settings.costs.spread_bps
+            * settings.costs.stressed_cost_multiplier
+        ),
+        portfolio_policy=policy,
+    )
+    stressed_periods = {
+        period: range_expansion_4h_period_metrics(
+            stressed.equity_curve,
+            start=bounds[0],
+            end=bounds[1],
+        )[0]
+        for period, bounds in periods.items()
+    }
+    stochastic = _portfolio_stochastic_validation(
+        settings,
+        normal_equity=normal.equity_curve,
+        stressed_equity=stressed.equity_curve,
+        seed_offset=100_000,
+        expected_block_length=42,
+    )
+    selected_row = next(
+        row for row in rows if row["strategy_id"] == primary_name
+    )
+    economic_checks = {
+        "all_periods_positive": all(
+            float(selected_row["periods"][period]["net_return"]) > 0.0
+            for period in periods
+        ),
+        "all_stressed_periods_positive": all(
+            float(stressed_periods[period]["net_return"]) > 0.0
+            for period in periods
+        ),
+        "minimum_rebalances": (
+            int(normal.metrics["rebalance_count"])
+            >= settings.research.minimum_trades
+        ),
+        "minimum_effective_sample": (
+            int(
+                normal.metrics[
+                    "portfolio_period_effective_sample_size"
+                ]
+            )
+            >= settings.research.minimum_effective_sample_size
+        ),
+        "profit_factor": (
+            float(normal.metrics["portfolio_period_profit_factor"])
+            >= settings.research.minimum_profit_factor
+        ),
+        "validation_profit_factor": (
+            float(
+                selected_row["periods"]["validation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_profit_factor
+        ),
+        "stressed_validation_profit_factor": (
+            float(
+                stressed_periods["validation"][
+                    "portfolio_period_profit_factor"
+                ]
+            )
+            >= settings.research.minimum_stressed_profit_factor
+        ),
+        "maximum_drawdown": (
+            abs(float(normal.metrics["maximum_drawdown"]))
+            <= settings.research.maximum_drawdown
+        ),
+        "exposure_limits_respected": all(
+            bool(normal.integrity[field])
+            for field in (
+                "maximum_exposure_respected",
+                "maximum_position_exposure_respected",
+                "minimum_cash_respected",
+                "maximum_positions_respected",
+            )
+        ),
+        "causal_prior_baselines": all(
+            bool(normal.integrity[field])
+            for field in (
+                "prior_channel_only",
+                "strictly_prior_atr_baseline",
+                "strictly_prior_volume_baseline",
+                "decision_at_close_execution_next_open",
+                "annualization_frequency_correct",
+                "common_calendar_intersection_only",
+            )
+        ),
+    }
+    pbo = multiple.probability_of_backtest_overfitting
+    statistical_checks = {
+        "deflated_sharpe": (
+            float(
+                multiple.deflated_sharpe_probabilities.get(
+                    primary_name,
+                    0.0,
+                )
+            )
+            >= settings.research.minimum_deflated_sharpe_probability
+        ),
+        "white_reality_check": (
+            multiple.white_reality_check_pvalue
+            <= settings.research.maximum_white_reality_check_pvalue
+        ),
+        "hansen_spa": (
+            multiple.hansen_spa_pvalue
+            <= settings.research.maximum_hansen_spa_pvalue
+        ),
+        "pbo": (
+            pbo is not None
+            and pbo
+            <= settings.research.maximum_probability_of_backtest_overfitting
+        ),
+        "monte_carlo": bool(
+            stochastic["normal"]["monte_carlo"]["passed"]
+            and stochastic["stressed"]["monte_carlo"]["passed"]
+        ),
+        "dirichlet": bool(
+            stochastic["normal"]["dirichlet"]["passed"]
+            and stochastic["stressed"]["dirichlet"]["passed"]
+        ),
+        "untouched_holdout": False,
+    }
+    primary_result = {
+        **selected_row,
+        "stressed": stressed.summary(),
+        "stressed_periods": stressed_periods,
+        "gates": {
+            "economic_checks": economic_checks,
+            "statistical_checks": statistical_checks,
+            "deflated_sharpe_probability": float(
+                multiple.deflated_sharpe_probabilities.get(
+                    primary_name,
+                    0.0,
+                )
+            ),
+            "stochastic_validation": stochastic,
+            "economic_pass": all(economic_checks.values()),
+            "statistical_pass": all(statistical_checks.values()),
+            "research_pass": False,
+            "paper_candidate_permitted": False,
+            "live_ready": False,
+        },
+    }
+
+    forward_start = pd.Timestamp("2026-07-26T00:00:00+00:00")
+    execution_identity = normal.summary()["execution_identity"]
+    source_candidate_identity = stable_hash(
+        {
+            "campaign": "RANGE_EXPANSION_4H_V1_1",
+            "strategy_dna_hash": primary_candidate.dna_hash,
+            "portfolio_policy_hash": policy.policy_hash,
+            "forward_start": forward_start.isoformat(),
+        },
+        length=64,
+    )
+    observer_path = (
+        settings.paths.lab_dir
+        / "observers"
+        / "range_expansion_4h_v1_1"
+        / f"{primary_name.lower()}.json"
+    )
+    minimum_forward_bars = 365 * FOUR_HOUR_PERIODS_PER_DAY
+    observer = {
+        "status": "FROZEN_FORWARD_RESEARCH",
+        "family": "RANGE_EXPANSION_4H_V1_1",
+        "policy_name": primary_name,
+        "source_candidate_identity": source_candidate_identity,
+        "strategy_dna_hash": primary_candidate.dna_hash,
+        "execution_identity": execution_identity,
+        "parameters": asdict(primary_candidate),
+        "portfolio_policy": asdict(policy),
+        "portfolio_policy_hash": policy.policy_hash,
+        "forward_start": forward_start.isoformat(),
+        "forward_observation_timeframe": "4h",
+        "minimum_forward_closed_4h_observations": (
+            minimum_forward_bars
+        ),
+        "minimum_forward_calendar_days_equivalent": 365,
+        "minimum_forward_rebalances": 30,
+        "orders_generated": 0,
+        "orders_submitted": 0,
+        "paper_candidate_permitted": False,
+        "live_ready": False,
+    }
+    if observer_path.is_file():
+        observer.update(
+            _preserved_breakout_forward_fields(
+                read_json(observer_path),
+                source_candidate_identity=source_candidate_identity,
+                strategy_dna_hash=primary_candidate.dna_hash,
+                execution_identity=execution_identity,
+                forward_start=forward_start,
+            )
+        )
+    evidence = build_rotation_forward_evidence(
+        normal,
+        frames,
+        forward_start=forward_start,
+        minimum_observations=minimum_forward_bars,
+        minimum_rebalances=30,
+        performance_policy=ForwardPerformanceGatePolicy(
+            minimum_profit_factor=(
+                settings.research.minimum_profit_factor
+            ),
+            minimum_stressed_profit_factor=(
+                settings.research.minimum_stressed_profit_factor
+            ),
+            maximum_drawdown=settings.research.maximum_drawdown,
+            minimum_effective_sample_size=(
+                settings.research.minimum_effective_sample_size
+            ),
+            stressed_cost_multiplier=(
+                settings.costs.stressed_cost_multiplier
+            ),
+            bootstrap_samples=(
+                settings.research.multiple_testing_bootstrap_samples
+            ),
+            bootstrap_block_size=max(
+                42,
+                settings.research.multiple_testing_block_size,
+            ),
+            bootstrap_seed=settings.app.random_seed,
+        ),
+    )
+    observer = merge_portfolio_forward_manifest(
+        observer,
+        evidence,
+        source_candidate_identity=source_candidate_identity,
+        strategy_dna_hash=primary_candidate.dna_hash,
+        execution_identity=execution_identity,
+        forward_start=forward_start,
+    )
+    observer["data_hashes"] = data_hashes
+    observer["forward_summary"] = relabel_4h_forward_summary(
+        observer["forward_summary"]
+    )
+    atomic_write_json(observer_path, _json_ready(observer))
+
+    payload = {
+        "schema_version": "range_expansion_4h_report_v1_1",
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "RANGE_EXPANSION_4H_V1_1",
+        "strategy_family": RANGE_EXPANSION_4H_FAMILY,
+        "engine_version": RANGE_EXPANSION_4H_ENGINE_VERSION,
+        "timeframe": "4h",
+        "periods_per_day": FOUR_HOUR_PERIODS_PER_DAY,
+        "plan": str(plan_path),
+        "plan_sha256": sha256_file(plan_path),
+        "search_space_hash": search_space_hash,
+        "selection_basis": "DEVELOPMENT_SHARPE_ONLY",
+        "selection_integrity": {
+            "development_only": True,
+            "validation_used_for_selection": False,
+            "confirmation_used_for_selection": False,
+            "selection_rank": 1,
+        },
+        "generated_trial_count": len(candidates),
+        "registered_unique_trials": int(
+            registry_audit["unique_trial_count"]
+        ),
+        "base_known_trials": base_known_trials,
+        "total_known_trials": total_known_trials,
+        "primary_strategy_id": primary_name,
+        "primary_result": primary_result,
+        "candidate_results": rows,
+        "multiple_testing": asdict(multiple),
+        "trial_registry": registry_audit,
+        "data_fingerprint": data_fingerprint,
+        "data_hashes": data_hashes,
+        "periods": periods,
+        "portfolio_policy": asdict(policy),
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "forward_requirement": expected_plan[
+            "forward_requirement"
+        ],
+        "observer_manifests": {primary_name: str(observer_path)},
+        "forward_summaries": {
+            primary_name: observer["forward_summary"]
+        },
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+    atomic_write_json(report_path, _json_ready(payload))
+    csv_path = report_path.with_suffix(".csv")
+    pd.DataFrame(
+        [
+            {
+                "strategy_id": row["strategy_id"],
+                "entry_lookback": row["parameters"][
+                    "entry_lookback"
+                ],
+                "exit_lookback": row["parameters"]["exit_lookback"],
+                "range_expansion_multiple": row["parameters"][
+                    "range_expansion_multiple"
+                ],
+                "relative_volume_multiple": row["parameters"][
+                    "relative_volume_multiple"
+                ],
+                "asset_ema_period": row["parameters"][
+                    "asset_ema_period"
+                ],
+                "development_rank": row[
+                    "development_selection_rank"
+                ],
+                "development_net_return": row["periods"][
+                    "development"
+                ]["net_return"],
+                "validation_net_return": row["periods"][
+                    "validation"
+                ]["net_return"],
+                "confirmation_net_return": row["periods"][
+                    "confirmation"
+                ]["net_return"],
+                "full_net_return": row["normal"]["metrics"][
+                    "net_return"
+                ],
+                "sharpe": row["normal"]["metrics"]["sharpe"],
+                "maximum_drawdown": row["normal"]["metrics"][
+                    "maximum_drawdown"
+                ],
+                "average_exposure": row["normal"]["metrics"][
+                    "average_exposure"
+                ],
+                "selected_primary": (
+                    row["strategy_id"] == primary_name
+                ),
+            }
+            for row in rows
+        ]
+    ).to_csv(csv_path, index=False)
+    return {
+        "status": payload["status"],
+        "campaign": payload["campaign"],
+        "generated_trial_count": len(candidates),
+        "registered_unique_trials": payload[
+            "registered_unique_trials"
+        ],
+        "total_known_trials": total_known_trials,
+        "primary_strategy_id": primary_name,
+        "pbo": pbo,
+        "economic_pass": primary_result["gates"]["economic_pass"],
+        "statistical_pass": primary_result["gates"][
+            "statistical_pass"
+        ],
+        "report": str(report_path),
+        "csv": str(csv_path),
+        "observer_manifests": payload["observer_manifests"],
+        "forward_summaries": payload["forward_summaries"],
+        "paper_candidates": 0,
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+
 def _run_multi_alpha_ensemble_campaign(
     settings: Settings,
 ) -> dict[str, Any]:
@@ -10697,6 +11408,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         trend_pullback_campaign = (
             campaign_name == "trend-pullback-v1"
         )
+        range_expansion_4h_campaign = (
+            campaign_name == "range-expansion-4h-v1-1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -10708,20 +11422,28 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             ("1h", "4h", "1d")
             if signal_synthesis_storm_campaign
             else (
-                ("1d",)
-                if (
-                    rotation_campaign
-                    or capital_utilization_campaign
-                    or diversified_rotation_campaign
-                    or breakout_portfolio_campaign
-                    or absolute_momentum_campaign
-                    or absolute_momentum_plateau_campaign
-                    or volatility_contraction_campaign
-                    or multi_alpha_ensemble_campaign
-                    or trend_pullback_campaign
-                    or portfolio_storm_campaign
+                ("4h",)
+                if range_expansion_4h_campaign
+                else (
+                    ("1d",)
+                    if (
+                        rotation_campaign
+                        or capital_utilization_campaign
+                        or diversified_rotation_campaign
+                        or breakout_portfolio_campaign
+                        or absolute_momentum_campaign
+                        or absolute_momentum_plateau_campaign
+                        or volatility_contraction_campaign
+                        or multi_alpha_ensemble_campaign
+                        or trend_pullback_campaign
+                        or portfolio_storm_campaign
+                    )
+                    else (
+                        ("1h",)
+                        if formal_campaign
+                        else ("5m", "15m")
+                    )
                 )
-                else (("1h",) if formal_campaign else ("5m", "15m"))
             )
         )
         campaign_label = (
@@ -10790,6 +11512,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "MULTI_ALPHA_ENSEMBLE_V1"
         if trend_pullback_campaign:
             campaign_label = "TREND_PULLBACK_V1"
+        if range_expansion_4h_campaign:
+            campaign_label = "RANGE_EXPANSION_4H_V1_1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -10864,6 +11588,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_trend_pullback_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if range_expansion_4h_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_range_expansion_4h_campaign,
                         settings,
                     )
                 )
@@ -11169,6 +11901,49 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         "strategy_dna_hashes": [
                             row.dna_hash for row in parameters
                         ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
+            if range_expansion_4h_campaign:
+                from research.range_expansion_4h import (
+                    range_expansion_4h_parameter_set,
+                )
+
+                parameters = range_expansion_4h_parameter_set()
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_4H_ECONOMIC_ALPHA_FAMILY"
+                        ),
+                        "economic_hypothesis": (
+                            "CAUSAL_4H_RANGE_EXPANSION_WITH_VOLUME_CONFIRMATION"
+                        ),
+                        "selection_basis": "DEVELOPMENT_SHARPE_ONLY",
+                        "generated_trial_count": len(parameters),
+                        "base_known_trials": 16_861,
+                        "projected_total_known_trials": (
+                            16_861 + len(parameters)
+                        ),
+                        "strategy_dna_hashes": [
+                            row.dna_hash for row in parameters
+                        ],
+                        "timeframe": "4h",
+                        "periods_per_day": 6,
+                        "bootstrap_block_bars": 42,
+                        "minimum_forward_closed_4h_bars": 2_190,
                         "maximum_total_exposure": 0.40,
                         "maximum_position_exposure": 0.20,
                         "minimum_cash": 0.60,
@@ -11533,6 +12308,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if range_expansion_4h_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 16,
+                            "reason_code": (
+                                "PREREGISTERED_4H_RANGE_EXPANSION_FAMILY"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_range_expansion_4h_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -11776,6 +12571,20 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if range_expansion_4h_campaign:
+                report_path = _range_expansion_4h_campaign_path(
+                    settings
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -11951,6 +12760,23 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             if trend_pullback_campaign:
                 report_path = _trend_pullback_campaign_path(
+                    settings
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if range_expansion_4h_campaign:
+                report_path = _range_expansion_4h_campaign_path(
                     settings
                 )
                 emit(
@@ -13996,6 +14822,7 @@ def build_parser() -> argparse.ArgumentParser:
         "volatility-contraction-v1",
         "multi-alpha-ensemble-v1",
         "trend-pullback-v1",
+        "range-expansion-4h-v1-1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -14051,6 +14878,7 @@ def build_parser() -> argparse.ArgumentParser:
             "volatility-contraction-v1",
             "multi-alpha-ensemble-v1",
             "trend-pullback-v1",
+            "range-expansion-4h-v1-1",
         ),
         default="cross-sectional-ensemble",
     )

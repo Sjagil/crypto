@@ -735,6 +735,25 @@ and under full-sample stressed costs, while DSR, White Reality Check, Hansen
 SPA, PBO and both stochastic gates failed. All 12 negative trials remain in
 the immutable cumulative denominator; no post-hoc variant is promoted.
 
+`python main.py lab campaign run --name range-expansion-4h-v1-1 --yes`
+evaluates a separate 16-DNA, four-hour range-expansion family on BTC-EUR,
+ETH-EUR, SOL-EUR and LINK-EUR. A completed-bar Donchian breakout must exceed a
+causal ATR threshold, pass relative-volume confirmation and agree with
+asset/BTC trend filters; execution occurs at the next common four-hour open.
+The engine uses the strict intersection of observed asset timestamps and never
+fills missing bars. Version 1.0 stopped before trial registration when it found
+that a held asset could lack a next-open valuation. Its failed preflight plan
+is retained for audit. Version 1.1 made the calendar policy explicit and
+started a new immutable campaign rather than rewriting that failed attempt.
+
+The preregistered v1.1 development winner was
+`RE4H_E60_X30_R15_V15_EMA600`. It lost 2.9% net over the full sample and 45.2%
+under stressed costs, recorded a 20.3% normal-cost drawdown, failed
+confirmation, and failed DSR, White Reality Check, Hansen SPA, PBO and both
+stochastic gates. All 16 trials remain in the cumulative 16,877-trial
+denominator. The observer is orderless, forward progress is 0/2,190 closed
+four-hour bars, and no research, paper or live promotion is permitted.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

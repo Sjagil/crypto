@@ -414,3 +414,56 @@ def test_acceptance_summary_includes_rejected_trend_pullback() -> None:
     assert not pullback["primary_result"]["gates"]["economic_pass"]
     assert pullback["orders_generated"] == 0
     assert pullback["live_ready"] is False
+
+
+def test_acceptance_summary_includes_rejected_4h_range_expansion() -> None:
+    values = _inputs()
+    values["range_expansion_4h"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "RANGE_EXPANSION_4H_V1_1",
+        "engine_version": "1.1.0",
+        "timeframe": "4h",
+        "periods_per_day": 6,
+        "generated_trial_count": 16,
+        "registered_unique_trials": 16,
+        "total_known_trials": 16_877,
+        "primary_strategy_id": (
+            "RE4H_E60_X30_R15_V15_EMA600"
+        ),
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.2286,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 16,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "forward_requirement": {
+            "minimum_closed_4h_bars": 2_190,
+            "minimum_calendar_days_equivalent": 365,
+            "minimum_rebalances": 30,
+        },
+        "holdout_status": (
+            "NO_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    range_4h = summary["range_expansion_4h"]
+    assert range_4h["registered_unique_trials"] == 16
+    assert range_4h["forward_requirement"][
+        "minimum_closed_4h_bars"
+    ] == 2_190
+    assert not range_4h["primary_result"]["gates"]["economic_pass"]
+    assert range_4h["orders_generated"] == 0
+    assert range_4h["live_ready"] is False

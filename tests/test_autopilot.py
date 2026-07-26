@@ -421,6 +421,27 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_range_expansion_4h_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "RANGE_EXPANSION_4H_V1_1",
+            "generated_trial_count": 16,
+            "registered_unique_trials": 16,
+            "total_known_trials": 16_877,
+            "primary_strategy_id": (
+                "RE4H_E60_X30_R15_V15_EMA600"
+            ),
+            "pbo": 0.22857142857142856,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -462,6 +483,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_trend_pullback_campaign"
     ]["economic_pass"]
+    assert (
+        result["parallel_range_expansion_4h_campaign"][
+            "total_known_trials"
+        ]
+        == 16_877
+    )
+    assert not result[
+        "parallel_range_expansion_4h_campaign"
+    ]["statistical_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 
