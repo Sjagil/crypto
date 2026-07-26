@@ -973,6 +973,21 @@ path returned -4.70%, changed the portfolio only twice, and had PBO 0.743; the
 2-of-3 path returned -33.57% with a -35.54% drawdown. White Reality Check and
 Hansen SPA were both 1.0. It has no paper/live permission or order authority.
 
+`python main.py lab campaign run --name multi-horizon-trend-v1 --yes`
+executes one preregistered classical CTA-style DNA over BTC/ETH/SOL/LINK.
+Positive 240-day momentum is mandatory and 20/60/120/240-day votes scale
+daily next-open weights within 40% total exposure, 20% per asset, and 60%
+minimum cash. Its immutable plan predates the result run.
+
+The real campaign returned +161.17% net at 24.98% average exposure, but was
+rejected: validation was only +3.82%, confirmation was -17.59%, double-cost
+confirmation was -21.30%, and maximum drawdown was -34.51%. The confirmation
+expectancy confidence lower bound and all stochastic robustness gates failed.
+DSR, White Reality Check, and Hansen SPA were positive under the authoritative
+32,101-trial denominator, but cannot override those failures or the absence of
+an untouched holdout and forward sample. The DNA remains registered and
+orderlessly observable; it has no paper/live permission.
+
 AI, neural networks, reinforcement learning, and other learned-model work
 remain explicitly embargoed until a classical strategy passes the historical
 statistical gates, completes its frozen forward sample, and demonstrates

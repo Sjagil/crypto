@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import html
 import math
 import os
@@ -3571,6 +3572,26 @@ def _run_macro_liquidity_campaign(
     return run_macro_liquidity_campaign(settings)
 
 
+def _multi_horizon_trend_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.multi_horizon_trend_campaign import (
+        multi_horizon_trend_campaign_path,
+    )
+
+    return multi_horizon_trend_campaign_path(settings)
+
+
+def _run_multi_horizon_trend_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.multi_horizon_trend_campaign import (
+        run_multi_horizon_trend_campaign,
+    )
+
+    return run_multi_horizon_trend_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -5133,6 +5154,22 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in macro_liquidity_forward_summaries.values()
     )
+    gc.collect()
+    multi_horizon_result = _run_multi_horizon_trend_campaign(
+        settings
+    )
+    assert_orderless_research_payload(multi_horizon_result)
+    multi_horizon_report = read_json(
+        _multi_horizon_trend_campaign_path(settings)
+    )
+    assert_orderless_research_payload(multi_horizon_report)
+    multi_horizon_forward_summaries = dict(
+        multi_horizon_report.get("forward_summaries") or {}
+    )
+    multi_horizon_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in multi_horizon_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -5366,6 +5403,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_multi_horizon_trend_observers": {
+            "campaign": "MULTI_HORIZON_TREND_V1",
+            "status": multi_horizon_result["status"],
+            "observer_count": len(
+                multi_horizon_forward_summaries
+            ),
+            "forward_summaries": multi_horizon_forward_summaries,
+            "total_forward_observations": (
+                multi_horizon_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -5384,6 +5436,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + peer_residual_forward_observations
             + shock_diffusion_forward_observations
             + macro_liquidity_forward_observations
+            + multi_horizon_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -5432,6 +5485,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "peer_residual_reversal_v1",
         observer_root / "btc_shock_diffusion_v1",
         observer_root / "macro_liquidity_v1",
+        observer_root / "multi_horizon_trend_v1",
     )
     paths = [
         path
@@ -5728,6 +5782,10 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
         _run_btc_shock_diffusion_campaign(settings)
     )
     macro_liquidity = _run_macro_liquidity_campaign(settings)
+    gc.collect()
+    multi_horizon_trend = _run_multi_horizon_trend_campaign(
+        settings
+    )
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -6234,6 +6292,38 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": macro_liquidity[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_multi_horizon_trend_campaign": {
+            "campaign": multi_horizon_trend["campaign"],
+            "status": multi_horizon_trend["status"],
+            "generated_trial_count": multi_horizon_trend[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": multi_horizon_trend[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": multi_horizon_trend[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": multi_horizon_trend[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": multi_horizon_trend[
+                "primary_strategy_id"
+            ],
+            "pbo": multi_horizon_trend["pbo"],
+            "economic_pass": multi_horizon_trend[
+                "economic_pass"
+            ],
+            "statistical_pass": multi_horizon_trend[
+                "statistical_pass"
+            ],
+            "observer_manifests": multi_horizon_trend[
                 "observer_manifests"
             ],
             "paper_candidates": 0,
@@ -12781,6 +12871,9 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
         macro_liquidity_campaign = (
             campaign_name == "macro-liquidity-v1"
         )
+        multi_horizon_trend_campaign = (
+            campaign_name == "multi-horizon-trend-v1"
+        )
         portfolio_storm_campaign = campaign_name == "portfolio-storm-v1"
         signal_synthesis_storm_campaign = campaign_name == "signal-synthesis-storm-v1"
         rotation_campaign = campaign_name in {
@@ -12812,6 +12905,7 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                         or liquidity_sweep_campaign
                         or residual_reversal_campaign
                         or macro_liquidity_campaign
+                        or multi_horizon_trend_campaign
                         or portfolio_storm_campaign
                     )
                     else (
@@ -12902,6 +12996,8 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
             campaign_label = "RESIDUAL_REVERSAL_V1"
         if macro_liquidity_campaign:
             campaign_label = "MACRO_LIQUIDITY_ROTATION_V1"
+        if multi_horizon_trend_campaign:
+            campaign_label = "MULTI_HORIZON_TREND_V1"
         campaign_sizes = _lab_sizes(
             getattr(args, "combination_sizes", "1,2"),
             (1, 2),
@@ -13032,6 +13128,14 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 emit(
                     await asyncio.to_thread(
                         _run_macro_liquidity_campaign,
+                        settings,
+                    )
+                )
+                return 0
+            if multi_horizon_trend_campaign:
+                emit(
+                    await asyncio.to_thread(
+                        _run_multi_horizon_trend_campaign,
                         settings,
                     )
                 )
@@ -13675,6 +13779,52 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if multi_horizon_trend_campaign:
+                from research.multi_horizon_trend_campaign import (
+                    plan_multi_horizon_trend_campaign,
+                )
+
+                plan = plan_multi_horizon_trend_campaign(settings)
+                emit(
+                    {
+                        "status": (
+                            "CAMPAIGN_PLAN"
+                            if campaign_action == "plan"
+                            else "CAMPAIGN_ESTIMATE"
+                        ),
+                        "campaign": campaign_label,
+                        "result_type": (
+                            "PREREGISTERED_SINGLE_FIXED_CLASSICAL_DNA"
+                        ),
+                        "economic_hypothesis": plan[
+                            "economic_hypothesis"
+                        ],
+                        "selection_basis": plan["selection_basis"],
+                        "generated_trial_count": plan["trial_count"],
+                        "strategy_dna_hashes": plan[
+                            "strategy_dna_hashes"
+                        ],
+                        "execution_policy": plan["execution_policy"],
+                        "discovery_governance": plan[
+                            "discovery_governance"
+                        ],
+                        "pbo_policy": plan["pbo_policy"],
+                        "known_limitations": plan[
+                            "known_limitations"
+                        ],
+                        "maximum_total_exposure": 0.40,
+                        "maximum_position_exposure": 0.20,
+                        "minimum_cash": 0.60,
+                        "next_open_execution": True,
+                        "ai_development_status": (
+                            "AI_DEVELOPMENT_EMBARGOED"
+                        ),
+                        "paper_candidates": 0,
+                        "orders_generated": 0,
+                        "live_ready": False,
+                    }
+                )
+                return 0
             if absolute_momentum_campaign:
                 from research.absolute_momentum import (
                     absolute_momentum_parameter_set,
@@ -14169,6 +14319,26 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     )
                 )
                 return 0
+            if multi_horizon_trend_campaign:
+                if not args.yes:
+                    emit(
+                        {
+                            "status": "CONFIRMATION_REQUIRED",
+                            "campaign": campaign_label,
+                            "generated_trial_count": 1,
+                            "reason_code": (
+                                "PREREGISTERED_SINGLE_FIXED_CLASSICAL_DNA"
+                            ),
+                        }
+                    )
+                    return 2
+                emit(
+                    await asyncio.to_thread(
+                        _run_multi_horizon_trend_campaign,
+                        settings,
+                    )
+                )
+                return 0
             if absolute_momentum_campaign:
                 if not args.yes:
                     emit(
@@ -14468,6 +14638,20 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                     }
                 )
                 return 0
+            if multi_horizon_trend_campaign:
+                report_path = _multi_horizon_trend_campaign_path(
+                    settings
+                )
+                emit(
+                    read_json(report_path)
+                    if report_path.is_file()
+                    else {
+                        "status": "NOT_RUN",
+                        "campaign": campaign_label,
+                        "report": str(report_path),
+                    }
+                )
+                return 0
             if diversified_rotation_campaign:
                 report_path = _diversified_rotation_campaign_path(settings)
                 emit(
@@ -14711,6 +14895,23 @@ async def command_lab_async(args: argparse.Namespace, settings: Settings) -> int
                 return 0
             if dual_asset_trend_campaign:
                 report_path = _dual_asset_trend_campaign_path(
+                    settings
+                )
+                emit(
+                    {
+                        "campaign": campaign_label,
+                        "status": (
+                            read_json(report_path).get("status")
+                            if report_path.is_file()
+                            else "NOT_RUN"
+                        ),
+                        "report": str(report_path),
+                        "live_orders": 0,
+                    }
+                )
+                return 0
+            if multi_horizon_trend_campaign:
+                report_path = _multi_horizon_trend_campaign_path(
                     settings
                 )
                 emit(
@@ -16769,6 +16970,7 @@ def build_parser() -> argparse.ArgumentParser:
         "liquidity-sweep-v1",
         "residual-reversal-v1",
         "macro-liquidity-v1",
+        "multi-horizon-trend-v1",
         "portfolio-storm-v1",
         "signal-synthesis-storm-v1",
     )
@@ -16831,6 +17033,7 @@ def build_parser() -> argparse.ArgumentParser:
             "liquidity-sweep-v1",
             "residual-reversal-v1",
             "macro-liquidity-v1",
+            "multi-horizon-trend-v1",
         ),
         default="cross-sectional-ensemble",
     )

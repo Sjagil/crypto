@@ -692,6 +692,27 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_multi_horizon_trend_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "MULTI_HORIZON_TREND_V1",
+            "generated_trial_count": 1,
+            "registered_unique_trials": 1,
+            "registered_epoch_records": 1,
+            "total_known_trials": 32_101,
+            "primary_strategy_id": "MHT_20_60_120_240_STRUCT240",
+            "pbo": None,
+            "pbo_applicable": False,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(get_settings())
     assert result["prior_trials_accounted"] == 32_092
     assert result["total_known_trials"] == 32_100

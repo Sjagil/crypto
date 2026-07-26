@@ -1498,6 +1498,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "macro_liquidity_plan_v1.json": (
             reports / "macro_liquidity_plan_v1.json"
         ),
+        "multi_horizon_trend_campaign_v1.json": (
+            reports / "multi_horizon_trend_campaign_v1.json"
+        ),
+        "multi_horizon_trend_campaign_v1.csv": (
+            reports / "multi_horizon_trend_campaign_v1.csv"
+        ),
+        "multi_horizon_trend_plan_v1.json": (
+            reports / "multi_horizon_trend_plan_v1.json"
+        ),
         "global_trial_accounting_v1.json": (
             reports / "global_trial_accounting_v1.json"
         ),
@@ -1849,6 +1858,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (macro_liquidity_registry_directory / "records").glob("*.json")
     ):
         paths[f"macro_liquidity_trial_{record.name}"] = record
+    multi_horizon_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "multi_horizon_trend_v1"
+    )
+    for observer in sorted(
+        multi_horizon_observer_directory.glob("*.json")
+    ):
+        paths[f"multi_horizon_trend_observer_{observer.name}"] = (
+            observer
+        )
+    multi_horizon_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "multi_horizon_trend_v1"
+    )
+    paths["multi_horizon_trend_registry_index.json"] = (
+        multi_horizon_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (multi_horizon_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"multi_horizon_trend_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
