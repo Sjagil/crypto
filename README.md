@@ -907,6 +907,21 @@ leaderboards, reports, and charts are written below `output/lab/`. Restarting
 with `--resume` recovers stale work and deterministic experiment hashes prevent
 completed experiments from being duplicated.
 
+Storm data epochs are now accounted separately from strategy discovery. A
+frozen 5,000-DNA search space evaluated on a new daily watermark creates 5,000
+new immutable evaluation records but zero new strategy trials. The reconciled
+epoch indexes use `UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS`; this prevents DSR and
+other multiple-testing denominators from increasing merely because time
+advanced.
+
+`MULTI_ALPHA_ENSEMBLE_V2` is one preregistered classical meta-strategy that
+combines the frozen absolute-momentum and beta-residual-reversal sleeves. It
+uses equal fixed sleeves, causal volatility targeting, an additional next-open
+meta-execution lag, at most 40% total exposure and 20% per asset. The family is
+historically discovery-contaminated, remains orderless, and requires 365 new
+daily observations plus 30 forward rebalances; it cannot authorize paper or
+live trading from its historical backtest.
+
 Every generated baseline is paired with deterministic one-dimensional
 sensitivity work for each tunable block parameter. Large grids use a documented
 deterministic non-default sample in QUICK mode; joint parameter work is handled

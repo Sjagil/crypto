@@ -9,6 +9,11 @@ from research.multi_alpha_ensemble import (
     MultiAlphaEnsembleParameters,
     backtest_multi_alpha_ensemble,
 )
+from research.multi_alpha_ensemble_v2 import (
+    FROZEN_COMPONENT_DNA_V2,
+    MULTI_ALPHA_ENSEMBLE_V2_FAMILY,
+    MultiAlphaEnsembleV2Parameters,
+)
 from research.portfolio_selection import RotationPortfolioPolicy
 
 
@@ -95,6 +100,37 @@ def test_ensemble_dna_is_single_fixed_component_set() -> None:
     assert parameters.target_annualized_volatility == 0.10
     assert parameters.volatility_lookback == 60
     assert len(parameters.dna_hash) == 64
+
+
+def test_v2_ensemble_uses_exactly_two_frozen_classical_sleeves() -> None:
+    parameters = MultiAlphaEnsembleV2Parameters()
+    assert parameters.component_dna == FROZEN_COMPONENT_DNA_V2
+    assert parameters.strategy_family == MULTI_ALPHA_ENSEMBLE_V2_FAMILY
+    assert len(parameters.dna_hash) == 64
+
+    frames = _frames()
+    original = _component_weights(frames)
+    source_weights = tuple(original.values())
+    components = {
+        name: source_weights[index].copy()
+        for index, (name, _) in enumerate(
+            FROZEN_COMPONENT_DNA_V2
+        )
+    }
+    result = backtest_multi_alpha_ensemble(
+        frames,
+        components,
+        parameters,
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+        portfolio_policy=_policy(),
+    )
+    assert result.summary()["strategy_family"] == (
+        MULTI_ALPHA_ENSEMBLE_V2_FAMILY
+    )
+    assert result.component_diagnostics["component_count"] == 2
+    assert result.integrity["orders_generated"] == 0
 
 
 def test_ensemble_is_causal_bounded_and_orderless() -> None:

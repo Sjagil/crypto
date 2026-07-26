@@ -844,6 +844,7 @@ def run_signal_synthesis_storm(
     slippage_bps: float,
     spread_bps: float,
     prior_known_trials: int,
+    known_trial_count: int | None = None,
     bootstrap_samples: int = 2_000,
     maximum_survivors: int = 48,
     batch_size: int = SIGNAL_STORM_BATCH_SIZE,
@@ -857,6 +858,16 @@ def run_signal_synthesis_storm(
         raise ValueError("signal storm DNA contains duplicates")
     if batch_size < 1:
         raise ValueError("signal storm batch size must be positive")
+    total_known_trials = (
+        int(known_trial_count)
+        if known_trial_count is not None
+        else prior_known_trials + len(dna)
+    )
+    if total_known_trials < max(prior_known_trials, len(dna)):
+        raise ValueError(
+            "known trial count cannot be below the prior or evaluated "
+            "strategy count"
+        )
     selected_registry = dict(registry or signal_block_registry())
     aligned, weekly_index = _align_frames(frames_by_timeframe)
     one_way_cost = fee_rate + slippage_bps / 10_000.0 + spread_bps / 20_000.0
@@ -1005,7 +1016,7 @@ def run_signal_synthesis_storm(
             pd.Series(development[:, index]),
             trial_sharpes,
             observed_sharpe=float(trial_sharpes[index]),
-            total_trials=prior_known_trials + len(dna),
+            total_trials=total_known_trials,
         )
         survivors.append(
             {
@@ -1045,7 +1056,10 @@ def run_signal_synthesis_storm(
         "engine_version": SIGNAL_STORM_ENGINE_VERSION,
         "trial_count": len(dna),
         "prior_known_trials": prior_known_trials,
-        "total_known_trials": prior_known_trials + len(dna),
+        "new_strategy_trial_count": (
+            total_known_trials - prior_known_trials
+        ),
+        "total_known_trials": total_known_trials,
         "search_space_hash": stable_hash(
             [row.dna_hash for row in dna],
             length=64,
@@ -1097,7 +1111,7 @@ def run_signal_synthesis_storm(
         "pareto_survivors": survivors,
         "multiple_testing": {
             **multiple_testing,
-            "dsr_total_trial_denominator": (prior_known_trials + len(dna)),
+            "dsr_total_trial_denominator": total_known_trials,
             "white_reality_check_gate": (multiple_testing["white_reality_check_pvalue"] <= 0.10),
             "hansen_spa_gate": (multiple_testing["hansen_spa_pvalue"] <= 0.05),
             "pbo_gate": (

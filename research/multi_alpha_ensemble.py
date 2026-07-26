@@ -70,6 +70,14 @@ class MultiAlphaEnsembleParameters:
             raise ValueError("component DNA differs from preregistration")
 
     @property
+    def strategy_family(self) -> str:
+        return MULTI_ALPHA_ENSEMBLE_FAMILY
+
+    @property
+    def engine_version(self) -> str:
+        return MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION
+
+    @property
     def dna_hash(self) -> str:
         return stable_hash(
             {
@@ -96,10 +104,10 @@ class MultiAlphaEnsembleResult:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "strategy_family": MULTI_ALPHA_ENSEMBLE_FAMILY,
+            "strategy_family": self.parameters.strategy_family,
             "strategy_dna_hash": self.parameters.dna_hash,
             "result_type": "EXACT_BACKTEST",
-            "engine_version": MULTI_ALPHA_ENSEMBLE_ENGINE_VERSION,
+            "engine_version": self.parameters.engine_version,
             "parameters": asdict(self.parameters),
             "portfolio_policy": asdict(self.portfolio_policy),
             "portfolio_policy_hash": self.portfolio_policy.policy_hash,
@@ -126,8 +134,9 @@ def _validate_component_weights(
     *,
     index: pd.DatetimeIndex,
     markets: pd.Index,
+    component_dna: tuple[tuple[str, str], ...],
 ) -> dict[str, pd.DataFrame]:
-    required = {name for name, _ in FROZEN_COMPONENT_DNA}
+    required = {name for name, _ in component_dna}
     if set(component_weights) != required:
         raise ValueError(
             "component weight labels differ from frozen ensemble DNA"
@@ -315,6 +324,7 @@ def backtest_multi_alpha_ensemble(
         component_weights,
         index=closes.index,
         markets=closes.columns,
+        component_dna=parameters.component_dna,
     )
     sleeve_weight = 1.0 / len(components)
     combined = sum(
@@ -497,7 +507,7 @@ def backtest_multi_alpha_ensemble(
         decisions=decisions_frame,
         component_diagnostics={
             "component_count": len(components),
-            "component_dna": dict(FROZEN_COMPONENT_DNA),
+            "component_dna": dict(parameters.component_dna),
             "fixed_sleeve_weight": sleeve_weight,
             "component_active_days": component_active_days,
             "selection_trials_in_meta_family": 1,

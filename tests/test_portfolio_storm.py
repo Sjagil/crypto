@@ -113,11 +113,13 @@ def test_small_storm_uses_development_only_pareto_and_never_promotes():
         slippage_bps=8.0,
         spread_bps=5.0,
         prior_known_trials=1_312,
+        known_trial_count=1_312,
         maximum_survivors=8,
     )
 
     assert report["trial_count"] == 24
-    assert report["total_known_trials"] == 1_336
+    assert report["new_strategy_trial_count"] == 0
+    assert report["total_known_trials"] == 1_312
     assert report["selection_basis"] == "DEVELOPMENT_ONLY"
     assert report["selection_integrity"] == {
         "development_returns_only": True,
@@ -128,7 +130,7 @@ def test_small_storm_uses_development_only_pareto_and_never_promotes():
     assert report["pareto_survivor_count"] <= 8
     assert matrix.shape == (len(timestamps), 24)
     assert np.isfinite(matrix).all()
-    assert report["multiple_testing"]["dsr_total_trial_denominator"] == 1_336
+    assert report["multiple_testing"]["dsr_total_trial_denominator"] == 1_312
     assert report["multiple_testing"]["strategy_count"] == 24
     assert report["multiple_testing"]["white_spa_status"] == (
         "FORMALLY_EVALUATED_ALL_STORM_TRIALS"

@@ -35,6 +35,53 @@ def _observer_stage():
     }
 
 
+def test_storm_epoch_accounting_counts_data_epochs_without_recounting_dna():
+    epochs = [
+        {
+            "epoch_id": "CANONICAL_INITIAL_STORM",
+            "source": "CANONICAL_PORTFOLIO_STORM_V1",
+            "strategy_search_space_hash": "space-a",
+            "evaluated_strategy_count": 5_000,
+            "total_known_trials": 6_312,
+        },
+        {
+            "epoch_id": "data-epoch-two",
+            "source": "AUTOPILOT_NEW_DATA_EPOCH",
+            "strategy_search_space_hash": "space-a",
+            "evaluated_strategy_count": 5_000,
+            "total_known_trials": 11_312,
+        },
+        {
+            "epoch_id": "new-search-space",
+            "source": "AUTOPILOT_NEW_DATA_EPOCH",
+            "strategy_search_space_hash": "space-b",
+            "evaluated_strategy_count": 5_000,
+            "total_known_trials": 16_312,
+        },
+    ]
+
+    reconciled, total = cli._reconcile_storm_epoch_accounting(
+        epochs,
+        default_prior_known_trials=1_312,
+    )
+
+    assert total == 11_312
+    assert [row["new_strategy_dna_count"] for row in reconciled] == [
+        0,
+        0,
+        5_000,
+    ]
+    assert [row["total_known_trials"] for row in reconciled] == [
+        6_312,
+        6_312,
+        11_312,
+    ]
+    assert reconciled[1]["report_total_known_trials_at_birth"] == 11_312
+    assert all(
+        row["evaluation_epoch_count"] == 1 for row in reconciled
+    )
+
+
 def test_performance_degradation_z_score_is_finite_and_fail_closed():
     assert performance_degradation_z_score(
         live_return=-0.03,
@@ -548,6 +595,25 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_multi_alpha_ensemble_v2_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "MULTI_ALPHA_ENSEMBLE_V2",
+            "generated_trial_count": 1,
+            "registered_unique_trials": 1,
+            "registered_epoch_records": 1,
+            "total_known_trials": 16_911,
+            "primary_strategy_id": "MULTI_ALPHA_FIXED_V2",
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -647,6 +713,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_residual_reversal_campaign"
     ]["statistical_pass"]
+    assert (
+        result["parallel_multi_alpha_ensemble_v2_campaign"][
+            "total_known_trials"
+        ]
+        == 16_911
+    )
+    assert not result[
+        "parallel_multi_alpha_ensemble_v2_campaign"
+    ]["economic_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

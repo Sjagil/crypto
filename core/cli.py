@@ -3491,6 +3491,26 @@ def _run_residual_reversal_campaign(
     return run_residual_reversal_campaign(settings)
 
 
+def _multi_alpha_ensemble_v2_campaign_path(
+    settings: Settings,
+) -> Path:
+    from research.multi_alpha_ensemble_v2_campaign import (
+        multi_alpha_ensemble_v2_campaign_path,
+    )
+
+    return multi_alpha_ensemble_v2_campaign_path(settings)
+
+
+def _run_multi_alpha_ensemble_v2_campaign(
+    settings: Settings,
+) -> dict[str, Any]:
+    from research.multi_alpha_ensemble_v2_campaign import (
+        run_multi_alpha_ensemble_v2_campaign,
+    )
+
+    return run_multi_alpha_ensemble_v2_campaign(settings)
+
+
 def _portfolio_storm_paths(
     settings: Settings,
 ) -> tuple[Path, Path, Path]:
@@ -3577,6 +3597,7 @@ def _run_signal_synthesis_storm_campaign(
     maximum_trials: int | None = None,
     artifact_directory: Path | None = None,
     prior_known_trials_override: int | None = None,
+    known_trial_count_override: int | None = None,
     epoch_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one immutable, broad signal-DNA screen without promotion."""
@@ -3674,6 +3695,7 @@ def _run_signal_synthesis_storm_campaign(
         slippage_bps=settings.costs.slippage_bps,
         spread_bps=settings.costs.spread_bps,
         prior_known_trials=prior_known_trials,
+        known_trial_count=known_trial_count_override,
     )
     _audit_signal_storm_survivors_exact(
         settings,
@@ -3954,6 +3976,7 @@ def _run_portfolio_storm_campaign(
     maximum_trials: int | None = None,
     artifact_directory: Path | None = None,
     prior_known_trials_override: int | None = None,
+    known_trial_count_override: int | None = None,
     epoch_id: str | None = None,
 ) -> dict[str, Any]:
     """Run an immutable development-only multi-objective portfolio storm."""
@@ -4017,6 +4040,7 @@ def _run_portfolio_storm_campaign(
         slippage_bps=settings.costs.slippage_bps,
         spread_bps=settings.costs.spread_bps,
         prior_known_trials=prior_known_trials,
+        known_trial_count=known_trial_count_override,
     )
     temporary_matrix = matrix_path.with_suffix(".tmp.npz")
     np.savez_compressed(
@@ -4067,6 +4091,94 @@ def _run_portfolio_storm_campaign(
     }
 
 
+def _reconcile_storm_epoch_accounting(
+    epochs: list[dict[str, Any]],
+    *,
+    default_prior_known_trials: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Separate immutable data evaluations from unique strategy trials.
+
+    A storm may reevaluate the same frozen search space on every new data
+    watermark.  Those are new evidence epochs, not new strategy DNA.  The
+    original reports remain untouched; this derived index records both the
+    at-birth denominator and the reconciled unique-strategy denominator.
+    """
+
+    reconciled: list[dict[str, Any]] = []
+    seen_search_spaces: set[str] = set()
+    running_total = int(default_prior_known_trials)
+    for position, raw_epoch in enumerate(epochs):
+        epoch = dict(raw_epoch)
+        report: dict[str, Any] = {}
+        report_path = Path(str(epoch.get("report") or ""))
+        if report_path.is_file():
+            report = read_json(report_path)
+        search_space_hash = str(
+            epoch.get("strategy_search_space_hash")
+            or report.get("search_space_hash")
+            or ""
+        )
+        evaluated_strategy_count = int(
+            report.get("trial_count")
+            or epoch.get("evaluated_strategy_count")
+            or epoch.get("new_trial_count")
+            or 0
+        )
+        source = str(epoch.get("source") or "")
+        is_canonical_baseline = (
+            position == 0
+            and (
+                source.startswith("CANONICAL_")
+                or str(epoch.get("epoch_id") or "").startswith(
+                    "CANONICAL_"
+                )
+            )
+        )
+        at_birth_total = int(
+            epoch.get("report_total_known_trials_at_birth")
+            or report.get("total_known_trials")
+            or epoch.get("total_known_trials")
+            or running_total
+        )
+        if is_canonical_baseline:
+            running_total = max(running_total, at_birth_total)
+            prior_total = max(
+                int(default_prior_known_trials),
+                running_total - evaluated_strategy_count,
+            )
+            new_strategy_count = 0
+        else:
+            prior_total = running_total
+            new_strategy_count = (
+                0
+                if search_space_hash
+                and search_space_hash in seen_search_spaces
+                else evaluated_strategy_count
+            )
+            running_total += new_strategy_count
+        if search_space_hash:
+            seen_search_spaces.add(search_space_hash)
+        epoch.update(
+            {
+                "prior_known_trials": prior_total,
+                "new_trial_count": new_strategy_count,
+                "new_strategy_dna_count": new_strategy_count,
+                "evaluated_strategy_count": evaluated_strategy_count,
+                "evaluation_epoch_count": 1,
+                "strategy_search_space_hash": (
+                    search_space_hash or None
+                ),
+                "report_total_known_trials_at_birth": at_birth_total,
+                "total_known_trials": running_total,
+                "trial_accounting_semantics": (
+                    "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+                ),
+            }
+        )
+        reconciled.append(epoch)
+    return reconciled, running_total
+
+
 def _run_autopilot_storm_epoch(
     settings: Settings,
     *,
@@ -4115,6 +4227,21 @@ def _run_autopilot_storm_epoch(
             index["last_epoch_id"] = canonical_epoch["epoch_id"]
             index["total_known_trials"] = canonical_epoch["total_known_trials"]
             atomic_write_json(index_path, _json_ready(index))
+    epochs, reconciled_total = _reconcile_storm_epoch_accounting(
+        epochs,
+        default_prior_known_trials=1_312,
+    )
+    index.update(
+        {
+            "epochs": epochs,
+            "total_known_trials": reconciled_total,
+            "evaluation_epoch_count": len(epochs),
+            "trial_accounting_version": (
+                "unique_strategy_dna_v2"
+            ),
+        }
+    )
+    atomic_write_json(index_path, _json_ready(index))
     existing = next(
         (row for row in epochs if row.get("data_fingerprint") == data_fingerprint),
         None,
@@ -4138,13 +4265,33 @@ def _run_autopilot_storm_epoch(
         },
         length=20,
     )
-    prior_known_trials = max([int(row.get("total_known_trials") or 0) for row in epochs] or [1_312])
+    prior_known_trials = reconciled_total
+    current_search_space_hash = str(
+        _portfolio_storm_plan_payload(
+            settings,
+            trial_count=STORM_TRIAL_COUNT,
+        )["search_space_hash"]
+    )
+    known_search_spaces = {
+        str(row.get("strategy_search_space_hash"))
+        for row in epochs
+        if row.get("strategy_search_space_hash")
+    }
+    new_strategy_trial_count = (
+        STORM_TRIAL_COUNT
+        if current_search_space_hash not in known_search_spaces
+        else 0
+    )
+    total_known_trials = (
+        prior_known_trials + new_strategy_trial_count
+    )
     epoch_directory = root / epoch_id
     result = _run_portfolio_storm_campaign(
         settings,
         maximum_trials=STORM_TRIAL_COUNT,
         artifact_directory=epoch_directory,
         prior_known_trials_override=prior_known_trials,
+        known_trial_count_override=total_known_trials,
         epoch_id=epoch_id,
     )
     epoch = {
@@ -4152,7 +4299,17 @@ def _run_autopilot_storm_epoch(
         "data_fingerprint": data_fingerprint,
         "source": "AUTOPILOT_NEW_DATA_EPOCH",
         "engine_version": STORM_ENGINE_VERSION,
-        "new_trial_count": STORM_TRIAL_COUNT,
+        "new_trial_count": new_strategy_trial_count,
+        "new_strategy_dna_count": new_strategy_trial_count,
+        "evaluated_strategy_count": STORM_TRIAL_COUNT,
+        "evaluation_epoch_count": 1,
+        "strategy_search_space_hash": current_search_space_hash,
+        "report_total_known_trials_at_birth": int(
+            result["total_known_trials"]
+        ),
+        "trial_accounting_semantics": (
+            "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+        ),
         "prior_known_trials": prior_known_trials,
         "total_known_trials": int(result["total_known_trials"]),
         "pareto_survivor_count": int(result["pareto_survivor_count"]),
@@ -4227,6 +4384,21 @@ def _run_autopilot_signal_storm_epoch(
             index["last_epoch_id"] = canonical_epoch["epoch_id"]
             index["total_known_trials"] = canonical_epoch["total_known_trials"]
             atomic_write_json(index_path, _json_ready(index))
+    epochs, reconciled_total = _reconcile_storm_epoch_accounting(
+        epochs,
+        default_prior_known_trials=6_312,
+    )
+    index.update(
+        {
+            "epochs": epochs,
+            "total_known_trials": reconciled_total,
+            "evaluation_epoch_count": len(epochs),
+            "trial_accounting_version": (
+                "unique_strategy_dna_v2"
+            ),
+        }
+    )
+    atomic_write_json(index_path, _json_ready(index))
     existing = next(
         (row for row in epochs if row.get("data_fingerprint") == data_fingerprint),
         None,
@@ -4249,8 +4421,25 @@ def _run_autopilot_signal_storm_epoch(
         },
         length=20,
     )
-    prior_known_trials = max(
-        [int(row.get("total_known_trials") or 0) for row in epochs] or [16_312]
+    prior_known_trials = reconciled_total
+    current_search_space_hash = str(
+        _signal_synthesis_storm_plan_payload(
+            settings,
+            trial_count=SIGNAL_STORM_TRIAL_COUNT,
+        )["search_space_hash"]
+    )
+    known_search_spaces = {
+        str(row.get("strategy_search_space_hash"))
+        for row in epochs
+        if row.get("strategy_search_space_hash")
+    }
+    new_strategy_trial_count = (
+        SIGNAL_STORM_TRIAL_COUNT
+        if current_search_space_hash not in known_search_spaces
+        else 0
+    )
+    total_known_trials = (
+        prior_known_trials + new_strategy_trial_count
     )
     epoch_directory = root / epoch_id
     result = _run_signal_synthesis_storm_campaign(
@@ -4258,6 +4447,7 @@ def _run_autopilot_signal_storm_epoch(
         maximum_trials=SIGNAL_STORM_TRIAL_COUNT,
         artifact_directory=epoch_directory,
         prior_known_trials_override=prior_known_trials,
+        known_trial_count_override=total_known_trials,
         epoch_id=epoch_id,
     )
     epoch = {
@@ -4265,7 +4455,17 @@ def _run_autopilot_signal_storm_epoch(
         "data_fingerprint": data_fingerprint,
         "source": "AUTOPILOT_NEW_DATA_EPOCH",
         "engine_version": SIGNAL_STORM_ENGINE_VERSION,
-        "new_trial_count": SIGNAL_STORM_TRIAL_COUNT,
+        "new_trial_count": new_strategy_trial_count,
+        "new_strategy_dna_count": new_strategy_trial_count,
+        "evaluated_strategy_count": SIGNAL_STORM_TRIAL_COUNT,
+        "evaluation_epoch_count": 1,
+        "strategy_search_space_hash": current_search_space_hash,
+        "report_total_known_trials_at_birth": int(
+            result["total_known_trials"]
+        ),
+        "trial_accounting_semantics": (
+            "UNIQUE_STRATEGY_DNA_NOT_DATA_EPOCHS"
+        ),
         "prior_known_trials": prior_known_trials,
         "total_known_trials": int(result["total_known_trials"]),
         "pareto_survivor_count": int(result["pareto_survivor_count"]),
@@ -4709,6 +4909,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
         int(summary.get("closed_daily_observations") or 0)
         for summary in residual_reversal_forward_summaries.values()
     )
+    ensemble_v2_result = _run_multi_alpha_ensemble_v2_campaign(
+        settings
+    )
+    assert_orderless_research_payload(ensemble_v2_result)
+    ensemble_v2_report = read_json(
+        _multi_alpha_ensemble_v2_campaign_path(settings)
+    )
+    assert_orderless_research_payload(ensemble_v2_report)
+    ensemble_v2_forward_summaries = dict(
+        ensemble_v2_report.get("forward_summaries") or {}
+    )
+    ensemble_v2_forward_observations = sum(
+        int(summary.get("closed_daily_observations") or 0)
+        for summary in ensemble_v2_forward_summaries.values()
+    )
     aggregate = {
         "status": "FROZEN_FORWARD_RESEARCH",
         "campaign": "PORTFOLIO_BREAKOUT_V1",
@@ -4878,6 +5093,21 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             "orders_generated": 0,
             "live_ready": False,
         },
+        "parallel_multi_alpha_ensemble_v2_observers": {
+            "campaign": "MULTI_ALPHA_ENSEMBLE_V2",
+            "status": ensemble_v2_result["status"],
+            "observer_count": len(
+                ensemble_v2_forward_summaries
+            ),
+            "forward_summaries": ensemble_v2_forward_summaries,
+            "total_forward_observations": (
+                ensemble_v2_forward_observations
+            ),
+            "observation_timeframe": "1d",
+            "paper_candidate_permitted": False,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
         "total_forward_observations_all_campaigns": (
             total_forward_observations
             + capital_forward_observations
@@ -4892,6 +5122,7 @@ def _autopilot_observer_stage(settings: Settings) -> dict[str, Any]:
             + dual_trend_forward_observations
             + liquidity_sweep_forward_observations
             + residual_reversal_forward_observations
+            + ensemble_v2_forward_observations
         ),
         "source_candidate_identity": report.get("source_candidate_identity"),
         "frozen_candidate_unchanged": bool(report.get("frozen_candidate_unchanged")),
@@ -4929,6 +5160,7 @@ def _autopilot_ledger_preflight_stage(
         observer_root / "dual_asset_trend_v1",
         observer_root / "liquidity_sweep_v1",
         observer_root / "residual_reversal_v1",
+        observer_root / "multi_alpha_ensemble_v2",
     )
     paths = [
         path
@@ -5025,6 +5257,9 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
     dual_asset_trend = _run_dual_asset_trend_campaign(settings)
     liquidity_sweep = _run_liquidity_sweep_campaign(settings)
     residual_reversal = _run_residual_reversal_campaign(settings)
+    multi_alpha_ensemble_v2 = (
+        _run_multi_alpha_ensemble_v2_campaign(settings)
+    )
     data_audit = _autopilot_data_stage(
         settings,
         refresh=False,
@@ -5399,6 +5634,37 @@ def _autopilot_research_stage(settings: Settings) -> dict[str, Any]:
                 "statistical_pass"
             ],
             "observer_manifests": residual_reversal[
+                "observer_manifests"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+        "parallel_multi_alpha_ensemble_v2_campaign": {
+            "campaign": multi_alpha_ensemble_v2["campaign"],
+            "status": multi_alpha_ensemble_v2["status"],
+            "generated_trial_count": multi_alpha_ensemble_v2[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": multi_alpha_ensemble_v2[
+                "registered_unique_trials"
+            ],
+            "registered_epoch_records": multi_alpha_ensemble_v2[
+                "registered_epoch_records"
+            ],
+            "total_known_trials": multi_alpha_ensemble_v2[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": multi_alpha_ensemble_v2[
+                "primary_strategy_id"
+            ],
+            "economic_pass": multi_alpha_ensemble_v2[
+                "economic_pass"
+            ],
+            "statistical_pass": multi_alpha_ensemble_v2[
+                "statistical_pass"
+            ],
+            "observer_manifests": multi_alpha_ensemble_v2[
                 "observer_manifests"
             ],
             "paper_candidates": 0,

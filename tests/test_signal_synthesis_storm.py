@@ -145,6 +145,7 @@ def test_small_signal_storm_uses_all_paths_and_never_promotes():
     )
 
     assert report["trial_count"] == len(dna)
+    assert report["new_strategy_trial_count"] == len(dna)
     assert report["total_known_trials"] == 6_312 + len(dna)
     assert report["selection_basis"] == "DEVELOPMENT_ONLY"
     assert report["pareto_survivor_count"] <= 8

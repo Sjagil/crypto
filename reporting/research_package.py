@@ -1409,6 +1409,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "residual_reversal_plan_v1.json": (
             reports / "residual_reversal_plan_v1.json"
         ),
+        "multi_alpha_ensemble_campaign_v2.json": (
+            reports / "multi_alpha_ensemble_campaign_v2.json"
+        ),
+        "multi_alpha_ensemble_campaign_v2.csv": (
+            reports / "multi_alpha_ensemble_campaign_v2.csv"
+        ),
+        "multi_alpha_ensemble_plan_v2.json": (
+            reports / "multi_alpha_ensemble_plan_v2.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1662,6 +1671,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (reversal_registry_directory / "records").glob("*.json")
     ):
         paths[f"residual_reversal_trial_{record.name}"] = record
+    ensemble_v2_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "multi_alpha_ensemble_v2"
+    )
+    for observer in sorted(
+        ensemble_v2_observer_directory.glob("*.json")
+    ):
+        paths[f"multi_alpha_ensemble_v2_observer_{observer.name}"] = (
+            observer
+        )
+    ensemble_v2_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "multi_alpha_ensemble_v2"
+    )
+    paths["multi_alpha_ensemble_v2_registry_index.json"] = (
+        ensemble_v2_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (ensemble_v2_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"multi_alpha_ensemble_v2_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"

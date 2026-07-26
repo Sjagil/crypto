@@ -543,12 +543,23 @@ def run_portfolio_storm(
     slippage_bps: float,
     spread_bps: float,
     prior_known_trials: int,
+    known_trial_count: int | None = None,
     maximum_survivors: int = 64,
 ) -> tuple[dict[str, Any], np.ndarray, pd.DatetimeIndex]:
     """Run predeclared DNA and return an orderless development-only selection."""
 
     if not dna:
         raise ValueError("storm DNA cannot be empty")
+    total_known_trials = (
+        int(known_trial_count)
+        if known_trial_count is not None
+        else prior_known_trials + len(dna)
+    )
+    if total_known_trials < max(prior_known_trials, len(dna)):
+        raise ValueError(
+            "known trial count cannot be below the prior or evaluated "
+            "strategy count"
+        )
     opens, closes = _panel(frames)
     cache = _features(closes, dna)
     cost = fee_rate + slippage_bps / 10_000.0 + spread_bps / 20_000.0
@@ -629,7 +640,7 @@ def run_portfolio_storm(
             pd.Series(weekly_development[:, index]),
             trial_sharpes,
             observed_sharpe=float(trial_sharpes[index]),
-            total_trials=prior_known_trials + len(dna),
+            total_trials=total_known_trials,
         )
         survivors.append(
             {
@@ -667,7 +678,10 @@ def run_portfolio_storm(
         "engine_version": STORM_ENGINE_VERSION,
         "trial_count": len(dna),
         "prior_known_trials": prior_known_trials,
-        "total_known_trials": prior_known_trials + len(dna),
+        "new_strategy_trial_count": (
+            total_known_trials - prior_known_trials
+        ),
+        "total_known_trials": total_known_trials,
         "search_space_hash": stable_hash(
             [row.dna_hash for row in dna],
             length=64,
@@ -696,7 +710,7 @@ def run_portfolio_storm(
         "pareto_survivors": survivors,
         "multiple_testing": {
             **multiple_testing,
-            "dsr_total_trial_denominator": prior_known_trials + len(dna),
+            "dsr_total_trial_denominator": total_known_trials,
             "white_reality_check_gate": (
                 multiple_testing["white_reality_check_pvalue"] <= 0.10
             ),
