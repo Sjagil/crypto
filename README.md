@@ -1124,6 +1124,10 @@ hour is sealed with the explicit `POSITIONING_CONTEXT_TIMEOUT` reason. Raw
 hourly segments remain writable for another full hour before lossless
 sealing. Readiness is rebuilt from immutable snapshot hashes and
 source-record hashes; a latest gap resets the consecutive counter to zero.
+The default order-flow storage ceiling is 250 GB. At the observed normal
+losslessly compressed segment size of roughly 21 MB per hour, this covers the
+preregistered 365-day window with headroom; collection still fails closed
+before the configured ceiling or free-disk reserve is breached.
 
 Every sealed hour is also appended once to the orderless
 `CROWDING_AVOIDANCE_V1` observer. Its four preregistered DNA variants are

@@ -258,7 +258,10 @@ class MarketDataSettings(_SettingsBase):
     maximum_raw_retention_days: int = Field(default=3650, ge=1)
     maximum_orderbook_retention_days: int = Field(default=30, ge=1)
     maximum_trade_retention_days: int = Field(default=90, ge=1)
-    maximum_storage_gb: float = Field(default=50.0, gt=0)
+    # A normal losslessly sealed order-flow hour is currently about 21 MB.
+    # 250 GB covers the preregistered 365-day collection window with
+    # operational headroom; the recorder still fails closed at the cap.
+    maximum_storage_gb: float = Field(default=250.0, gt=0)
     minimum_free_disk_gb: float = Field(default=2.0, ge=0)
     retry_budget: int = Field(default=10, ge=0, le=1_000)
     provider_cooldown_seconds: float = Field(default=0.05, ge=0, le=60)

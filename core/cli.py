@@ -17118,11 +17118,34 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             )
         )
         return 0
-    if action in {"pause", "resume", "drain", "stop"}:
+    if action in {"pause", "resume", "drain", "stop", "restart"}:
         from data.data_loader import ContinuousDataService
 
         service_id = _operation_service_id(args.mode)
         lock_path = settings.paths.checkpoints_dir / "data_service.lock"
+        if action == "restart":
+            supervisor_health_path = (
+                _operation_directory(settings)
+                / "collector_supervisor_health.json"
+            )
+            supervisor_health = (
+                dict(read_json(supervisor_health_path))
+                if supervisor_health_path.is_file()
+                else {}
+            )
+            if (
+                _supervisor_disabled_path(settings).is_file()
+                or supervisor_health.get("status")
+                not in {"RUNNING_CHILD", "MONITORING"}
+            ):
+                emit(
+                    {
+                        "status": "FAILED",
+                        "reason_code": "COLLECTOR_SUPERVISOR_NOT_RUNNING",
+                        "orders_generated": 0,
+                    }
+                )
+                return 2
         if action == "stop" and args.mode == "shadow":
             atomic_write_json(
                 _supervisor_disabled_path(settings),
@@ -17159,11 +17182,16 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                 }
             )
             return 2
+        old_service_pid = owner.get("pid")
         request = {
-            "action": action.upper(),
+            "action": (
+                "STOP" if action == "restart" else action.upper()
+            ),
             "requested_at": utc_now(),
             "requested_by": "CLI",
         }
+        if action == "restart":
+            request["requested_operation"] = "RESTART"
         path = settings.paths.checkpoints_dir / f"{service_id}_control.json"
         atomic_write_json(path, request)
         explicit_wait = bool(getattr(args, "wait", False)) or (
@@ -17173,9 +17201,16 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             float(
                 getattr(args, "timeout", None)
                 or getattr(args, "wait_seconds", None)
-                or settings.operational.control_wait_seconds
+                or (
+                    max(
+                        settings.operational.control_wait_seconds,
+                        180.0,
+                    )
+                    if action == "restart"
+                    else settings.operational.control_wait_seconds
+                )
             )
-            if action in {"drain", "stop"} and explicit_wait
+            if action in {"drain", "stop", "restart"} and explicit_wait
             else 0.0
         )
         if wait_seconds <= 0:
@@ -17184,6 +17219,7 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
         heartbeat_path = settings.paths.checkpoints_dir / f"{service_id}_heartbeat.json"
         deadline = time.monotonic() + wait_seconds
         last_heartbeat: dict[str, Any] = {}
+        restart_stop_acknowledged = False
         while time.monotonic() < deadline:
             if heartbeat_path.is_file():
                 try:
@@ -17191,6 +17227,65 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
                 except (OSError, ValueError, TypeError):
                     last_heartbeat = {}
             lock_inspection = ContinuousDataService.inspect_lock_path(lock_path)
+            if action == "restart":
+                if (
+                    not restart_stop_acknowledged
+                    and str(
+                        last_heartbeat.get("state") or ""
+                    ).upper()
+                    == "STOPPED"
+                    and lock_inspection["available"]
+                ):
+                    path.unlink(missing_ok=True)
+                    restart_stop_acknowledged = True
+                restarted_owner = (
+                    lock_inspection.get("owner") or {}
+                )
+                restarted_pid = restarted_owner.get("pid")
+                stream_health_path = (
+                    _operation_directory(settings)
+                    / "orderflow_stream_health.json"
+                )
+                stream_health = (
+                    dict(read_json(stream_health_path))
+                    if stream_health_path.is_file()
+                    else {}
+                )
+                provider_health = dict(
+                    stream_health.get("provider") or {}
+                )
+                if (
+                    restarted_pid is not None
+                    and restarted_pid != old_service_pid
+                    and str(
+                        last_heartbeat.get("state") or ""
+                    ).upper()
+                    == "RUNNING"
+                    and stream_health.get("status") == "HEALTHY"
+                    and provider_health.get("state") == "CONNECTED"
+                ):
+                    emit(
+                        {
+                            "status": "RESTARTED",
+                            **request,
+                            "old_service_pid": old_service_pid,
+                            "new_service_pid": restarted_pid,
+                            "service_state": "RUNNING",
+                            "stream_state": "CONNECTED",
+                            "waited_seconds": (wait_seconds)
+                            - max(
+                                0.0,
+                                deadline - time.monotonic(),
+                            ),
+                            "control_path": path,
+                            "orders_generated": 0,
+                        }
+                    )
+                    return 0
+                await asyncio.sleep(
+                    float(getattr(args, "poll_seconds", 0.2))
+                )
+                continue
             expected_terminal_state = "DRAINED" if action == "drain" else "STOPPED"
             if (
                 str(last_heartbeat.get("state") or "").upper() == expected_terminal_state
@@ -17476,6 +17571,12 @@ async def command_operate(args: argparse.Namespace, settings: Settings) -> int:
             launcher,
             encoding="utf-8",
         )
+        if (
+            action == "restart"
+            and str(last_heartbeat.get("state") or "").upper()
+            == "STOPPED"
+        ):
+            path.unlink(missing_ok=True)
         emit(
             {
                 "status": "INSTALLED",
@@ -17866,6 +17967,7 @@ def build_parser() -> argparse.ArgumentParser:
         "resume",
         "drain",
         "stop",
+        "restart",
         "reconcile",
         "report",
         "lock-status",
@@ -17878,7 +17980,7 @@ def build_parser() -> argparse.ArgumentParser:
             default="shadow",
         )
         selected.add_argument("--profile", default="practical_spot_v1")
-        if name in {"drain", "stop"}:
+        if name in {"drain", "stop", "restart"}:
             selected.add_argument("--wait", action="store_true")
             selected.add_argument("--timeout", type=float)
             selected.add_argument("--poll-seconds", type=float, default=0.2)
