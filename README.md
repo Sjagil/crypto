@@ -773,6 +773,24 @@ stochastic and untouched-holdout gates therefore failed. All eight trials are
 stored in the immutable 21,320-trial accounting history; the observer remains
 orderless at 0/365 forward days and no promotion is permitted.
 
+`python main.py lab campaign run --name residual-momentum-v1 --yes`
+evaluates a separate eight-DNA factor-residual family. A fixed 20% BTC core is
+held only above BTC EMA200. At each Sunday close, one additional 20% altcoin
+satellite may be selected from ETH-EUR, SOL-EUR and LINK-EUR when its
+20/60-day log return minus its backward-looking 90/180-day BTC beta times BTC
+return is positive and its own price is above EMA100/200. Execution occurs at
+the following open under normal and stressed costs; exposure remains capped at
+40% total, 20% per asset and at least 60% cash.
+
+The development-selected primary `RM_R60_B180_EMA200` returned 158.1% over the
+full sample with 14.9% CAGR, 0.85 Sharpe and 19.4% average exposure. DSR
+(0.973), White Reality Check (0.017) and Hansen SPA (0.017) passed, but PBO
+(0.429), 28.7% drawdown, only 69 actual rebalances, validation PF 1.042,
+negative confirmation and both stochastic gates failed. It also underperformed
+the simpler BTC/ETH trend benchmark. All eight trials remain in the immutable
+21,328-trial denominator; its 0/365-day observer is orderless and cannot
+promote.
+
 Before each daily autopilot cycle, all active forward-observer ledgers are
 cryptographically audited. Observation checksums, the hash chain, immutable
 identity fields and zero-order/live-permission invariants must all match before

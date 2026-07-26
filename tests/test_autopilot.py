@@ -461,6 +461,25 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
             "live_ready": False,
         },
     )
+    monkeypatch.setattr(
+        cli,
+        "_run_residual_momentum_campaign",
+        lambda settings: {
+            "status": "COMPLETED_NOT_PROMOTED",
+            "campaign": "RESIDUAL_MOMENTUM_V1",
+            "generated_trial_count": 8,
+            "registered_unique_trials": 8,
+            "total_known_trials": 21_328,
+            "primary_strategy_id": "RM_R60_B180_EMA200",
+            "pbo": 0.42857142857142855,
+            "economic_pass": False,
+            "statistical_pass": False,
+            "observer_manifests": {},
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        },
+    )
     result = cli._autopilot_research_stage(object())
     assert result["prior_trials_accounted"] == 1_304
     assert result["total_known_trials"] == 1_312
@@ -520,6 +539,15 @@ def test_research_stage_accepts_compact_campaign_result(monkeypatch):
     assert not result[
         "parallel_sentiment_recovery_campaign"
     ]["live_ready"]
+    assert (
+        result["parallel_residual_momentum_campaign"][
+            "total_known_trials"
+        ]
+        == 21_328
+    )
+    assert not result[
+        "parallel_residual_momentum_campaign"
+    ]["statistical_pass"]
     assert result["paper_candidate_permitted"] is False
     assert result["live_ready"] is False
 

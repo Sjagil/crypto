@@ -94,6 +94,7 @@ def build_acceptance_summary(
     trend_pullback: dict[str, Any] | None = None,
     range_expansion_4h: dict[str, Any] | None = None,
     sentiment_recovery: dict[str, Any] | None = None,
+    residual_momentum: dict[str, Any] | None = None,
     portfolio_storm: dict[str, Any] | None = None,
     signal_synthesis_storm: dict[str, Any] | None = None,
     autopilot_state: dict[str, Any] | None = None,
@@ -429,6 +430,47 @@ def build_acceptance_summary(
         require_stochastic_validation(
             "sentiment recovery",
             [sentiment_primary],
+            container="gates",
+        )
+    if residual_momentum is not None:
+        if (
+            residual_momentum.get("campaign")
+            != "RESIDUAL_MOMENTUM_V1"
+        ):
+            raise ValueError(
+                "residual momentum campaign identity mismatch"
+            )
+        if int(residual_momentum.get("orders_generated") or 0) != 0:
+            raise ValueError(
+                "residual momentum campaign contains orders"
+            )
+        if bool(residual_momentum.get("live_ready", False)):
+            raise ValueError(
+                "residual momentum campaign contains live permission"
+            )
+        residual_registry = (
+            residual_momentum.get("trial_registry") or {}
+        )
+        if residual_registry.get("status") != "PASSED":
+            raise ValueError(
+                "residual momentum registry audit failed"
+            )
+        if int(
+            residual_registry.get("unique_trial_count") or 0
+        ) != int(
+            residual_momentum.get("registered_unique_trials") or 0
+        ):
+            raise ValueError(
+                "residual momentum trial count mismatch"
+            )
+        residual_primary = residual_momentum.get("primary_result")
+        if not isinstance(residual_primary, dict):
+            raise ValueError(
+                "residual momentum primary result missing"
+            )
+        require_stochastic_validation(
+            "residual momentum",
+            [residual_primary],
             container="gates",
         )
     if portfolio_storm is not None:
@@ -903,6 +945,42 @@ def build_acceptance_summary(
             "orders_generated": 0,
             "live_ready": False,
         }
+    if residual_momentum is not None:
+        summary["residual_momentum"] = {
+            "status": residual_momentum["status"],
+            "campaign": residual_momentum["campaign"],
+            "engine_version": residual_momentum[
+                "engine_version"
+            ],
+            "timeframe": residual_momentum["timeframe"],
+            "generated_trial_count": residual_momentum[
+                "generated_trial_count"
+            ],
+            "registered_unique_trials": residual_momentum[
+                "registered_unique_trials"
+            ],
+            "total_known_trials": residual_momentum[
+                "total_known_trials"
+            ],
+            "primary_strategy_id": residual_momentum[
+                "primary_strategy_id"
+            ],
+            "multiple_testing": residual_momentum[
+                "multiple_testing"
+            ],
+            "trial_registry": residual_momentum["trial_registry"],
+            "primary_result": residual_momentum["primary_result"],
+            "signal_policy": residual_momentum["signal_policy"],
+            "forward_requirement": residual_momentum[
+                "forward_requirement"
+            ],
+            "holdout_status": residual_momentum[
+                "holdout_status"
+            ],
+            "paper_candidates": 0,
+            "orders_generated": 0,
+            "live_ready": False,
+        }
     if portfolio_storm is not None:
         summary["portfolio_storm"] = {
             "status": portfolio_storm["status"],
@@ -1098,6 +1176,15 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         "sentiment_recovery_plan_v1.json": (
             reports / "sentiment_recovery_plan_v1.json"
         ),
+        "residual_momentum_campaign_v1.json": (
+            reports / "residual_momentum_campaign_v1.json"
+        ),
+        "residual_momentum_campaign_v1.csv": (
+            reports / "residual_momentum_campaign_v1.csv"
+        ),
+        "residual_momentum_plan_v1.json": (
+            reports / "residual_momentum_plan_v1.json"
+        ),
         "forward_ledger_preflight_v1.json": (
             reports / "forward_ledger_preflight_v1.json"
         ),
@@ -1263,6 +1350,29 @@ def _artifact_paths(settings: Settings) -> dict[str, Path]:
         (sentiment_registry_directory / "records").glob("*.json")
     ):
         paths[f"sentiment_recovery_trial_{record.name}"] = record
+    residual_observer_directory = (
+        settings.paths.lab_dir
+        / "observers"
+        / "residual_momentum_v1"
+    )
+    for observer in sorted(
+        residual_observer_directory.glob("*.json")
+    ):
+        paths[f"residual_momentum_observer_{observer.name}"] = (
+            observer
+        )
+    residual_registry_directory = (
+        settings.paths.lab_dir
+        / "strategy_registry"
+        / "residual_momentum_v1"
+    )
+    paths["residual_momentum_registry_index.json"] = (
+        residual_registry_directory / "index.json"
+    )
+    for record in sorted(
+        (residual_registry_directory / "records").glob("*.json")
+    ):
+        paths[f"residual_momentum_trial_{record.name}"] = record
     autopilot_directory = settings.paths.lab_dir / "autopilot"
     autopilot_state = autopilot_directory / "state.json"
     autopilot_degradation = autopilot_directory / "degradation_state.json"
@@ -1367,6 +1477,9 @@ def build_rotation_acceptance_package(settings: Settings) -> dict[str, Any]:
         ],
         sentiment_recovery=payloads[
             "sentiment_recovery_campaign_v1.json"
+        ],
+        residual_momentum=payloads[
+            "residual_momentum_campaign_v1.json"
         ],
         portfolio_storm=payloads["portfolio_storm_report_v1.json"],
         signal_synthesis_storm=payloads["signal_synthesis_storm_report_v2.json"],

@@ -535,3 +535,69 @@ def test_acceptance_summary_rejects_sentiment_live_permission() -> None:
 
     with pytest.raises(ValueError, match="live permission"):
         build_acceptance_summary(**values)
+
+
+def test_acceptance_summary_includes_rejected_residual_momentum() -> None:
+    values = _inputs()
+    values["residual_momentum"] = {
+        "status": "COMPLETED_NOT_PROMOTED",
+        "campaign": "RESIDUAL_MOMENTUM_V1",
+        "engine_version": "1.0.0",
+        "timeframe": "1d",
+        "generated_trial_count": 8,
+        "registered_unique_trials": 8,
+        "total_known_trials": 21_328,
+        "primary_strategy_id": "RM_R60_B180_EMA200",
+        "multiple_testing": {
+            "probability_of_backtest_overfitting": 0.4286,
+        },
+        "trial_registry": {
+            "status": "PASSED",
+            "unique_trial_count": 8,
+        },
+        "primary_result": {
+            "gates": {
+                "stochastic_validation": {"passed": False},
+                "economic_pass": False,
+                "statistical_pass": False,
+                "research_pass": False,
+            },
+        },
+        "signal_policy": {
+            "benchmark": "BTC-EUR",
+            "core_weight": 0.20,
+            "satellite_weight": 0.20,
+        },
+        "forward_requirement": {
+            "minimum_closed_daily_observations": 365,
+            "minimum_rebalances": 30,
+        },
+        "holdout_status": (
+            "NO_GLOBALLY_UNTOUCHED_HISTORICAL_HOLDOUT_REMAINS"
+        ),
+        "orders_generated": 0,
+        "live_ready": False,
+    }
+
+    summary = build_acceptance_summary(**values)
+
+    residual = summary["residual_momentum"]
+    assert residual["registered_unique_trials"] == 8
+    assert residual["total_known_trials"] == 21_328
+    assert not residual["primary_result"]["gates"][
+        "economic_pass"
+    ]
+    assert residual["orders_generated"] == 0
+    assert residual["live_ready"] is False
+
+
+def test_acceptance_summary_rejects_residual_order_generation() -> None:
+    values = _inputs()
+    values["residual_momentum"] = {
+        "campaign": "RESIDUAL_MOMENTUM_V1",
+        "orders_generated": 1,
+        "live_ready": False,
+    }
+
+    with pytest.raises(ValueError, match="contains orders"):
+        build_acceptance_summary(**values)
