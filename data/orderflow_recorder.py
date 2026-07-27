@@ -1090,6 +1090,88 @@ def _snapshot_source_hashes(
     }
 
 
+def _snapshot_audit_fingerprint(
+    path: Path,
+    *,
+    ledger_root: Path | None,
+) -> dict[str, Any]:
+    snapshot_stat = path.stat()
+    fingerprint: dict[str, Any] = {
+        "snapshot_sha256": _sha256_file(path),
+        "snapshot_size": snapshot_stat.st_size,
+        "snapshot_mtime_ns": snapshot_stat.st_mtime_ns,
+    }
+    if ledger_root is None:
+        return fingerprint
+    try:
+        hour_start = _utc(dict(read_json(path))["hour_start"])
+    except (KeyError, OSError, TypeError, ValueError):
+        fingerprint["ledger_status"] = "HOUR_UNAVAILABLE"
+        return fingerprint
+    raw_path = (
+        ledger_root
+        / hour_start.strftime("%Y")
+        / hour_start.strftime("%m")
+        / hour_start.strftime("%d")
+        / f"{hour_start:%H}.jsonl"
+    )
+    selected = next(
+        (
+            candidate
+            for candidate in (
+                raw_path,
+                raw_path.with_suffix(".jsonl.xz"),
+                raw_path.with_suffix(".jsonl.gz"),
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if selected is None:
+        fingerprint["ledger_status"] = "SEGMENT_MISSING"
+        return fingerprint
+    segment_stat = selected.stat()
+    fingerprint.update(
+        {
+            "ledger_status": "SEGMENT_PRESENT",
+            "segment_path": str(selected),
+            "segment_size": segment_stat.st_size,
+            "segment_mtime_ns": segment_stat.st_mtime_ns,
+        }
+    )
+    manifest_path = raw_path.with_suffix(".manifest.json")
+    if manifest_path.is_file():
+        fingerprint["manifest_sha256"] = _sha256_file(
+            manifest_path
+        )
+    return fingerprint
+
+
+def _load_snapshot_audit_cache(
+    path: Path,
+) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = dict(read_json(path))
+    except (OSError, TypeError, ValueError):
+        return {}
+    expected = payload.get("cache_hash")
+    body = {
+        key: value
+        for key, value in payload.items()
+        if key != "cache_hash"
+    }
+    if (
+        payload.get("schema_version")
+        != "microstructure_snapshot_audit_cache_v1"
+        or expected != stable_hash(body, length=64)
+    ):
+        return {}
+    entries = payload.get("entries")
+    return dict(entries) if isinstance(entries, dict) else {}
+
+
 def _audit_hourly_snapshot(
     path: Path,
     *,
@@ -1222,13 +1304,64 @@ def audit_microstructure_snapshots(
     feature_directory: Path,
     *,
     ledger_root: Path | None = None,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     """Return the fail-closed readiness evidence from all sealed hours."""
 
-    audits = [
-        _audit_hourly_snapshot(path, ledger_root=ledger_root)
-        for path in sorted(feature_directory.glob("*.json"))
-    ]
+    targets = sorted(feature_directory.glob("*.json"))
+    cache_path = (
+        feature_directory
+        / ".audit"
+        / "snapshot_audit_cache_v1.json"
+    )
+    cached = (
+        _load_snapshot_audit_cache(cache_path)
+        if use_cache
+        else {}
+    )
+    entries: dict[str, Any] = {}
+    audits: list[dict[str, Any]] = []
+    for path in targets:
+        key = str(path.resolve())
+        fingerprint = _snapshot_audit_fingerprint(
+            path,
+            ledger_root=ledger_root,
+        )
+        cached_entry = dict(cached.get(key) or {})
+        cached_audit = cached_entry.get("audit")
+        if (
+            cached_entry.get("fingerprint") == fingerprint
+            and isinstance(cached_audit, dict)
+        ):
+            audit = dict(cached_audit)
+        else:
+            audit = _audit_hourly_snapshot(
+                path,
+                ledger_root=ledger_root,
+            )
+        entries[key] = {
+            "fingerprint": fingerprint,
+            "audit": audit,
+        }
+        audits.append(audit)
+    if use_cache:
+        cache_body = {
+            "schema_version": (
+                "microstructure_snapshot_audit_cache_v1"
+            ),
+            "entries": entries,
+            "orders_generated": 0,
+        }
+        atomic_write_json(
+            cache_path,
+            {
+                **cache_body,
+                "cache_hash": stable_hash(
+                    cache_body,
+                    length=64,
+                ),
+            },
+        )
     eligible_epochs = [
         _utc(row["hour_start"])
         for row in audits
@@ -1268,6 +1401,13 @@ def audit_microstructure_snapshots(
         ),
         "excluded_snapshot_count": len(excluded),
         "excluded_snapshots": excluded,
+        "snapshot_audits": audits,
+        "audit_cache_entry_count": len(entries),
+        "audit_cache_status": (
+            "INCREMENTAL_IMMUTABLE_FINGERPRINTS"
+            if use_cache
+            else "FULL_REAUDIT"
+        ),
     }
 
 

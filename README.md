@@ -1125,6 +1125,11 @@ hour is sealed with the explicit `POSITIONING_CONTEXT_TIMEOUT` reason. Raw
 hourly segments remain writable for another full hour before lossless
 sealing. Readiness is rebuilt from immutable snapshot hashes and
 source-record hashes; a latest gap resets the consecutive counter to zero.
+Readiness checks cache only previously verified immutable hours, keyed by the
+snapshot SHA-256 plus ledger representation and manifest fingerprints. New or
+changed hours are fully re-read; `microstructure audit` remains the explicit
+end-to-end ledger rehash. This avoids repeatedly decompressing all prior
+hours on every operational cycle while preserving tamper invalidation.
 The default order-flow storage ceiling is 250 GB. At the observed normal
 losslessly compressed segment size of roughly 21 MB per hour, this covers the
 preregistered 365-day window with headroom; collection still fails closed

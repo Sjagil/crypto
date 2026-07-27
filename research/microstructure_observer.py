@@ -346,17 +346,7 @@ def observe_microstructure_snapshots(
     )
     audit_by_path = {
         str(Path(row["path"]).resolve()): row
-        for row in (
-            list(source_audit.get("excluded_snapshots") or [])
-            + [
-                row
-                for row in _all_snapshot_audits(
-                    feature_directory,
-                    ledger_root=ledger_root,
-                )
-                if row.get("eligible")
-            ]
-        )
+        for row in source_audit.get("snapshot_audits") or []
     }
     previous_hash = str(initial_audit["root_hash"])
     existing_count = int(initial_audit["record_count"])
@@ -443,43 +433,6 @@ def observe_microstructure_snapshots(
         **manifest,
         "observer_audit": final_audit,
     }
-
-
-def _all_snapshot_audits(
-    feature_directory: Path,
-    *,
-    ledger_root: Path | None,
-) -> list[dict[str, Any]]:
-    """Expose per-file audit rows through isolated one-file directories."""
-
-    full = audit_microstructure_snapshots(
-        feature_directory,
-        ledger_root=ledger_root,
-    )
-    excluded_by_path = {
-        str(Path(row["path"]).resolve()): row
-        for row in full.get("excluded_snapshots") or []
-    }
-    rows: list[dict[str, Any]] = []
-    for path in sorted(feature_directory.glob("*.json")):
-        key = str(path.resolve())
-        if key in excluded_by_path:
-            rows.append(excluded_by_path[key])
-        else:
-            rows.append(
-                {
-                    "path": str(path),
-                    "hour_start": dict(read_json(path)).get(
-                        "hour_start"
-                    ),
-                    "eligible": True,
-                    "reason_codes": [],
-                    "snapshot_hash": dict(read_json(path)).get(
-                        "snapshot_hash"
-                    ),
-                }
-            )
-    return rows
 
 
 __all__ = [

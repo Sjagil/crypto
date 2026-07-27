@@ -903,6 +903,28 @@ def test_readiness_resets_on_latest_gap_and_rejects_tampering(
     assert len(readiness["readiness_hash"]) == 64
 
 
+def test_snapshot_audit_cache_invalidates_after_tampering(
+    tmp_path: Path,
+) -> None:
+    features = tmp_path / "features"
+    hour = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    target = _write_auditable_snapshot(features, hour)
+    first = audit_microstructure_snapshots(features)
+    assert first["eligible_complete_hours"] == 1
+    assert first["audit_cache_entry_count"] == 1
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["snapshot_hash"] = "f" * 64
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    second = audit_microstructure_snapshots(features)
+    assert second["eligible_complete_hours"] == 0
+    assert second["excluded_snapshot_count"] == 1
+    assert "SNAPSHOT_HASH_MISMATCH" in second[
+        "excluded_snapshots"
+    ][0]["reason_codes"]
+
+
 def test_prospective_milestones_are_strict_and_non_promotional() -> None:
     before = prospective_milestone_status(90 * 24 - 1)
     technical = prospective_milestone_status(90 * 24)
