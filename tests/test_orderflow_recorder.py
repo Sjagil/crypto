@@ -595,6 +595,31 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     )
     positioning = tmp_path / "positioning"
     positioning.mkdir()
+    for horizon_hours, open_interest in ((4, 800), (1, 900)):
+        prior_hour = start - timedelta(hours=horizon_hours)
+        (
+            positioning
+            / prior_hour.strftime("%Y%m%dT%H0000Z.json")
+        ).write_text(
+            json.dumps(
+                {
+                    "derivatives_context": [
+                        {
+                            "canonical_market": "BTC-USDT",
+                            "available_at": (
+                                prior_hour + timedelta(hours=1)
+                            ).isoformat(),
+                            "raw_hash": "c" * 64,
+                            "values": {
+                                "funding_rate": 0.00005,
+                                "open_interest": open_interest,
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
     (positioning / "20260726T100000Z.json").write_text(
         json.dumps(
             {
@@ -659,6 +684,18 @@ def test_hour_finalization_is_immutable_and_not_research_ready(
     assert market["implied_usdt_per_eur"] == pytest.approx(1.1)
     assert market["spot_quote_volume_24h_usdt"] == pytest.approx(110000)
     assert market["quote_currency_conversion_status"] == "AVAILABLE"
+    derivatives = market["derivatives_positioning"]
+    assert derivatives["open_interest_change"] == pytest.approx(0.25)
+    assert derivatives["open_interest_change_4h"] == pytest.approx(
+        0.25
+    )
+    assert derivatives["open_interest_change_1h"] == pytest.approx(
+        1 / 9
+    )
+    assert derivatives["open_interest_change_horizon_hours"] == 4
+    assert derivatives["open_interest_reference_status"] == (
+        "EXACT_T_MINUS_4H_AVAILABLE"
+    )
     assert market["volume_ratio_method"] == (
         "MEXC_PERPETUAL_USDT_AMOUNT24_DIVIDED_BY_"
         "BITVAVO_SPOT_EUR_VOLUMEQUOTE24H_CONVERTED_"

@@ -27,10 +27,11 @@ from utils.common import (
 
 ORDERFLOW_SCHEMA = "prospective_orderflow_event_v1"
 ORDERFLOW_CHECKPOINT_SCHEMA = "prospective_orderflow_checkpoint_v1"
-MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v3"
+MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v4"
 SUPPORTED_MICROSTRUCTURE_SCHEMAS = {
     "microstructure_hourly_snapshot_v1",
     "microstructure_hourly_snapshot_v2",
+    "microstructure_hourly_snapshot_v3",
     MICROSTRUCTURE_SCHEMA,
 }
 ZERO_HASH = "0" * 64
@@ -943,6 +944,28 @@ def _positioning_context(
     if not current_path.is_file():
         return {}
     current = dict(read_json(current_path))
+    exact_prior_records: dict[
+        int,
+        dict[str, dict[str, Any]],
+    ] = {}
+    for horizon_hours in (1, 4):
+        prior_path = directory / (
+            (hour_start - timedelta(hours=horizon_hours)).strftime(
+                "%Y%m%dT%H0000Z"
+            )
+            + ".json"
+        )
+        payload = (
+            dict(read_json(prior_path))
+            if prior_path.is_file()
+            else {}
+        )
+        exact_prior_records[horizon_hours] = {
+            str(item["canonical_market"]): dict(
+                item.get("values") or {}
+            )
+            for item in payload.get("derivatives_context") or []
+        }
     prior_payloads = [
         dict(read_json(path))
         for path in sorted(directory.glob("*.json"))
@@ -980,20 +1003,21 @@ def _positioning_context(
                 funding_zscore = (
                     float(values.get("funding_rate") or 0) - median
                 ) / iqr
-        previous_oi = (
-            (prior[-1].get("values") or {}).get("open_interest")
-            if prior
-            else None
-        )
         current_oi = values.get("open_interest")
-        oi_change = None
-        if (
-            previous_oi is not None
-            and current_oi is not None
-            and float(previous_oi) != 0
-        ):
-            oi_change = (
-                float(current_oi) / float(previous_oi) - 1.0
+        oi_changes: dict[int, float | None] = {}
+        oi_references: dict[int, Any] = {}
+        for horizon_hours in (1, 4):
+            reference = exact_prior_records[horizon_hours].get(
+                market,
+                {},
+            ).get("open_interest")
+            oi_references[horizon_hours] = reference
+            oi_changes[horizon_hours] = (
+                float(current_oi) / float(reference) - 1.0
+                if reference is not None
+                and current_oi is not None
+                and float(reference) != 0
+                else None
             )
         result[market.split("-", 1)[0]] = {
             "derivatives_market": market,
@@ -1005,7 +1029,17 @@ def _positioning_context(
             "funding_zscore": funding_zscore,
             "funding_zscore_prior_observations": len(prior_rates),
             "open_interest": current_oi,
-            "open_interest_change": oi_change,
+            "open_interest_change": oi_changes[4],
+            "open_interest_change_1h": oi_changes[1],
+            "open_interest_change_4h": oi_changes[4],
+            "open_interest_change_horizon_hours": 4,
+            "open_interest_reference_1h": oi_references[1],
+            "open_interest_reference_4h": oi_references[4],
+            "open_interest_reference_status": (
+                "EXACT_T_MINUS_4H_AVAILABLE"
+                if oi_references[4] is not None
+                else "EXACT_T_MINUS_4H_MISSING"
+            ),
             "perpetual_basis": values.get("basis"),
             "perpetual_premium": values.get(
                 "perpetual_premium"

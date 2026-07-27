@@ -1142,6 +1142,10 @@ four-hour decision boundaries and only after funding, open interest,
 perpetual/spot volume and real spot-CVD history are all available. Intermediate
 hours preserve feature history as `OBSERVED_NOT_DECISION_BOUNDARY` and cannot
 evaluate a threshold or emit a block signal.
+The frozen `open_interest_change` feature is the exact causal `t-4h` change;
+the one-hour change is retained only as a diagnostic. A missing exact
+four-hour reference remains feature warmup rather than silently stretching
+the comparison across a data gap.
 Earlier hours are retained as `DATA_GAP_NOT_EVALUATED` or `FEATURE_WARMUP`,
 never as negative signals. Observation records form a source-linked SHA-256
 chain, preserve the AI embargo and cannot generate targets or orders.
