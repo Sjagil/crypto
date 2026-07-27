@@ -87,18 +87,20 @@ def test_observer_records_gap_warmup_and_fixed_dna_signals(
     features = tmp_path / "features"
     start = datetime(2026, 7, 26, 8, tzinfo=UTC)
     _write_snapshot(features, start, status="DATA_GAP")
-    _write_snapshot(features, start + timedelta(hours=1), warmup=True)
-    _write_snapshot(features, start + timedelta(hours=2))
+    _write_snapshot(features, start + timedelta(hours=1))
+    _write_snapshot(features, start + timedelta(hours=3), warmup=True)
+    _write_snapshot(features, start + timedelta(hours=7))
     observer = tmp_path / "observer"
     result = observe_microstructure_snapshots(
         feature_directory=features,
         observer_directory=observer,
         plan_path=tmp_path / "plan.json",
     )
-    assert result["observation_count"] == 3
-    assert result["new_observation_count"] == 3
+    assert result["observation_count"] == 4
+    assert result["new_observation_count"] == 4
     assert result["observation_status_counts"] == {
         "DATA_GAP_NOT_EVALUATED": 1,
+        "OBSERVED_NOT_DECISION_BOUNDARY": 1,
         "FEATURE_WARMUP": 1,
         "EVALUATED": 1,
     }
@@ -106,8 +108,10 @@ def test_observer_records_gap_warmup_and_fixed_dna_signals(
     evaluated = read_json(
         observer
         / "observations"
-        / "20260726T100000Z.json"
+        / "20260726T150000Z.json"
     )
+    assert evaluated["four_hour_decision_boundary"]
+    assert evaluated["decision_evaluation_permitted"]
     assert len(evaluated["markets"][0]["dna_results"]) == 4
     assert all(
         row["block_new_long"]
@@ -119,6 +123,59 @@ def test_observer_records_gap_warmup_and_fixed_dna_signals(
     assert not evaluated["paper_permitted"]
     assert not evaluated["live_permitted"]
     assert audit_crowding_observer(observer)["status"] == "PASSED"
+
+
+def test_observer_never_evaluates_between_four_hour_boundaries(
+    tmp_path: Path,
+) -> None:
+    features = tmp_path / "features"
+    start = datetime(2026, 7, 26, 8, tzinfo=UTC)
+    _write_snapshot(features, start)
+    observer = tmp_path / "observer"
+
+    observe_microstructure_snapshots(
+        feature_directory=features,
+        observer_directory=observer,
+        plan_path=tmp_path / "plan.json",
+    )
+
+    observation = read_json(
+        observer
+        / "observations"
+        / "20260726T080000Z.json"
+    )
+    assert observation["status"] == (
+        "OBSERVED_NOT_DECISION_BOUNDARY"
+    )
+    assert not observation["four_hour_decision_boundary"]
+    assert not observation["decision_evaluation_permitted"]
+    assert observation["block_signal_count"] == 0
+    assert all(
+        result["status"] == "NOT_EVALUATED"
+        and result["block_new_long"] is None
+        for result in observation["markets"][0]["dna_results"]
+    )
+    observation["status"] = "EVALUATED"
+    observation["decision_evaluation_permitted"] = True
+    observation["observation_hash"] = stable_hash(
+        {
+            key: value
+            for key, value in observation.items()
+            if key != "observation_hash"
+        },
+        length=64,
+    )
+    (
+        observer
+        / "observations"
+        / "20260726T080000Z.json"
+    ).write_text(json.dumps(observation), encoding="utf-8")
+    audit = audit_crowding_observer(observer)
+    assert audit["status"] == "FAILED"
+    assert any(
+        reason.startswith("NON_BOUNDARY_EVALUATION_DETECTED")
+        for reason in audit["failures"]
+    )
 
 
 def test_observer_is_idempotent_and_append_only(tmp_path: Path) -> None:

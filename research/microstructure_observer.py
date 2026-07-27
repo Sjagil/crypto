@@ -13,7 +13,11 @@ from research.microstructure_preregistration import (
 )
 from utils.common import atomic_write_json, read_json, stable_hash
 
-OBSERVER_SCHEMA = "crowding_avoidance_observation_v1"
+OBSERVER_SCHEMA = "crowding_avoidance_observation_v2"
+SUPPORTED_OBSERVER_SCHEMAS = {
+    "crowding_avoidance_observation_v1",
+    OBSERVER_SCHEMA,
+}
 MANIFEST_SCHEMA = "crowding_avoidance_observer_manifest_v1"
 ZERO_HASH = "0" * 64
 REQUIRED_FEATURES = (
@@ -138,6 +142,28 @@ def _evaluate_market(
     }
 
 
+def _capture_non_decision_market(
+    row: Mapping[str, Any],
+    *,
+    dna: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "market": str(row.get("market")),
+        "status": "NOT_DECISION_BOUNDARY",
+        "missing_features": [],
+        "features": _market_features(row),
+        "dna_results": [
+            {
+                "dna_id": parameters["id"],
+                "status": "NOT_EVALUATED",
+                "block_new_long": None,
+            }
+            for parameters in dna
+        ],
+        "block_signal_count": 0,
+    }
+
+
 def _build_observation(
     *,
     snapshot_path: Path,
@@ -150,11 +176,13 @@ def _build_observation(
     hour_start = _utc(snapshot["hour_start"])
     hour_end = _utc(snapshot["hour_end"])
     source_eligible = bool(snapshot_audit.get("eligible"))
-    if source_eligible:
+    decision_boundary = hour_end.hour % 4 == 0
+    dna = [dict(item) for item in plan["primary_dna"]]
+    if source_eligible and decision_boundary:
         markets = [
             _evaluate_market(
                 row,
-                dna=[dict(item) for item in plan["primary_dna"]],
+                dna=dna,
             )
             for row in snapshot.get("markets") or []
         ]
@@ -169,6 +197,15 @@ def _build_observation(
             if status == "EVALUATED"
             else ["REQUIRED_CAUSAL_FEATURE_HISTORY_INSUFFICIENT"]
         )
+    elif source_eligible:
+        markets = [
+            _capture_non_decision_market(row, dna=dna)
+            for row in snapshot.get("markets") or []
+        ]
+        status = "OBSERVED_NOT_DECISION_BOUNDARY"
+        reason_codes = [
+            "FROZEN_4H_DECISION_BOUNDARY_NOT_REACHED"
+        ]
     else:
         markets = []
         status = "DATA_GAP_NOT_EVALUATED"
@@ -194,9 +231,14 @@ def _build_observation(
         "source_snapshot_eligible": source_eligible,
         "status": status,
         "reason_codes": reason_codes,
-        "observation_cadence": "EVERY_FINALIZED_UTC_HOUR",
+        "observation_cadence": (
+            "HOURLY_FEATURE_CAPTURE_4H_DECISIONS"
+        ),
         "frozen_decision_horizon": plan["decision_horizon"],
-        "four_hour_decision_boundary": hour_end.hour % 4 == 0,
+        "four_hour_decision_boundary": decision_boundary,
+        "decision_evaluation_permitted": (
+            source_eligible and decision_boundary
+        ),
         "markets": markets,
         "evaluated_market_count": sum(
             row["status"] == "EVALUATED" for row in markets
@@ -242,7 +284,10 @@ def audit_crowding_observer(
                 f"UNREADABLE_OBSERVATION:{path.name}:{type(exc).__name__}"
             )
             continue
-        if record.get("schema_version") != OBSERVER_SCHEMA:
+        if (
+            record.get("schema_version")
+            not in SUPPORTED_OBSERVER_SCHEMAS
+        ):
             failures.append(f"UNSUPPORTED_SCHEMA:{path.name}")
         if int(record.get("sequence_number") or 0) != sequence_number:
             failures.append(f"SEQUENCE_MISMATCH:{path.name}")
@@ -296,6 +341,28 @@ def audit_crowding_observer(
             failures.append(f"ORDER_SIDE_EFFECT_DETECTED:{path.name}")
         if record.get("live_permitted") is not False:
             failures.append(f"LIVE_PERMISSION_DETECTED:{path.name}")
+        if record.get("schema_version") == OBSERVER_SCHEMA:
+            expected_boundary = _utc(record["hour_end"]).hour % 4 == 0
+            if (
+                record.get("four_hour_decision_boundary")
+                is not expected_boundary
+            ):
+                failures.append(
+                    f"DECISION_BOUNDARY_MISMATCH:{path.name}"
+                )
+            if (
+                not expected_boundary
+                and (
+                    record.get("status") == "EVALUATED"
+                    or int(record.get("block_signal_count") or 0)
+                    != 0
+                    or record.get("decision_evaluation_permitted")
+                    is not False
+                )
+            ):
+                failures.append(
+                    f"NON_BOUNDARY_EVALUATION_DETECTED:{path.name}"
+                )
         status = str(record.get("status") or "UNKNOWN")
         statuses[status] = statuses.get(status, 0) + 1
         block_signal_count += int(

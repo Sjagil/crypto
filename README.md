@@ -1137,8 +1137,11 @@ before the configured ceiling or free-disk reserve is breached.
 
 Every sealed hour is also appended once to the orderless
 `CROWDING_AVOIDANCE_V1` observer. Its four preregistered DNA variants are
-evaluated without ranking or threshold changes only after funding, open
-interest, perpetual/spot volume and real spot-CVD history are all available.
+evaluated without ranking or threshold changes only on completed UTC
+four-hour decision boundaries and only after funding, open interest,
+perpetual/spot volume and real spot-CVD history are all available. Intermediate
+hours preserve feature history as `OBSERVED_NOT_DECISION_BOUNDARY` and cannot
+evaluate a threshold or emit a block signal.
 Earlier hours are retained as `DATA_GAP_NOT_EVALUATED` or `FEATURE_WARMUP`,
 never as negative signals. Observation records form a source-linked SHA-256
 chain, preserve the AI embargo and cannot generate targets or orders.
