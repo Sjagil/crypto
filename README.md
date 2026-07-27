@@ -1094,6 +1094,7 @@ predeclared 90/180/365-day checkpoints.
 python main.py microstructure plan
 python main.py microstructure status
 python main.py microstructure data-status
+python main.py microstructure storage-status
 python main.py microstructure observe
 python main.py microstructure observer-audit
 python main.py microstructure audit

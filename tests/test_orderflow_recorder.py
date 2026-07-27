@@ -14,6 +14,7 @@ from data.orderflow_recorder import (
     ProspectiveOrderflowRecorder,
     audit_microstructure_snapshots,
     current_microstructure_readiness,
+    microstructure_storage_runway,
     normalize_stream_event,
     prospective_milestone_status,
     seal_completed_orderflow_segments,
@@ -919,4 +920,38 @@ def test_prospective_milestones_are_strict_and_non_promotional() -> None:
     assert (
         formal["stage"]
         == "FORMAL_REGIME_ASSESSMENT_ELIGIBLE"
+    )
+
+
+def test_storage_runway_is_conservative_and_sample_qualified(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "stream"
+    ledger.mkdir()
+    (ledger / "00.jsonl.xz").write_bytes(b"a" * 100)
+    (ledger / "01.jsonl.xz").write_bytes(b"b" * 200)
+
+    result = microstructure_storage_runway(
+        ledger,
+        maximum_storage_bytes=10_000_000,
+        free_disk_bytes=10_000_000,
+    )
+
+    assert result["status"] == (
+        "PROVISIONALLY_SUFFICIENT_SAMPLE_LIMITED"
+    )
+    assert result["sealed_segment_sample_count"] == 2
+    assert result["conservative_hour_bytes"] == 200
+    assert result["milestones"]["365"][
+        "fits_configured_cap_and_free_disk"
+    ]
+    assert result["orders_generated"] == 0
+
+    constrained = microstructure_storage_runway(
+        ledger,
+        maximum_storage_bytes=1_000_000,
+        free_disk_bytes=10_000_000,
+    )
+    assert constrained["status"] == (
+        "INSUFFICIENT_FOR_365_DAY_WINDOW"
     )

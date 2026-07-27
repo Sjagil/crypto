@@ -1415,6 +1415,91 @@ def current_microstructure_readiness(
     }
 
 
+def microstructure_storage_runway(
+    ledger_root: Path,
+    *,
+    maximum_storage_bytes: int,
+    minimum_free_disk_bytes: int = 0,
+    free_disk_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Conservatively project lossless prospective-data storage runway."""
+
+    sealed = sorted(
+        [
+            *ledger_root.rglob("*.jsonl.xz"),
+            *ledger_root.rglob("*.jsonl.gz"),
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )
+    sample = sealed[-24:]
+    sample_sizes = [path.stat().st_size for path in sample]
+    conservative_hour_bytes = max(sample_sizes, default=0)
+    current_storage_bytes = sum(
+        path.stat().st_size
+        for path in ledger_root.rglob("*")
+        if path.is_file()
+    )
+    observed_free_disk_bytes = (
+        int(free_disk_bytes)
+        if free_disk_bytes is not None
+        else int(shutil.disk_usage(ledger_root).free)
+    )
+    cap_remaining_bytes = max(
+        0,
+        int(maximum_storage_bytes) - current_storage_bytes,
+    )
+    disk_remaining_bytes = max(
+        0,
+        observed_free_disk_bytes - int(minimum_free_disk_bytes),
+    )
+    usable_remaining_bytes = min(
+        cap_remaining_bytes,
+        disk_remaining_bytes,
+    )
+    projected: dict[str, dict[str, Any]] = {}
+    for days in (90, 180, 365):
+        required = conservative_hour_bytes * 24 * days
+        projected[str(days)] = {
+            "days": days,
+            "projected_additional_bytes": required,
+            "fits_configured_cap_and_free_disk": (
+                conservative_hour_bytes > 0
+                and required <= usable_remaining_bytes
+            ),
+        }
+    if conservative_hour_bytes <= 0:
+        status = "INSUFFICIENT_SEALED_SEGMENT_SAMPLE"
+        capacity_hours = 0
+    else:
+        capacity_hours = (
+            usable_remaining_bytes // conservative_hour_bytes
+        )
+        if not projected["365"][
+            "fits_configured_cap_and_free_disk"
+        ]:
+            status = "INSUFFICIENT_FOR_365_DAY_WINDOW"
+        elif len(sample) < 24:
+            status = "PROVISIONALLY_SUFFICIENT_SAMPLE_LIMITED"
+        else:
+            status = "SUFFICIENT_FOR_365_DAY_WINDOW"
+    return {
+        "schema_version": "microstructure_storage_runway_v1",
+        "status": status,
+        "sealed_segment_sample_count": len(sample),
+        "required_sample_count": 24,
+        "conservative_hour_bytes": conservative_hour_bytes,
+        "current_storage_bytes": current_storage_bytes,
+        "maximum_storage_bytes": int(maximum_storage_bytes),
+        "free_disk_bytes": observed_free_disk_bytes,
+        "minimum_free_disk_bytes": int(minimum_free_disk_bytes),
+        "usable_remaining_bytes": usable_remaining_bytes,
+        "estimated_remaining_hours": int(capacity_hours),
+        "estimated_remaining_days": float(capacity_hours / 24),
+        "milestones": projected,
+        "orders_generated": 0,
+    }
+
+
 class ProspectiveOrderflowRecorder:
     """Consume WebSocket events, batch-fsync them and publish gap-aware facts."""
 
@@ -2130,6 +2215,7 @@ __all__ = [
     "ProspectiveOrderflowRecorder",
     "audit_microstructure_snapshots",
     "current_microstructure_readiness",
+    "microstructure_storage_runway",
     "normalize_stream_event",
     "prospective_milestone_status",
     "seal_completed_orderflow_segments",

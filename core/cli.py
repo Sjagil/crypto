@@ -2897,6 +2897,26 @@ def command_microstructure(
             }
         )
         return 0
+    if args.microstructure_command == "storage-status":
+        from data.orderflow_recorder import (
+            microstructure_storage_runway,
+        )
+
+        emit(
+            microstructure_storage_runway(
+                settings.paths.context_data_dir
+                / "orderflow_stream",
+                maximum_storage_bytes=int(
+                    settings.market_data.maximum_storage_gb
+                    * 1024**3
+                ),
+                minimum_free_disk_bytes=int(
+                    settings.market_data.minimum_free_disk_gb
+                    * 1024**3
+                ),
+            )
+        )
+        return 0
     if args.microstructure_command == "observe":
         from research.microstructure_observer import (
             observe_microstructure_snapshots,
@@ -17763,6 +17783,7 @@ def build_parser() -> argparse.ArgumentParser:
     microstructure.add_parser("plan")
     microstructure.add_parser("status")
     microstructure.add_parser("data-status")
+    microstructure.add_parser("storage-status")
     microstructure.add_parser("observe")
     microstructure.add_parser("observer-audit")
     microstructure.add_parser("audit")
