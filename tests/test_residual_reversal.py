@@ -7,11 +7,53 @@ import pytest
 from research.portfolio_selection import RotationPortfolioPolicy
 from research.residual_reversal import (
     DAILY_PERIODS_PER_YEAR,
+    AdaptiveResidualReversalParameters,
     ResidualReversalParameters,
+    adaptive_residual_reversal_parameter_set,
     backtest_residual_reversal,
     residual_reversal_parameter_set,
     residual_reversal_period_metrics,
 )
+
+
+def test_adaptive_residual_dna_is_separate_and_causally_percentile_scored() -> None:
+    frozen = residual_reversal_parameter_set()[0]
+    declared = adaptive_residual_reversal_parameter_set()
+    assert {row.timeframe for row in declared} == {"1h", "4h"}
+    assert all(row.dna_hash != frozen.dna_hash for row in declared)
+
+    parameters = AdaptiveResidualReversalParameters(
+        timeframe="4h",
+        beta_lookback=60,
+        residual_horizon=5,
+        zscore_lookback=90,
+        percentile_lookback=90,
+        btc_ema_period=200,
+        maximum_holding_days=60,
+    )
+    frames = {
+        market: frame.set_axis(
+            pd.date_range(
+                "2020-01-01",
+                periods=len(frame),
+                freq="4h",
+                tz="UTC",
+            )
+        )
+        for market, frame in _frames(1_100).items()
+    }
+    result = backtest_residual_reversal(
+        frames,
+        parameters,
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=4.0,
+        portfolio_policy=_policy(),
+    )
+    assert result.summary()["timeframe"] == "4h"
+    assert result.integrity["strictly_prior_percentile_distribution"]
+    assert result.signal_diagnostics["adaptive_percentile_mode"]
+    assert result.metrics["periods_per_year"] == pytest.approx(365.25 * 6.0)
 
 
 def _frames(rows: int = 1_100) -> dict[str, pd.DataFrame]:

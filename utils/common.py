@@ -11,6 +11,7 @@ import os
 import random
 import re
 import tempfile
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -121,7 +122,18 @@ def atomic_write_bytes(path: Path | str, payload: bytes) -> Path:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, target)
+        for attempt in range(8):
+            try:
+                os.replace(temporary, target)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                # Windows can transiently deny replacing a status artifact
+                # while another process has just opened the old inode.
+                # Retrying the same already-fsynced temporary file keeps the
+                # operation atomic and bounded.
+                time.sleep(min(0.005 * 2**attempt, 0.1))
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -348,11 +360,20 @@ def configure_logging(
     if log_file is not None:
         target = Path(log_file)
         target.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.handlers.RotatingFileHandler(
-            target,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding="utf-8",
+        # Windows cannot atomically rename a log file while another research
+        # or worker process has it open.  A shared RotatingFileHandler therefore
+        # emits noisy rollover tracebacks and can lose operational events.
+        # Rotation remains enabled on POSIX; Windows uses an append-only shared
+        # file and the existing disk-budget supervisor governs retention.
+        file_handler = (
+            logging.FileHandler(target, encoding="utf-8")
+            if os.name == "nt"
+            else logging.handlers.RotatingFileHandler(
+                target,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
         )
         file_handler.setFormatter(formatter)
         file_handler.addFilter(redactor)
@@ -360,11 +381,15 @@ def configure_logging(
     if jsonl_file is not None:
         target = Path(jsonl_file)
         target.parent.mkdir(parents=True, exist_ok=True)
-        json_handler = logging.handlers.RotatingFileHandler(
-            target,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding="utf-8",
+        json_handler = (
+            logging.FileHandler(target, encoding="utf-8")
+            if os.name == "nt"
+            else logging.handlers.RotatingFileHandler(
+                target,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
         )
         json_handler.setFormatter(JsonLogFormatter())
         json_handler.addFilter(redactor)

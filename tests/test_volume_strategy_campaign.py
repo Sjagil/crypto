@@ -8,6 +8,7 @@ from research.volume_strategy_campaign import (
     VOLUME_STRATEGY_ARCHETYPES,
     VOLUME_STRATEGY_FORWARD_START,
     backtest_volume_strategy_batch,
+    volume_strategy_adapter,
     volume_strategy_dna,
 )
 
@@ -102,3 +103,30 @@ def test_orderflow_families_fail_closed_without_real_history() -> None:
 
 def test_forward_observer_start_is_immutable() -> None:
     assert VOLUME_STRATEGY_FORWARD_START == "2026-07-27T00:00:00+00:00"
+
+
+def test_canonical_volume_adapter_preserves_frozen_signal_parameters() -> None:
+    strategy_id = "VOL_BTC_EUR_1h_DONCHIAN_RVOL_BREAKOUT_N2"
+    adapter = volume_strategy_adapter(strategy_id)
+    selected = next(
+        row
+        for row in volume_strategy_dna((("BTC-EUR", "1h"),))
+        if row.strategy_id == strategy_id
+    )
+    assert adapter.legacy_strategy_dna_hash == selected.dna_hash
+    assert {
+        key: adapter.parameters()[key] for key in selected.parameters
+    } == dict(selected.parameters)
+    frame = _frame()
+    baseline = adapter.generate(frame)
+    revised = frame.copy()
+    revised.loc[revised.index[-1], "close"] *= 1.05
+    revised.loc[revised.index[-1], "high"] *= 1.05
+    revised.loc[revised.index[-1], "volume"] *= 5.0
+    changed = adapter.generate(revised)
+    pd.testing.assert_series_equal(
+        baseline.entry.iloc[:-1],
+        changed.entry.iloc[:-1],
+    )
+    assert baseline.stop_distance.gt(0).all()
+    assert baseline.target_distance.gt(0).all()

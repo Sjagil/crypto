@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -171,7 +172,7 @@ def test_no_post_freeze_candles_means_empty_collecting_evidence():
         result,
         frames,
         forward_start=frames["BTC-EUR"].index[-1]
-        + pd.Timedelta(days=1),
+        + pd.Timedelta(1, unit="D"),
     )
 
     assert evidence.observations == ()
@@ -179,6 +180,21 @@ def test_no_post_freeze_candles_means_empty_collecting_evidence():
     assert evidence.degradation_observation is None
     assert evidence.summary["status"] == "COLLECTING_FORWARD_DATA"
     assert evidence.summary["forward_net_return"] == 0.0
+
+
+def test_empty_decision_stream_remains_valid_forward_evidence():
+    frames = _frames()
+    result = replace(_result(frames), decisions=pd.DataFrame())
+    evidence = build_breakout_forward_evidence(
+        result,
+        frames,
+        forward_start=frames["BTC-EUR"].index[-20],
+    )
+
+    assert len(evidence.observations) == 19
+    assert evidence.decisions == ()
+    assert all(not row["decision_event"] for row in evidence.observations)
+    assert all(row["reason"] == "HOLD_UNCHANGED" for row in evidence.observations)
 
 
 def test_forward_merge_is_idempotent_and_rejects_revision():

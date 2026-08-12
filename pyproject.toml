@@ -11,15 +11,24 @@ testpaths = ["tests"]
 markers = [
   "network: opt-in tests that access public network services",
 ]
+filterwarnings = [
+  "error::DeprecationWarning",
+  "error::PendingDeprecationWarning",
+  "ignore:Setting the shape on a NumPy array has been deprecated.*:DeprecationWarning:hmmlearn\\.utils",
+  "ignore:The set_bad function will be deprecated.*:PendingDeprecationWarning:seaborn\\.matrix",
+]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
 exclude = [
+  ".tools",
   ".venv",
+  "crypto-references",
   "data_store",
   "legacy",
   "output",
+  "reference_repos",
 ]
 
 [tool.ruff.lint]

@@ -81,13 +81,76 @@ def test_database_idempotency_and_rollback(tmp_path) -> None:
     database.close()
 
 
+def test_database_supports_restart_safe_payload_history_queries(
+    tmp_path,
+) -> None:
+    database = Database(sqlite_path=tmp_path / "history-query.db")
+    database.migrate()
+    database.upsert_records(
+        "experiment_trials",
+        [
+            {
+                "external_id": f"trial-{index}",
+                "strategy_dna_hash": strategy_hash,
+                "source": "FAST_SCREEN_REAL",
+                "status": (
+                    "COMPLETE"
+                    if strategy_hash != "hash-c"
+                    else "PENDING"
+                ),
+            }
+            for index, strategy_hash in enumerate(
+                ("hash-a", "hash-b", "hash-c"),
+                start=1,
+            )
+        ],
+    )
+
+    first_batch = database.fetch_records_after_id(
+        "experiment_trials",
+        after_id=0,
+        limit=2,
+    )
+    second_batch = database.fetch_records_after_id(
+        "experiment_trials",
+        after_id=int(first_batch[-1]["id"]),
+        limit=2,
+    )
+    selected = database.fetch_records_by_payload_values(
+        "experiment_trials",
+        key="strategy_dna_hash",
+        values=("hash-b", "missing"),
+    )
+    selected_run = database.fetch_records_by_payload_values(
+        "experiment_trials",
+        key="run_id",
+        values=("missing",),
+    )
+    pending = database.fetch_records_by_statuses(
+        "experiment_trials",
+        statuses=("PENDING",),
+    )
+
+    assert len(first_batch) == 2
+    assert len(second_batch) == 1
+    assert selected[0]["payload"]["strategy_dna_hash"] == "hash-b"
+    assert selected_run == []
+    assert len(pending) == 1
+    assert pending[0]["payload"]["strategy_dna_hash"] == "hash-c"
+    with pytest.raises(ValueError, match="unsupported payload"):
+        database.fetch_records_by_payload_values(
+            "experiment_trials",
+            key="untrusted",
+            values=("hash-b",),
+        )
+    database.close()
+
+
 @pytest.mark.asyncio
 async def test_fred_revisions_preserve_availability_time(
     isolated_settings: Settings,
 ) -> None:
-    providers = isolated_settings.providers.model_copy(
-        update={"fred_api_key": SecretStr("unit")}
-    )
+    providers = isolated_settings.providers.model_copy(update={"fred_api_key": SecretStr("unit")})
     settings = isolated_settings.model_copy(update={"providers": providers})
 
     async def request(method, url, params, headers):
@@ -170,9 +233,7 @@ async def test_actual_funding_interval_annualization() -> None:
     result = await FundingRateCollector(requester=request).collect()
     values = result[0].values
     assert values["funding_interval_seconds"] == 14_400
-    assert values["annualized_funding"] == pytest.approx(
-        annualize_funding(0.0001, 14_400)
-    )
+    assert values["annualized_funding"] == pytest.approx(annualize_funding(0.0001, 14_400))
     assert values["funding_periods_per_year"] != 1095
     assert values["perpetual_base_volume_24h"] == 1234
     assert values["perpetual_quote_volume_24h"] == 24_680_000
@@ -209,10 +270,7 @@ async def test_derivatives_context_persists_typed_availability(
         market="BTC-USDT",
         persist=True,
     )
-    target = (
-        isolated_settings.paths.context_data_dir
-        / "derivatives_mexc_BTC.parquet"
-    )
+    target = isolated_settings.paths.context_data_dir / "derivatives_mexc_BTC.parquet"
     frame = pd.read_parquet(target)
     assert str(frame["available_at"].dtype) == "datetime64[ns, UTC]"
     assert frame["source_available_at"].notna().sum() >= 2
@@ -241,6 +299,12 @@ def test_gex_formulas_and_convention_metadata() -> None:
     assert result["put_gex_proxy"] == pytest.approx(40_000)
     assert result["gross_gex_proxy"] == pytest.approx(80_000)
     assert result["net_gex_proxy"] == pytest.approx(0)
+    assert result["absolute_gex"] == pytest.approx(80_000)
+    assert result["convention_signed_gex"] == pytest.approx(0)
+    assert result["max_gamma_strike"] == pytest.approx(20_000)
+    assert result["zero_day_gex"]["absolute_gex"] == pytest.approx(0)
+    assert result["weekly_gex"]["absolute_gex"] == pytest.approx(80_000)
+    assert result["flow_adjusted_status"] == "UNAVAILABLE_MISSING_OPTION_FLOW"
     assert not result["assumptions"]["dealer_positioning_known"]
     assert "heuristic" in result["assumptions"]["warning"]
 
@@ -298,9 +362,7 @@ def test_persisted_macro_build_uses_real_available_at_and_breadth(tmp_path) -> N
     assert "breadth_positive_return_7d" in result
     assert result.index.max() <= hourly.max()
     coverage = pd.read_csv(context / "macro_context_coverage.csv")
-    assert {"sentiment", "breadth", "relative_strength"} <= set(
-        coverage["feature_group"]
-    )
+    assert {"sentiment", "breadth", "relative_strength"} <= set(coverage["feature_group"])
 
 
 def test_macro_cadence_causality_all_groups_and_weighted_completeness() -> None:
@@ -379,16 +441,83 @@ def test_macro_cadence_causality_all_groups_and_weighted_completeness() -> None:
         index=pd.DatetimeIndex([base[50]]),
     )
     specs = {
-        "sentiment": source_spec("unit", "1d", timedelta(days=1), timedelta(days=2), {"fear_greed": "index"}),
-        "dominance": source_spec("unit", "1d", timedelta(days=1), timedelta(days=2), {"btc_dominance": "fraction", "stablecoin_dominance": "fraction", "total_market_cap": "currency"}),
-        "relative_strength": source_spec("unit", "1h", timedelta(hours=1), timedelta(hours=2), {"btc": "price", "eth": "price", "sol": "price"}),
-        "breadth": source_spec("unit", "1h", timedelta(hours=1), timedelta(hours=2), {column: "price" for column in breadth}),
-        "derivatives": source_spec("unit", "1h", timedelta(hours=1), timedelta(hours=2), {"funding_rate": "fraction", "funding_interval_seconds": "count", "open_interest": "currency", "basis": "currency"}),
-        "flows": source_spec("unit", "1d", timedelta(days=1), timedelta(days=4), {"btc_etf_flow": "currency", "eth_etf_flow": "currency"}),
-        "onchain": source_spec("unit", "1d", timedelta(days=1), timedelta(days=3), {"mvrv": "index", "sopr": "index", "active_addresses": "count"}),
-        "global_macro": source_spec("unit", "1d", timedelta(days=1), timedelta(days=2), {"dxy": "index", "nasdaq": "index", "vix": "index"}),
-        "events": source_spec("unit", "event", timedelta(hours=1), timedelta(days=30), {"unlock_fraction": "fraction"}),
-        "gex": source_spec("unit", "snapshot", timedelta(hours=1), timedelta(days=2), {"gross_gex_proxy": "currency", "net_gex_proxy": "currency", "gamma_concentration": "fraction", "dominant_gamma_strike": "price", "spot_distance_from_dominant_gamma": "fraction"}),
+        "sentiment": source_spec(
+            "unit", "1d", timedelta(days=1), timedelta(days=2), {"fear_greed": "index"}
+        ),
+        "dominance": source_spec(
+            "unit",
+            "1d",
+            timedelta(days=1),
+            timedelta(days=2),
+            {
+                "btc_dominance": "fraction",
+                "stablecoin_dominance": "fraction",
+                "total_market_cap": "currency",
+            },
+        ),
+        "relative_strength": source_spec(
+            "unit",
+            "1h",
+            timedelta(hours=1),
+            timedelta(hours=2),
+            {"btc": "price", "eth": "price", "sol": "price"},
+        ),
+        "breadth": source_spec(
+            "unit",
+            "1h",
+            timedelta(hours=1),
+            timedelta(hours=2),
+            {column: "price" for column in breadth},
+        ),
+        "derivatives": source_spec(
+            "unit",
+            "1h",
+            timedelta(hours=1),
+            timedelta(hours=2),
+            {
+                "funding_rate": "fraction",
+                "funding_interval_seconds": "count",
+                "open_interest": "currency",
+                "basis": "currency",
+            },
+        ),
+        "flows": source_spec(
+            "unit",
+            "1d",
+            timedelta(days=1),
+            timedelta(days=4),
+            {"btc_etf_flow": "currency", "eth_etf_flow": "currency"},
+        ),
+        "onchain": source_spec(
+            "unit",
+            "1d",
+            timedelta(days=1),
+            timedelta(days=3),
+            {"mvrv": "index", "sopr": "index", "active_addresses": "count"},
+        ),
+        "global_macro": source_spec(
+            "unit",
+            "1d",
+            timedelta(days=1),
+            timedelta(days=2),
+            {"dxy": "index", "nasdaq": "index", "vix": "index"},
+        ),
+        "events": source_spec(
+            "unit", "event", timedelta(hours=1), timedelta(days=30), {"unlock_fraction": "fraction"}
+        ),
+        "gex": source_spec(
+            "unit",
+            "snapshot",
+            timedelta(hours=1),
+            timedelta(days=2),
+            {
+                "gross_gex_proxy": "currency",
+                "net_gex_proxy": "currency",
+                "gamma_concentration": "fraction",
+                "dominant_gamma_strike": "price",
+                "spot_distance_from_dominant_gamma": "fraction",
+            },
+        ),
     }
     result = MacroContextEngine().build(
         base,

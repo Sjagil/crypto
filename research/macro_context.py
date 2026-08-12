@@ -919,7 +919,7 @@ def build_persisted_macro_context(
             start = end - pd.Timedelta(days=30)
         rule = {
             "1W": "W-MON",
-            "1M": "MS",
+            "1mo": "MS",
         }.get(
             timeframe,
             pd.to_timedelta(TIMEFRAME_SECONDS[timeframe], unit="s"),

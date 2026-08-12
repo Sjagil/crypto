@@ -144,6 +144,29 @@ If script activation is prohibited, keep PowerShell unchanged and replace
 different Bitvavo credentials for public data and trading. A live key must be
 trade-only, IP-restricted, and incapable of withdrawals.
 
+## Telegram notifications
+
+Telegram is an optional, failure-isolated downstream notification channel. It
+reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` only through
+`config/settings.py`; values are never printed or written to artifacts. Copy
+the non-secret defaults from `.env.example`, then use:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py telegram health
+.\.venv\Scripts\python.exe .\main.py telegram test
+.\.venv\Scripts\python.exe .\main.py telegram status
+.\.venv\Scripts\python.exe .\main.py signals scan
+.\.venv\Scripts\python.exe .\main.py telegram send-latest-signals
+.\.venv\Scripts\python.exe .\main.py daily
+```
+
+`telegram test`, `signals scan`, and every `telegram` command place zero
+orders. The daily workflow generates and persists canonical signals first,
+then sends only new eligible notifications. Delivery state, failures, health,
+status, and a sanitized message preview are stored under
+`output/notifications`. Missing Telegram configuration or a delivery failure
+does not stop local signal generation or independently authorized execution.
+
 ## Quick research workflow
 
 The synthetic workflow validates orchestration without pretending that
@@ -181,7 +204,7 @@ python main.py providers capabilities
 python main.py providers test --public-only
 python main.py data historical --provider mexc --market BTC-USDT --timeframe 1h
 python main.py data estimate --providers all --universe-size 25 --history-profile maximum --timeframes all
-python main.py data fetch --providers bitvavo,kraken,mexc,coinmarketcap --universe-size 10 --history-profile standard --timeframes 5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,1W --resume --yes
+python main.py data fetch --providers bitvavo,kraken,mexc,coinmarketcap --universe-size 10 --history-profile standard --timeframes 1m,3m,5m,15m,30m,1h,2h,3h,4h,6h,8h,12h,1d,2d,3d,1W,1mo --resume --yes
 python main.py data context-fetch --providers coinmarketcap,eodhd,fred,sec,alternative_me,defillama,deribit --history-profile standard --resume
 python main.py data status
 python main.py data coverage
@@ -1166,12 +1189,288 @@ regime—the router is deterministically 100% cash and cannot generate orders.
 Its decisions form a verified append-only SHA-256 chain in
 `output/lab/reports/regime_router_status_v1.json`.
 
+## Autonomous spot control plane
+
+`main.py` remains the only entry point. The autonomous control plane joins the
+existing causal research evidence, the hourly CoinMarketCap Top-50 snapshot,
+the closed-candle regime classifier, the frozen-strategy router, the Top-3
+opportunity scanner and the capability-gated Bitvavo client:
+
+```powershell
+python main.py regime status
+python main.py regime explain
+python main.py router status
+python main.py opportunities scan
+python main.py opportunities top
+python main.py trading status
+python main.py trading preflight
+python main.py trading smoke-canary
+python main.py trading run-once
+python main.py trading position
+python main.py autopilot status
+python main.py autopilot run-once
+python main.py run
+```
+
+The primary canary identity is frozen as `RR_B60_H5_Z20` with strategy DNA
+`4571ae8e81aeb4299367643922061e2eabb6523c892ec9a63f08d33f32a939d0`.
+Its human-owned live authority resides in
+`config/live_strategy_approvals.yaml`. Research and autopilot code read this
+file but never modify it. A live approval requires a human approval reference
+and timestamp as well as the separate environment gates. The local RR policy
+is scoped only to its frozen DNA and Level-1 caps; it grants no authority to
+new strategy DNA.
+
+The canary is spot-only, long-only, capped at EUR 10 per order, EUR 10 total,
+one open position and one new buy per UTC day. It has no autoscaling,
+withdrawal, margin, leverage or derivatives path. A market buy uses Bitvavo's
+quote-denominated `amountQuote`, avoiding base-quantity rounding above or
+below the exact EUR cap. Every submit is deterministic and idempotent.
+Unknown remote orders, stale data, a DNA mismatch, missing approval, risk-off,
+liquidity stress, the kill switch, reconciliation errors and absence of a
+natural entry all result in `NO_TRADE`.
+
+Current machine-readable artifacts are written atomically under
+`output/reports/`:
+
+- `current_regime.json`
+- `strategy_router_status.json`
+- `top_opportunities.json`
+- `live_trading_status.json`
+- `current_position.json`
+- `reconciliation_status.json`
+- `autopilot_status.json`
+- `daily_execution_summary.json`
+
 Every generated baseline is paired with deterministic one-dimensional
 sensitivity work for each tunable block parameter. Large grids use a documented
 deterministic non-default sample in QUICK mode; joint parameter work is handled
 by the typed optimizer. `WALK_FORWARD_FIXED` remains a diagnostic, while
 `WALK_FORWARD_OPTIMIZED` performs a separate train-only optimization in every
 fold before freezing parameters on its next validation window.
+
+## Practical governance and permanent autopilot
+
+The practical lifecycle separates economic usability from capital confidence:
+
+```text
+BACKTEST_POSITIVE -> PAPER_ACTIVE -> LIVE_CANARY_ELIGIBLE
+-> LIVE_CANARY_ACTIVE -> LIVE_VALIDATED -> PORTFOLIO_ACTIVE
+```
+
+DSR, PBO, White Reality Check, Hansen SPA and missing prospective evidence remain
+visible capital-scaling warnings. Lookahead, repainting, non-positive net edge,
+missing entry/exit, stale data, identity drift, reconciliation failures, unsafe
+credentials, the kill switch and risk-cap violations remain hard blockers.
+
+RR `RR_B60_H5_Z20` is frozen to its exact DNA, ETH-EUR and 1d execution. A
+Level-1 live canary is limited to EUR 10 per order, EUR 10 total exposure, one
+position and one new buy per day. It is spot-only and cannot autoscale. Operator
+authority is persisted per DNA without storing the approval phrase; a natural
+signal and every hard preflight check are still required.
+
+Canonical commands:
+
+```powershell
+python main.py governance migrate-practical
+python main.py governance status
+python main.py universe top50
+python main.py strategies positive
+python main.py strategies top --limit 20
+python main.py paper activate-auto
+python main.py paper run-once
+python main.py live canary-queue
+python main.py live canary-preflight
+python main.py live activate-canary --strategy-id RR_B60_H5_Z20 --approval "<phrase>"
+python main.py lab campaign plan --name lower-timeframe-mtf-v1
+python main.py lab campaign run --name lower-timeframe-mtf-v1 --workers 2 --max-trials 12 --yes
+python main.py lab campaign report --name lower-timeframe-mtf-v1
+python main.py lab campaign plan --name owned-asset-high-sample-v1
+python main.py lab campaign run --name owned-asset-high-sample-v1 --workers 2 --max-trials 12 --yes
+python main.py lab campaign report --name owned-asset-high-sample-v1
+python main.py autopilot run-once
+python main.py autopilot run
+python main.py portfolio status
+python main.py capital status
+```
+
+The lower-timeframe campaign is a bounded, causal grammar for 15m, 1h and 4h.
+
+`OWNED_ASSET_HIGH_SAMPLE_V1` repeats a bounded selection of twelve distinct
+economic families on BTC-EUR, ETH-EUR, SOL-EUR, TAO-EUR, ICP-EUR, NPC-EUR and
+S-EUR at 1h and 4h. ICP-EUR and S-EUR remain research-only; a positive result
+cannot grant them paper or live authority. The campaign also freezes one
+discovery-informed 4h Bollinger/choppiness/volume hypothesis for expanded-asset
+validation. Its manifest records the fixed parameters and makes clear that the
+original BTC/ETH/SOL/LINK universe is not an untouched holdout. Exact survivors
+must still pass normal and stressed costs, walk-forward validation, stationary
+bootstrap Monte Carlo and Dirichlet time-concentration stress before they can
+enter the paper registry. New live authority remains explicit per strategy DNA.
+Each asset retains its maximum available real history. Point-in-time listing
+and warm-up gates keep young assets inactive before eligibility, so NPC-EUR or
+S-EUR cannot truncate the older BTC/ETH/SOL histories.
+
+The adaptive intraday challenger campaign keeps the frozen daily RR and Turtle
+controls unchanged. It tests a strictly-prior rolling-percentile residual
+reversal and a 4h Turtle breakout with ATR-equalized EUR risk on both the
+promotion-compatible universe and a broader discovery-only universe. Expanded
+assets never gain execution eligibility from a research result.
+
+The panel uses the full BTC calendar. Every altcoin becomes eligible only after
+its own real listing history and fixed warm-up; there is no pre-listing fill.
+A young asset therefore cannot truncate years of older-asset observations.
+The preregistered adaptive residual family is evaluated on both 1h and 4h.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py lab campaign plan --name adaptive-crypto-intraday-v1
+.\.venv\Scripts\python.exe .\main.py lab campaign run --name adaptive-crypto-intraday-v1 --yes
+.\.venv\Scripts\python.exe .\main.py lab campaign report --name adaptive-crypto-intraday-v1
+```
+Its eight hypotheses combine execution-timeframe entries with the last fully
+closed daily or weekly context candle, including weekly-regime 4h trend
+pullbacks and volume-confirmed breakouts. Exact survivors receive
+normal/stressed equity charts, regime attribution, stationary-bootstrap Monte
+Carlo and Dirichlet time-concentration stress. A positive backtest may be
+promoted to paper only after an executable frozen adapter exists. New DNA never
+receives live authority automatically.
+
+### Bounded classical strategy factory
+
+`CLASSICAL_STRATEGY_FACTORY_V1` preregisters a deterministic 2,000-DNA search
+space before any result is observed. It spans 51 distinct economic families,
+causal 5m/15m/1h/4h/1d/1W routes and bounded ATR stop, target, trailing and
+time-exit policies. Each DNA contains exactly one entry trigger, at most one
+regime filter and at most two nonredundant confirmations. The plan records the
+global trial denominator and immutable SHA-256 identities.
+
+Orderbook, CVD, funding, open-interest, basis and liquidation families remain
+`DATA_PENDING` until real point-in-time history exists. The factory never
+manufactures those inputs. The canonical lab runner owns all fills, costs,
+walk-forward analysis, return-path deduplication, Monte Carlo and Dirichlet
+validation; the factory is only the preregistered grammar.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py lab campaign plan --name classical-strategy-factory-v1 --factory-trials 2000
+.\.venv\Scripts\python.exe .\main.py lab campaign run --name classical-strategy-factory-v1 --factory-trials 2000 --yes
+.\.venv\Scripts\python.exe .\main.py lab campaign report --name classical-strategy-factory-v1
+```
+
+The first formal campaign evaluates 15m, 1h and 4h on real closed candles.
+Its eight-trade screening floor is deliberately practical: it sends more
+economically positive leads to exact validation, but it never turns negative
+expectancy, missing exits, lookahead, stale data or failed execution checks
+into a paper or live promotion. New positive DNA may auto-promote to paper
+after an executable adapter exists. Live approval remains explicit per DNA.
+
+Exact-positive generated DNA is frozen in
+`output/strategies/frozen_classical_paper_candidates.json`. The generated-paper
+adapter refreshes public Bitvavo candles, reconstructs the immutable signal
+blocks and parameters, simulates natural next-open entries and manages ATR
+stops/targets in a separate restart-safe ledger. It has no live broker path.
+Normal/stressed replays, stationary-bootstrap Monte Carlo, Dirichlet
+time-concentration stress and strategy charts are cached in
+`output/lab/reports/classical_positive_robustness_v1.json`.
+
+### Causal HMM regime controller
+
+The HMM layer classifies market state; it is not a standalone alpha signal.
+It uses diagonal Gaussian HMMs on stationary features at 1W, 1d, 4h, 1h and
+15m. Model fitting always ends before the candle being classified, historical
+posteriors use the explicit forward probability `P(S_t | x_1:t)`, and
+higher-timeframe states are aligned backward-as-of to the last closed candle.
+Full-sample smoothed probabilities are forbidden.
+
+The hierarchy separates structural regime (1W), daily trend/volatility, 4h/1h
+swing condition and 15m execution context. It reports posterior entropy,
+expected state duration and 1/3/5/10-step transition forecasts. The v1
+comparison applies preregistered multipliers to the frozen RR return path,
+recalculates costs and turnover, attributes PF/Sharpe/drawdown by regime, and
+runs stationary-bootstrap Monte Carlo plus Dirichlet time-concentration stress.
+HMM v1 is observer-only and can neither promote a strategy nor place an order.
+
+```powershell
+python main.py hmm status
+python main.py hmm observe
+python main.py hmm compare
+python main.py hmm compare-all
+python main.py hmm status-all
+python main.py hmm optimize-regimes --timeframes 15m,1h,4h,1d,1W --trials 20 --folds 3
+python main.py hmm status-duration
+```
+
+Evidence is written under `output/hmm/`. The permanent autopilot refreshes the
+HMM comparison as part of a due research cycle, without changing RR canary
+authority or live risk limits.
+
+`hmm compare-all` is the exhaustive canonical comparison. It runs all 14
+registered strategy implementations on 15m, 1h, 4h, 1d and 1W over the four
+fail-closed EUR markets. Each base is compared with one preregistered
+`HMM_SOFT_40` entry-sizing overlay on the same sample and with the same
+entry/exit/stop/target, normal costs, stressed costs and next-open fills.
+Every HMM variant receives separate immutable DNA and trial registration.
+Stationary-bootstrap Monte Carlo and Dirichlet time-concentration evidence are
+stored per comparison. The command is research-only and always generates zero
+orders.
+
+`hmm optimize-regimes` evaluates a finite explicit-duration forward filter over
+the expanded `(regime, age)` state space. Durations use a shifted-Poisson
+distribution with a proper discrete hazard and state-specific age tracking.
+The bounded Optuna search is deterministic and selects only from
+out-of-sample predictive folds. It never optimizes strategy Sharpe or return;
+posterior churn is secondary to predictive density and a state-occupancy guard
+prevents a static one-state solution from winning. Every HPO evaluation enters
+the immutable global trial denominator. The selected configuration remains
+observer-only and cannot receive paper or live authority.
+
+Capital never autoscales. Once the live ledger proves the required faultless
+round trips and expectancy, an operator can approve an eligible level with:
+
+```powershell
+python main.py capital approve-level --strategy-id RR_B60_H5_Z20 --level 2 --approval "I APPROVE CAPITAL LEVEL 2 FOR RR_B60_H5_Z20"
+python main.py live asset-preflight --markets TAO-EUR,NPC-EUR
+python main.py autopilot start
+python main.py autopilot status
+python main.py autopilot stop
+python main.py autopilot task-install
+python main.py autopilot task-status
+python main.py autopilot task-remove
+```
+
+The command fails closed before the evidence threshold is met. Levels 3 and 4
+use the same phrase pattern and require their higher live-evidence thresholds.
+`live asset-preflight` uses only Bitvavo public market metadata and local
+point-in-time eligibility/approval artifacts. It deliberately skips balances
+and private requests until a market has approved strategy DNA, matching active
+operator authority and a natural actionable signal. Holding a coin is not
+treated as permission to invent an exit or rotation.
+
+Explicit spot-market eligibility exceptions are recorded in
+`config/execution_market_exceptions.yaml`. They may admit a user-approved
+market such as TAO-EUR or NPC-EUR to execution preflight, but never bypass
+approved strategy DNA, a natural signal, stop/exit validation, reconciliation,
+fresh data, or Level-1 canary caps.
+
+The permanent practical autopilot separates operational and research cadence.
+Signals, paper lifecycle, live-canary preflight, portfolio state and Telegram
+are refreshed every `AUTOPILOT_EXECUTION_CYCLE_SECONDS` (300 seconds by
+default). Expensive data/research campaigns remain limited by
+`AUTOPILOT_MIN_CYCLE_INTERVAL_HOURS` (four hours by default). `autopilot start`
+is duplicate-safe and persists its supervisor PID; `autopilot stop` terminates
+only that recorded process tree and does not alter strategy approval.
+Research runs in one isolated background task and cannot suspend the
+five-minute execution, reconciliation, position-management or Telegram cycle.
+Its restart-safe state is stored in
+`output/autopilot/background_research_status.json`; research failures are
+reported but remain isolated from authorized execution.
+
+`autopilot task-install` installs a least-privilege Windows logon task. It
+invokes the duplicate-safe `autopilot start` command, so a reboot resumes the
+same canonical supervisor without creating a second trading loop.
+
+The top-50 snapshot and eligibility history are written under
+`output/universe/`; lifecycle registries under `output/strategies/` and
+`output/governance/`; portfolio caps under `output/portfolio/`; and permanent
+cycle state under `output/autopilot/`.
 
 ## Architecture
 
@@ -1239,3 +1538,377 @@ reported as `SKIPPED_MISSING_CREDENTIALS`, never as passes.
 - Backtest and Monte Carlo results depend on the supplied data and assumptions.
 - Operational allowlisting does not replace independent Shariah review.
 - Passing research is not evidence that future returns will be positive.
+## Autonomous live four-market launch
+
+The canonical production entrypoint coordinates the existing WebSocket,
+execution, reconciliation, position/PnL, Telegram and research components.
+It is restricted to `BTC-EUR`, `ETH-EUR`, `TAO-EUR` and `NPC-EUR`. Service
+activation does not approve unknown strategy DNA and never enables
+withdrawals, margin, leverage, shorts or derivatives.
+
+Enable once after reviewing the private account preflight:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py doctor
+.\.venv\Scripts\python.exe .\main.py autonomous-live reconcile
+.\.venv\Scripts\python.exe .\main.py live canary-preflight
+.\.venv\Scripts\python.exe .\main.py autonomous-live enable `
+  --markets BTC-EUR ETH-EUR TAO-EUR NPC-EUR `
+  --approval "LIVE_SPOT_CONFIRMED"
+```
+
+The generated-strategy live sleeve is a separate, frozen-DNA authority. It
+enrols only canonical exact-positive, real-provider, cost-adjusted candidates
+already evaluated by the generated paper engine. It reuses those natural
+closed-candle signals and never creates a second signal engine. The sleeve is
+limited to EUR 10 per order, EUR 15 managed exposure and three material
+wallet-wide positions; existing holdings worth at least EUR 5 count toward
+that position limit. Unknown DNA, expired next-open signals and identity drift
+remain fail-closed.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py live approve-positive-portfolio `
+  --approval "LIVE POSITIVE STRATEGY PORTFOLIO CONFIRMED"
+.\.venv\Scripts\python.exe .\main.py live positive-portfolio-status
+.\.venv\Scripts\python.exe .\main.py live start --exchange bitvavo
+.\.venv\Scripts\python.exe .\main.py live status
+```
+
+Approval text is checked locally and is never persisted. New exact-positive
+DNA may join this small sleeve under the recorded portfolio approval; altered,
+missing or non-exact DNA cannot. An entry is submitted only during the first
+15 minutes after its fully closed signal candle. The executor prioritizes
+stops and strategy exits, submits at most one order per cycle, and uses the
+same append-only Bitvavo execution ledger, idempotency keys, reconciliation,
+risk manager, liquidity checks and Telegram order lifecycle as the primary RR
+canary.
+
+Stop the legacy practical-autopilot supervisor before starting the new
+supervisor. This prevents two independent scheduling loops from evaluating
+the same approved DNA:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py autopilot stop
+.\.venv\Scripts\python.exe .\main.py autonomous-live run
+```
+
+Keep that foreground process running under the operating system's process
+supervisor. Do not start a second copy; the durable single-instance lock
+rejects it.
+
+Operational commands:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py autonomous-live start
+.\.venv\Scripts\python.exe .\main.py autonomous-live task-install
+.\.venv\Scripts\python.exe .\main.py autonomous-live task-status
+.\.venv\Scripts\python.exe .\main.py autonomous-live health
+.\.venv\Scripts\python.exe .\main.py autonomous-live status
+.\.venv\Scripts\python.exe .\main.py autonomous-live reconcile
+.\.venv\Scripts\python.exe .\main.py autonomous-live positions
+.\.venv\Scripts\python.exe .\main.py autonomous-live signals
+.\.venv\Scripts\python.exe .\main.py autonomous-live strategies
+.\.venv\Scripts\python.exe .\main.py autonomous-live research-status
+.\.venv\Scripts\python.exe .\main.py autonomous-live pause
+.\.venv\Scripts\python.exe .\main.py autonomous-live resume
+.\.venv\Scripts\python.exe .\main.py autonomous-live shutdown
+```
+
+Local monitoring UI (read-only except for the existing pause, resume,
+reconcile and emergency-stop controls):
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py ui start
+.\.venv\Scripts\python.exe .\main.py ui status
+Start-Process "http://127.0.0.1:8765/"
+```
+
+The **P&L Calendar** page reports daily account-wide mark-to-market change,
+explicit operator cash-flow adjustments, fees, fill counts, validated P&L and
+the equity-scaled soft daily target. Unexplained balance or valuation jumps
+remain visible as `UNVERIFIED` and are not relabelled as trading profit. The
+**Trending** page ranks hot markets as context and shows current price,
+entry zone, trigger, stop, TP1/TP2, confidence, multi-timeframe returns and an
+explicit live-authority label. A hot market is never an order by itself.
+
+`task-install` creates a least-privilege, duplicate-safe Windows logon task
+with no execution-time limit. It stores neither exchange secrets nor an
+approval phrase. Removing the task does not alter live authority. When local
+Task Scheduler policy returns `Access is denied`, run only this install command
+once from an elevated PowerShell terminal; the trading process itself remains
+least privilege.
+
+The live supervisor also adopts and monitors the continuous maximum-history
+data service and the orderless simple-strategy lab. Each companion retains its
+own PID lock. A live owner is never duplicated; an objectively stale lock is
+archived before the missing service is restarted through `main.py`. Companion
+failures are reported in `output/live/companion_services.json` and never relax
+execution gates or stop position management.
+
+The daily profit target defaults to an aspirational €250 at €50,000 marked
+equity (0.5%) and scales linearly from each UTC day-start equity. It is
+reporting-only: it cannot force trades, increase sizing, relax stops, override
+exposure/loss limits or bypass the kill switch.
+
+New generated DNA must have at least 100 closed trades and 2,557 days of real
+history before automatic paper promotion. The `long-history-intraday-v1`
+campaign applies this gate to the common BTC/ETH/LINK history on 1h and 4h.
+The 15m factory remains active for research and shadow evidence, but it cannot
+claim seven-year validation because the available native 15m archive starts in
+2024.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py lab campaign plan --name long-history-intraday-v1
+.\.venv\Scripts\python.exe .\main.py lab campaign run --name long-history-intraday-v1 --workers 1 --max-trials 12 --yes
+.\.venv\Scripts\python.exe .\main.py lab campaign report --name long-history-intraday-v1
+```
+
+New entries also pass a current public-order-book gate. BTC, ETH, TAO and NPC
+have separate maximum-spread, maximum-estimated-slippage, minimum visible
+ask-depth and minimum 24-hour-volume limits. A buy may consume at most 2% of
+the visible ask liquidity. These checks never block a risk-reducing exit.
+
+At initial launch only the explicitly approved frozen
+`RR_B60_H5_Z20` DNA on `ETH-EUR` may submit a canary order. BTC, TAO and NPC
+remain monitored and researched until a separate frozen strategy DNA is
+approved. Level 1 is €10 per order and €10 total RR exposure; the
+available EUR balance is not permission to bypass this cap. Raising a capital
+level always requires new operator approval and live round-trip evidence.
+
+## Seven-year causal research
+
+The canonical seven-year workflow is research-only and never promotes or
+submits orders. Exact calendar coverage is evaluated after strategy warm-up.
+Short-history results remain visible under
+`DEGRADED_SHORT_HISTORY_RESEARCH_ONLY`, but cannot enter the official
+seven-year ranking.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py history audit --min-years 7
+.\.venv\Scripts\python.exe .\main.py history download --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py history status --min-years 7
+.\.venv\Scripts\python.exe .\main.py research backtest-all --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py research backtest-top30 --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py research backtest-timeframe --timeframe 1h --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py research backtest-timeframe --timeframe 4h --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py research validate-survivors --min-years 7 --resume
+.\.venv\Scripts\python.exe .\main.py leaderboard build --window seven-year
+.\.venv\Scripts\python.exe .\main.py leaderboard compare-legacy
+.\.venv\Scripts\python.exe .\main.py report build --scope seven-year
+```
+
+Artifacts are written below `output/research/seven_year`. Every persisted run
+contains dataset identities and hashes, normal/stressed/double-cost evidence,
+anchored and rolling walk-forward results, annual and retrospective-regime
+breakdowns, capacity analysis, reconciled CSV exports and a chart. The
+common-window ranking intentionally retains completed failures as evidence; it
+is not a promotion shortlist. The positive legacy 1h and 4h DNA queue is
+deduplicated and resumable in
+`output/research/seven_year/positive_timeframe_rerun_queue.json`.
+
+## Registry-driven simple strategy factory
+
+The simple lab treats examples as lower bounds, not whitelists. It discovers
+the complete current one- through five-block membership space from the active
+SignalBlock registry, persists each DNA or explicit exclusion in a SQLite
+queue, and resumes with a deterministic combinatorial cursor. `--batch-size`
+limits memory and runtime only; it never truncates the content space.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py simple-lab inventory
+.\.venv\Scripts\python.exe .\main.py simple-lab generate `
+  --complexities 1,2,3,4,5 `
+  --timeframes all `
+  --batch-size 5000 `
+  --resume
+.\.venv\Scripts\python.exe .\main.py simple-lab status
+
+.\.venv\Scripts\python.exe .\main.py simple-lab backtest `
+  --timeframes 15m,1h,4h,1d `
+  --batch-size 24 `
+  --history-mode bounded `
+  --resume
+.\.venv\Scripts\python.exe .\main.py simple-lab backtest-family `
+  --family VOLUME_FLOW `
+  --timeframes 15m,1h,4h,1d `
+  --resume
+.\.venv\Scripts\python.exe .\main.py simple-lab leaderboard
+.\.venv\Scripts\python.exe .\main.py simple-lab report
+.\.venv\Scripts\python.exe .\main.py simple-lab run `
+  --continuous `
+  --generation-batch-size 20000 `
+  --backtest-batch-size 24 `
+  --timeframes 15m,1h,2h,4h,1d,1W `
+  --markets TOP50_RESEARCH,NPC-EUR `
+  --max-markets-per-exact-cycle 1 `
+  --resume
+```
+
+`TOP50_RESEARCH` is resolved again from the current point-in-time
+`output/universe/top50_eligibility.json` before every exact dispatch. It
+expands only to `RESEARCH_ELIGIBLE` rows with an actual EUR spot market;
+explicit exceptions can be appended. Combined with the rotating one-market
+slice this broadens evidence across the available top-50 universe without
+loading every market into one validation run.
+
+A backtest batch defers automatically while another canonical lab campaign is
+active. This prevents concurrent writers and leaves the queued DNA unchanged.
+During that deferral the service still harvests every hash-matching canonical
+real-data result already written by the active campaign. Canonical DNA found
+ahead of the exhaustive cursor is registered out of sequence only after its
+block versions and strategy hash reconcile exactly; normal enumeration keeps
+running and remains the complete source of search-space coverage. Result
+tables are emitted separately for one-, two-, three-, four- and five-block
+strategies.
+Historical canonical evidence is recovered restart-safely through a bounded
+database cursor plus direct, allowlisted JSON-DNA lookups. Legacy
+`FAST_SCREEN_REAL` records without an explicit result type are accepted only
+as baseline evidence; they never become exact-validation evidence.
+Validation uses a deterministic standalone-first schedule: every eligible
+one-block strategy is processed before larger combinations, followed by a
+family round-robin that prioritizes market structure, fractals, candles and
+candlestick families without starving the remaining registry families.
+Every fast-screen result includes a signal funnel with condition matches,
+edge-triggered signals, open-position and risk suppression, completed round
+trips, holding-period statistics and exit reasons.
+Every inventory or reconciliation cycle also rewrites
+`output/research/simple_strategy_lab/objective_completion_audit.json`. This
+machine-readable audit reconciles maximum-data progress, all-timeframe
+configuration, one- through five-block evidence, multi-timeframe routes,
+canonical results, resumability, deduplication and the zero-order invariant.
+It remains `IN_PROGRESS` until the complete maximum real-data sync has
+finished without failures, the standalone queue is complete, and standalone
+fractal and candlestick evidence plus the required signal-funnel, frequency,
+ablation and trade-count artifacts are all present.
+
+The maximum real-data service covers the point-in-time top-50 universe, all
+supported native or causal-resampled timeframes, and configured context
+providers:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py data estimate `
+  --providers all `
+  --history-profile maximum `
+  --universe-size 50 `
+  --timeframes all
+.\.venv\Scripts\python.exe .\main.py data sync `
+  --providers all `
+  --history-profile maximum `
+  --universe-size 50 `
+  --timeframes all `
+  --resume `
+  --yes `
+  --continuous `
+  --context all
+```
+
+Missing credentials, provider-plan restrictions and unavailable datasets are
+recorded explicitly. They are never replaced with fabricated market data.
+Simple-lab generation and backtesting are research-only and submit zero
+orders.
+
+## Causal 15m relative-pair research
+
+Bitvavo has no native `TAO-BTC` or `ETH-BTC` spot markets. The pair campaign
+therefore builds synchronized, closed-candle `TAO/BTC` and `ETH/BTC` research
+ratios from their EUR legs. It uses 1h confirmation, 4h regime context and
+15m next-open entries. Missing leg candles are never forward-filled and every
+rotation includes fees, spread and slippage for both EUR trades.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py pairs catalogue
+.\.venv\Scripts\python.exe .\main.py pairs backtest `
+  --pairs TAO/BTC,ETH/BTC `
+  --simulations 1000
+.\.venv\Scripts\python.exe .\main.py pairs scan --pairs TAO/BTC,ETH/BTC
+.\.venv\Scripts\python.exe .\main.py pairs status
+.\.venv\Scripts\python.exe .\main.py timeframes strategies --timeframe 15m
+```
+
+The pair catalogue is research-only. A positive result may become a paper
+candidate, but never receives live authority automatically. Live trading
+continues to use explicit EUR spot markets and separately approved strategy
+DNA.
+
+The generated pair lab consumes the same immutable strategy-DNA queue as the
+continuous normal EUR lab. Pair-compatible close-derived DNA is evaluated on
+both orientations of `TAO/BTC` and `ETH/BTC`; DNA requiring native volume,
+order books, candlestick paths, high/low structure, derivatives or external
+context remains normal-market-only and is recorded as `PAIR_INCOMPATIBLE`.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py pair-lab run-once `
+  --pairs TAO/BTC,ETH/BTC `
+  --timeframes 15m,1h,4h,1d,1W `
+  --batch-size 2 `
+  --maximum-rows 1000 `
+  --simulations 200
+.\.venv\Scripts\python.exe .\main.py pair-lab run `
+  --pairs ETH/BTC,SOL/BTC,LINK/BTC,ADA/BTC,TAO/BTC,NPC/BTC,BTC/ETH,SOL/ETH,LINK/ETH,ADA/ETH,TAO/ETH,NPC/ETH `
+  --timeframes 15m,1h,4h,1d,1W `
+  --batch-size 2 `
+  --maximum-rows 1000 `
+  --simulations 200 `
+  --interval-seconds 300
+.\.venv\Scripts\python.exe .\main.py pair-lab status
+.\.venv\Scripts\python.exe .\main.py pair-lab stop
+```
+
+Both labs are resource-batched and resumable. Exhausting the full generated
+space takes many cycles; no configured content cap silently converts this
+long-running objective into a small sample.
+
+## Normal EUR-spot swing research
+
+Normal spot swings use a causal top-down contract. The last fully closed 1d
+and 4h candles define regime and setup, 1h confirms structure, and 15m supplies
+the deduplicated entry or retest. One-minute trades and order-book data only
+check spread, depth, flow and P75 slippage; they never manufacture the swing
+idea. Standard trend and breakout longs remain blocked in a bearish daily
+regime. Separately identified bearish-recovery DNA may take a long-only sweep
+or failed-breakdown reclaim when the closed 1d state is bearish and the closed
+4h state has recovered. Those setups are capped at 40 percent of normal risk
+and require at least 1.5 net reward-to-risk at TP2. Shorts, leverage, margin and
+derivatives execution remain disabled.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py lab campaign plan `
+  --name normal-spot-swing-mtf-v1
+.\.venv\Scripts\python.exe .\main.py lab campaign run `
+  --name normal-spot-swing-mtf-v1 `
+  --workers 2 `
+  --max-trials 4 `
+  --yes
+.\.venv\Scripts\python.exe .\main.py lab campaign report `
+  --name normal-spot-swing-mtf-v1
+```
+
+The campaign tests seven preregistered EUR-market hypotheses on 15m, 1h and
+4h using the canonical real-data backtester. Fast positives remain research
+leads until exact normal/stressed-cost validation, walk-forward and robustness
+evidence complete. This campaign generates and submits zero orders.
+
+## PD-array, sweep/SMT, displacement and FVG research
+
+The causal PD/FVG campaign implements the sequence as a state machine instead
+of requiring every condition on one candle. A recent bullish FVG or order-block
+proxy in discount must first contain either a confirmed liquidity sweep or a
+causally aligned BTC/ETH SMT divergence. Bullish displacement must follow, a
+new three-candle FVG must then form, and a limit entry is eligible only on a
+future retrace to 50 or 79 percent of that gap. The stop is below the recent
+sweep low and the target is the latest already-known swing high. Tests cover
+15m, 1h and 4h on eight EUR spot markets under normal and stressed costs.
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py lab campaign plan `
+  --name pd-array-fvg-v1
+.\.venv\Scripts\python.exe .\main.py lab campaign run `
+  --name pd-array-fvg-v1 `
+  --yes
+.\.venv\Scripts\python.exe .\main.py lab campaign report `
+  --name pd-array-fvg-v1
+```
+
+This is a research-only campaign. It never promotes a strategy or creates an
+order automatically; the generated report includes Monte Carlo and Dirichlet
+robustness evidence for the five highest-ranked historical paths.

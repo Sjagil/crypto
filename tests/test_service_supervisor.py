@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 
+from config.settings import PathSettings
 from data.service_supervisor import CollectorSupervisor
 from reporting.prospective_readiness import (
     prospective_readiness_report,
@@ -90,8 +91,12 @@ def test_supervisor_preserves_lifetime_recovery_counters(
 
 def test_readiness_matrix_never_promotes_incomplete_evidence(
     isolated_settings,
+    tmp_path: Path,
 ) -> None:
-    operations = isolated_settings.paths.output_dir / "operations"
+    settings = isolated_settings.model_copy(
+        update={"paths": PathSettings(project_root=tmp_path)}
+    )
+    operations = settings.paths.output_dir / "operations"
     operations.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
         operations / "orderflow_stream_health.json",
@@ -107,7 +112,7 @@ def test_readiness_matrix_never_promotes_incomplete_evidence(
         },
     )
 
-    report = prospective_readiness_report(isolated_settings)
+    report = prospective_readiness_report(settings)
 
     assert report["overall_status"] == (
         "OPERATIONALLY_LIVE_RESEARCH_FINANCIALLY_BLOCKED"

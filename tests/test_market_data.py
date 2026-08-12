@@ -42,6 +42,35 @@ def test_closed_candles_resample_and_roundtrip(ohlcv: pd.DataFrame, tmp_path) ->
     assert manifest.sha256
 
 
+def test_weekly_resample_uses_monday_utc_boundaries() -> None:
+    index = pd.date_range(
+        "2026-06-01T00:00:00Z",
+        periods=21,
+        freq="1d",
+        name="timestamp",
+    )
+    daily = pd.DataFrame(
+        {
+            "open": range(100, 121),
+            "high": range(101, 122),
+            "low": range(99, 120),
+            "close": range(100, 121),
+            "volume": [10.0] * 21,
+        },
+        index=index,
+    )
+
+    weekly = resample_ohlcv(
+        daily,
+        source_timeframe="1d",
+        target_timeframe="1W",
+    )
+
+    assert len(weekly) == 3
+    assert (weekly.index.dayofweek == 0).all()
+    assert (weekly.index.hour == 0).all()
+
+
 def test_quality_report_identifies_stale_data(ohlcv: pd.DataFrame) -> None:
     report = quality_report(
         ohlcv,

@@ -7,7 +7,7 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -71,6 +71,13 @@ class OrderSide(StrEnum):
 class OrderType(StrEnum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    STOP_LOSS = "STOP_LOSS"
+
+
+class OrderTimeInForce(StrEnum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"
 
 
 class OrderStatus(StrEnum):
@@ -413,7 +420,20 @@ class OrderIntent(FrozenModel):
     quantity: Decimal = Field(gt=0)
     created_at: datetime = Field(default_factory=utc_now)
     limit_price: Decimal | None = Field(default=None, gt=0)
+    trigger_price: Decimal | None = Field(default=None, gt=0)
+    trigger_reference: Literal["lastTrade", "bestBid", "bestAsk", "midPrice"] = (
+        "bestBid"
+    )
+    time_in_force: OrderTimeInForce = OrderTimeInForce.GTC
+    post_only: bool = False
     strategy_id: str
+    strategy_dna_hash: str | None = None
+    signal_id: str | None = None
+    portfolio_decision_id: str | None = None
+    portfolio_target_id: str | None = None
+    risk_approval_id: str | None = None
+    execution_intent_id: str | None = None
+    cancel_on_disconnect_group: str | None = None
     maximum_notional_eur: Decimal | None = Field(default=None, gt=0)
     reason_codes: tuple[str, ...] = ()
 
@@ -428,12 +448,52 @@ class OrderIntent(FrozenModel):
             raise ValueError("identifier cannot be empty")
         return value
 
+    @field_validator("cancel_on_disconnect_group")
+    @classmethod
+    def valid_cancel_on_disconnect_group(
+        cls, value: str | None
+    ) -> str | None:
+        if value is None:
+            return None
+        selected = value.strip()
+        if not selected or len(selected) > 64:
+            raise ValueError("cancel-on-disconnect group is invalid")
+        return selected
+
+    @field_validator(
+        "portfolio_target_id",
+        "risk_approval_id",
+        "execution_intent_id",
+    )
+    @classmethod
+    def valid_optional_chain_identifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        selected = value.strip()
+        if not selected:
+            raise ValueError("portfolio execution provenance ID cannot be empty")
+        return selected
+
     @model_validator(mode="after")
     def validate_limit(self) -> "OrderIntent":
         if self.order_type is OrderType.LIMIT and self.limit_price is None:
             raise ValueError("limit orders require limit_price")
-        if self.order_type is OrderType.MARKET and self.limit_price is not None:
-            raise ValueError("market orders cannot include limit_price")
+        if self.order_type in {OrderType.MARKET, OrderType.STOP_LOSS} and (
+            self.limit_price is not None
+        ):
+            raise ValueError("market and stop-loss orders cannot include limit_price")
+        if self.order_type is OrderType.STOP_LOSS and self.trigger_price is None:
+            raise ValueError("stop-loss orders require trigger_price")
+        if self.order_type is not OrderType.STOP_LOSS and self.trigger_price is not None:
+            raise ValueError("only stop-loss orders can include trigger_price")
+        if self.order_type in {OrderType.MARKET, OrderType.STOP_LOSS} and (
+            self.time_in_force is not OrderTimeInForce.GTC or self.post_only
+        ):
+            raise ValueError(
+                "market and stop-loss orders cannot set limit execution policies"
+            )
+        if self.post_only and self.time_in_force is not OrderTimeInForce.GTC:
+            raise ValueError("post-only is incompatible with IOC or FOK")
         return self
 
 

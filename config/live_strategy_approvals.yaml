@@ -1,0 +1,19 @@
+version: 1
+default_policy: FAIL_CLOSED
+strategies:
+  RR_B60_H5_Z20:
+    strategy_dna_hash: 4571ae8e81aeb4299367643922061e2eabb6523c892ec9a63f08d33f32a939d0
+    strategy_family: BTC_REGIME_BETA_RESIDUAL_MEAN_REVERSION
+    timeframe: 1d
+    approved_markets:
+      - ETH-EUR
+    approved_for_live: true
+    approval_reference: codex_operator_explicit_rr_canary_20260727
+    approved_at: "2026-07-27T13:27:16.6297301Z"
+    maximum_order_eur: 10.0
+    maximum_total_exposure_eur: 10.0
+    maximum_open_positions: 1
+    maximum_new_orders_per_day: 1
+    autoscale: false
+    spot_only: true
+    note: Explicit operator approval received; Level-1 spot cap updated to EUR 10 by the operator on 2026-08-03.

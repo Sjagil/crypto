@@ -16,24 +16,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable
 
+from config.settings import SUPPORTED_TIMEFRAMES
 from utils.common import stable_hash
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MASTERLIST_GLOB = "indicator_masterlist_*.json"
-TECHNICAL_TIMEFRAMES = (
-    "5m",
-    "15m",
-    "30m",
-    "1h",
-    "2h",
-    "4h",
-    "6h",
-    "8h",
-    "12h",
-    "1d",
-    "1W",
-    "1M",
-)
+TECHNICAL_TIMEFRAMES = tuple(SUPPORTED_TIMEFRAMES)
 
 
 class CoverageStatus(StrEnum):

@@ -112,7 +112,7 @@ class Database:
         database_url: str | None = None,
         *,
         sqlite_path: Path | str = Path("data_store/crypto.db"),
-        retries: int = 3,
+        retries: int = 8,
     ) -> None:
         if database_url:
             if not database_url.startswith(("sqlite://", "postgresql://", "postgresql+")):
@@ -178,7 +178,7 @@ class Database:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
     def migrate(self) -> int:
@@ -383,7 +383,7 @@ class Database:
                     if attempt == self.retries:
                         raise
                     self._retry_events += 1
-                    time.sleep(0.05 * 2 ** (attempt - 1))
+                    time.sleep(min(1.0, 0.05 * 2 ** (attempt - 1)))
             else:
                 raise AssertionError("database retry loop exhausted")
         LOGGER.debug(
@@ -437,6 +437,85 @@ class Database:
         with self.engine.connect() as connection:
             return [dict(row._mapping) for row in connection.execute(statement)]
 
+    def fetch_records_after_id(
+        self,
+        table_name: str,
+        *,
+        after_id: int = 0,
+        limit: int = 1_000,
+    ) -> list[dict[str, Any]]:
+        """Read an ascending, restart-safe history batch without full scans."""
+
+        if after_id < 0:
+            raise ValueError("after_id cannot be negative")
+        if limit < 1:
+            raise ValueError("record-batch limit must be positive")
+        table = self.tables[table_name]
+        statement = (
+            select(table).where(table.c.id > int(after_id)).order_by(table.c.id).limit(limit)
+        )
+        with self.engine.connect() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement)]
+
+    def fetch_records_by_payload_values(
+        self,
+        table_name: str,
+        *,
+        key: str,
+        values: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        """Fetch JSON payload identities in bounded SQL batches."""
+
+        if key not in {
+            "strategy_dna_hash",
+            "run_id",
+            "experiment_hash",
+            "combination_id",
+        }:
+            raise ValueError("unsupported payload lookup key")
+        selected_values = sorted({str(value) for value in values if str(value)})
+        if not selected_values:
+            return []
+        table = self.tables[table_name]
+        payload_value = table.c.payload[key].as_string()
+        records: list[dict[str, Any]] = []
+        with self.engine.connect() as connection:
+            for offset in range(0, len(selected_values), 400):
+                batch = selected_values[offset : offset + 400]
+                statement = select(table).where(payload_value.in_(batch)).order_by(table.c.id)
+                records.extend(dict(row._mapping) for row in connection.execute(statement))
+        return records
+
+    def fetch_records_by_statuses(
+        self,
+        table_name: str,
+        *,
+        statuses: Iterable[str],
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch only selected durable states without hydrating a full table."""
+
+        selected_statuses = sorted(
+            {str(value) for value in statuses if str(value)}
+        )
+        if not selected_statuses:
+            return []
+        if limit is not None and limit < 1:
+            raise ValueError("status-query limit must be positive")
+        table = self.tables[table_name]
+        statement = (
+            select(table)
+            .where(table.c.status.in_(selected_statuses))
+            .order_by(table.c.id)
+        )
+        if limit is not None:
+            statement = statement.limit(int(limit))
+        with self.engine.connect() as connection:
+            return [
+                dict(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
     def latest_closed_candles(
         self,
         *,
@@ -483,12 +562,7 @@ class Database:
             version = connection.scalar(select(func.max(self.version.c.version)))
             counts = (
                 {
-                    name: int(
-                        connection.scalar(
-                            select(func.count()).select_from(table)
-                        )
-                        or 0
-                    )
+                    name: int(connection.scalar(select(func.count()).select_from(table)) or 0)
                     for name, table in self.tables.items()
                 }
                 if include_table_counts
@@ -578,11 +652,7 @@ class Database:
         }
         legacy_ids: list[int] = []
         for row in rows:
-            payload = (
-                dict(row["payload"])
-                if isinstance(row.get("payload"), dict)
-                else {}
-            )
+            payload = dict(row["payload"]) if isinstance(row.get("payload"), dict) else {}
             if int(payload.get("signal_identity_schema_version") or 0) >= 3:
                 counts["CANONICAL_V3"] += 1
             else:
@@ -599,9 +669,7 @@ class Database:
                             "legacy_signal_identity_schema_version": (
                                 payload.get("signal_identity_schema_version") or 2
                             ),
-                            "migration_status": (
-                                "LEGACY_ID_RETAINED_NONCANONICAL_NO_REPLAY"
-                            ),
+                            "migration_status": ("LEGACY_ID_RETAINED_NONCANONICAL_NO_REPLAY"),
                         }
                     )
                     connection.execute(

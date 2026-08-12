@@ -8,7 +8,7 @@ import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -52,12 +52,38 @@ class DataQualityReport(BaseModel):
 class DataManifest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2
     market: str
+    base_asset: str
+    quote_asset: str
+    exchange: str
+    provider: str
     timeframe: str
     rows: int
     start: datetime
     end: datetime
+    requested_start: datetime
+    requested_end: datetime
+    actual_first_timestamp: datetime
+    actual_last_timestamp: datetime
+    raw_calendar_days: float = Field(ge=0.0)
+    usable_calendar_days: float = Field(ge=0.0)
+    raw_bar_count: int = Field(ge=0)
+    usable_bar_count: int = Field(ge=0)
+    expected_bar_count: int = Field(ge=0)
+    missing_bar_count: int = Field(ge=0)
+    missing_bar_ratio: float = Field(ge=0.0, le=1.0)
+    duplicate_count: int = Field(ge=0)
+    invalid_bar_count: int = Field(ge=0)
+    stale_bar_count: int = Field(ge=0)
+    largest_gap: str | None
+    listing_date_if_known: datetime | None
+    source_segments: tuple[dict[str, Any], ...]
+    dataset_hash: str
+    generated_at: datetime
+    seven_year_eligible: bool
+    history_coverage_ratio: float = Field(ge=0.0)
+    rejection_reason: str | None
     columns: tuple[str, ...]
     data_file: str
     sha256: str
@@ -74,6 +100,36 @@ def timeframe_delta(timeframe: str) -> timedelta:
         return timedelta(seconds=TIMEFRAME_SECONDS[normalized])
     except KeyError as exc:
         raise DataValidationError(f"unsupported timeframe: {timeframe}") from exc
+
+
+def candle_close_index(
+    index: pd.DatetimeIndex,
+    timeframe: str,
+) -> pd.DatetimeIndex:
+    """Return the first instant at which each candle is fully knowable."""
+
+    normalized = normalize_timeframe(timeframe)
+    selected = pd.DatetimeIndex(index)
+    if normalized == "1mo":
+        return pd.DatetimeIndex(
+            selected + pd.offsets.MonthBegin(1)
+        )
+    return pd.DatetimeIndex(
+        selected
+        + pd.Timedelta(timeframe_delta(normalized))
+    )
+
+
+def candle_close_timestamp(
+    timestamp: datetime | pd.Timestamp,
+    timeframe: str,
+) -> pd.Timestamp:
+    selected = pd.DatetimeIndex(
+        [pd.Timestamp(timestamp)]
+    )
+    return pd.Timestamp(
+        candle_close_index(selected, timeframe)[0]
+    )
 
 
 def _timestamp_series(data: pd.DataFrame) -> pd.Series:
@@ -167,12 +223,30 @@ def validate_ohlcv(
         grace = pd.to_timedelta(float(close_grace_seconds), unit="s")
         if (
             closed_candles_only
-            and frame.index[-1] + interval + grace > current_timestamp
+            and candle_close_timestamp(
+                frame.index[-1],
+                timeframe,
+            )
+            + grace
+            > current_timestamp
         ):
             raise DataValidationError("OHLCV contains an open candle")
         deltas = frame.index.to_series().diff().dropna()
-        if not allow_missing_bars and not deltas.empty and (deltas != interval).any():
-            raise DataValidationError("OHLCV has missing or irregular bars")
+        if not allow_missing_bars and not deltas.empty:
+            if normalize_timeframe(timeframe) == "1mo":
+                expected = pd.date_range(
+                    frame.index[0],
+                    frame.index[-1],
+                    freq="MS",
+                )
+                if not expected.equals(frame.index):
+                    raise DataValidationError(
+                        "OHLCV has missing or irregular bars"
+                    )
+            elif (deltas != interval).any():
+                raise DataValidationError(
+                    "OHLCV has missing or irregular bars"
+                )
     frame.attrs.update(data.attrs)
     return frame
 
@@ -192,12 +266,17 @@ def drop_open_candles(
     if close_grace_seconds < 0:
         raise ValueError("close_grace_seconds cannot be negative")
     current = pd.Timestamp((now or datetime.now(UTC)).astimezone(UTC))
-    cutoff = (
-        current
-        - pd.Timedelta(timeframe_delta(timeframe))
-        - pd.to_timedelta(float(close_grace_seconds), unit="s")
+    grace = pd.to_timedelta(
+        float(close_grace_seconds),
+        unit="s",
     )
-    result = frame.loc[frame.index <= cutoff].copy()
+    closes = candle_close_index(
+        frame.index,
+        timeframe,
+    )
+    result = frame.loc[
+        closes + grace <= current
+    ].copy()
     if result.empty:
         raise DataValidationError("no closed candles remain after filtering")
     result.attrs.update(frame.attrs)
@@ -243,19 +322,49 @@ def quality_report(
             reasons=(exc.code, str(exc)),
         )
 
-    interval = pd.Timedelta(timeframe_delta(timeframe))
-    expected = pd.date_range(frame.index[0], frame.index[-1], freq=interval)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    interval = pd.Timedelta(
+        timeframe_delta(normalized_timeframe)
+    )
+    expected = pd.date_range(
+        frame.index[0],
+        frame.index[-1],
+        freq=(
+            "MS"
+            if normalized_timeframe == "1mo"
+            else interval
+        ),
+    )
     missing = expected.difference(frame.index)
     expected_rows = len(expected)
     missing_fraction = len(missing) / expected_rows if expected_rows else 0.0
     deltas = frame.index.to_series().diff().dropna()
-    largest_gap = (
-        max(0, int(math.floor(deltas.max() / interval)) - 1)
-        if not deltas.empty
-        else 0
-    )
+    if (
+        normalized_timeframe == "1mo"
+        and len(frame.index) > 1
+    ):
+        month_ordinals = (
+            frame.index.year * 12
+            + frame.index.month
+        )
+        largest_gap = max(
+            0,
+            int(np.diff(month_ordinals).max()) - 1,
+        )
+    else:
+        largest_gap = (
+            max(
+                0,
+                int(math.floor(deltas.max() / interval)) - 1,
+            )
+            if not deltas.empty
+            else 0
+        )
     current = (now or datetime.now(UTC)).astimezone(UTC)
-    last_available_at = frame.index[-1].to_pydatetime() + timeframe_delta(timeframe)
+    last_available_at = candle_close_timestamp(
+        frame.index[-1],
+        normalized_timeframe,
+    ).to_pydatetime()
     age = max(0.0, (current - last_available_at).total_seconds())
     stale = age > maximum_staleness.total_seconds()
     reasons: list[str] = []
@@ -288,8 +397,9 @@ def resample_ohlcv(
     target_timeframe: str,
     drop_incomplete: bool = True,
 ) -> pd.DataFrame:
+    normalized_target = normalize_timeframe(target_timeframe)
     source_seconds = int(timeframe_delta(source_timeframe).total_seconds())
-    target_seconds = int(timeframe_delta(target_timeframe).total_seconds())
+    target_seconds = int(timeframe_delta(normalized_target).total_seconds())
     if target_seconds <= source_seconds or target_seconds % source_seconds:
         raise DataValidationError("target timeframe must be a larger integer multiple")
     frame = validate_ohlcv(
@@ -297,7 +407,14 @@ def resample_ohlcv(
         timeframe=source_timeframe,
         closed_candles_only=False,
     )
-    rule = pd.Timedelta(target_seconds, unit="s")
+    # Fixed timedeltas are epoch-anchored; a seven-day timedelta therefore
+    # starts on Thursday (1970-01-01).  Weekly trading candles use explicit
+    # Monday 00:00 UTC boundaries throughout the repository.
+    rule: str | pd.Timedelta = (
+        "W-MON"
+        if normalized_target == "1W"
+        else pd.Timedelta(target_seconds, unit="s")
+    )
     counts = frame["close"].resample(rule, label="left", closed="left").count()
     result = frame.resample(rule, label="left", closed="left").agg(
         {
@@ -316,7 +433,7 @@ def resample_ohlcv(
     result.attrs.update(frame.attrs)
     return validate_ohlcv(
         result,
-        timeframe=target_timeframe,
+        timeframe=normalized_target,
         closed_candles_only=False,
     )
 
@@ -354,6 +471,12 @@ def save_ohlcv(
     timeframe: str,
     maximum_staleness: timedelta = timedelta(days=3650),
     now: datetime | None = None,
+    provider: str | None = None,
+    exchange: str | None = None,
+    requested_start: datetime | None = None,
+    requested_end: datetime | None = None,
+    listing_date_if_known: datetime | None = None,
+    source_segments: Sequence[dict[str, Any]] | None = None,
 ) -> tuple[Path, DataManifest]:
     target = Path(path)
     suffix = target.suffix.lower()
@@ -377,15 +500,90 @@ def save_ohlcv(
         target,
         file_format="parquet" if suffix == ".parquet" else "csv",
     )
+    normalized_market = normalize_market(market)
+    base_asset, quote_asset = normalized_market.split("-", 1)
+    selected_provider = str(
+        provider
+        or frame.attrs.get("provider")
+        or "UNKNOWN_EXISTING_LOCAL"
+    )
+    selected_exchange = str(
+        exchange
+        or frame.attrs.get("exchange")
+        or selected_provider
+    ).upper()
+    first = frame.index[0].to_pydatetime()
+    last = frame.index[-1].to_pydatetime()
+    calendar_days = max(0.0, (last - first).total_seconds() / 86_400)
+    exact_required_start = (
+        pd.Timestamp(last) - pd.DateOffset(years=7)
+    ).to_pydatetime()
+    seven_year_eligible = bool(
+        first <= exact_required_start
+        and report.valid
+    )
+    selected_segments = tuple(source_segments or ())
+    if not selected_segments:
+        selected_segments = (
+            {
+                "provider": selected_provider,
+                "exchange": selected_exchange,
+                "market_identity": normalized_market,
+                "start": utc_iso(first),
+                "end": utc_iso(last),
+                "classification": "PROVIDER_NATIVE_OR_CANONICAL_RESAMPLE",
+            },
+        )
+    selected_requested_start = requested_start or first
+    selected_requested_end = requested_end or (now or datetime.now(UTC))
+    data_hash = sha256_file(target)
     manifest = DataManifest(
-        market=normalize_market(market),
+        market=normalized_market,
+        base_asset=base_asset,
+        quote_asset=quote_asset,
+        exchange=selected_exchange,
+        provider=selected_provider,
         timeframe=timeframe,
         rows=len(frame),
-        start=frame.index[0].to_pydatetime(),
-        end=frame.index[-1].to_pydatetime(),
+        start=first,
+        end=last,
+        requested_start=selected_requested_start,
+        requested_end=selected_requested_end,
+        actual_first_timestamp=first,
+        actual_last_timestamp=last,
+        raw_calendar_days=calendar_days,
+        usable_calendar_days=calendar_days,
+        raw_bar_count=len(frame),
+        usable_bar_count=len(frame),
+        expected_bar_count=report.expected_rows,
+        missing_bar_count=report.missing_rows,
+        missing_bar_ratio=report.missing_fraction,
+        duplicate_count=report.duplicate_timestamps,
+        invalid_bar_count=0,
+        stale_bar_count=0,
+        largest_gap=(
+            str(timeframe_delta(timeframe) * (report.largest_gap_bars + 1))
+            if report.largest_gap_bars
+            else None
+        ),
+        listing_date_if_known=listing_date_if_known or first,
+        source_segments=selected_segments,
+        dataset_hash=data_hash,
+        generated_at=datetime.now(UTC),
+        seven_year_eligible=seven_year_eligible,
+        history_coverage_ratio=calendar_days / (7 * 365.2425),
+        rejection_reason=(
+            None
+            if seven_year_eligible
+            else (
+                "DATA_QUALITY_FAILED"
+                if not report.valid
+                else "INSUFFICIENT_MARKET_HISTORY"
+            )
+        ),
         columns=tuple(frame.columns),
         data_file=target.name,
-        sha256=sha256_file(target),
+        sha256=data_hash,
         created_at=datetime.now(UTC),
         quality=report,
     )
@@ -447,6 +645,8 @@ __all__ = [
     "DataManifest",
     "DataQualityReport",
     "OHLCV_COLUMNS",
+    "candle_close_index",
+    "candle_close_timestamp",
     "drop_open_candles",
     "inspect_file",
     "load_ohlcv",

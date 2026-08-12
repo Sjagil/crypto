@@ -1,0 +1,33 @@
+version: 1
+default_policy: FAIL_CLOSED
+markets:
+  TAO-EUR:
+    approved: true
+    approved_at: "2026-07-28T00:00:00+02:00"
+    approval_reference: codex_operator_explicit_tao_npc_exception_20260728
+    allow_outside_top50: false
+    spot_only: true
+    maximum_order_eur: 10.0
+    maximum_total_exposure_eur: 10.0
+    requires_approved_strategy_dna: true
+    requires_natural_signal: true
+  NPC-EUR:
+    approved: true
+    approved_at: "2026-07-28T00:00:00+02:00"
+    approval_reference: codex_operator_explicit_tao_npc_exception_20260728
+    allow_outside_top50: true
+    spot_only: true
+    maximum_order_eur: 10.0
+    maximum_total_exposure_eur: 10.0
+    requires_approved_strategy_dna: true
+    requires_natural_signal: true
+  ADA-EUR:
+    approved: true
+    approved_at: "2026-08-02T23:00:00+02:00"
+    approval_reference: codex_operator_explicit_ada_live_request_20260802
+    allow_outside_top50: false
+    spot_only: true
+    maximum_order_eur: 10.0
+    maximum_total_exposure_eur: 10.0
+    requires_approved_strategy_dna: true
+    requires_natural_signal: true

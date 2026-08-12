@@ -53,33 +53,43 @@ SUPPORTED_PROVIDERS = frozenset(
 )
 SUPPORTED_TIMEFRAMES = (
     "1m",
+    "3m",
     "5m",
     "15m",
     "30m",
     "1h",
     "2h",
+    "3h",
     "4h",
     "6h",
     "8h",
     "12h",
     "1d",
+    "2d",
+    "3d",
     "1W",
-    "1M",
+    "1mo",
 )
+ACTIVE_SWING_TIMEFRAMES = ("15m", "1h", "2h", "4h", "1d", "1W")
+DISABLED_EXECUTION_TIMEFRAMES = frozenset({"5m"})
 TIMEFRAME_SECONDS = {
     "1m": 60,
+    "3m": 180,
     "5m": 300,
     "15m": 900,
     "30m": 1_800,
     "1h": 3_600,
     "2h": 7_200,
+    "3h": 10_800,
     "4h": 14_400,
     "6h": 21_600,
     "8h": 28_800,
     "12h": 43_200,
     "1d": 86_400,
+    "2d": 172_800,
+    "3d": 259_200,
     "1W": 604_800,
-    "1M": 2_592_000,
+    "1mo": 2_592_000,
 }
 
 CsvList = Annotated[list[str], NoDecode]
@@ -112,8 +122,8 @@ def normalize_timeframe(value: str) -> str:
     selected = value.strip()
     if selected in {"1W", "1w"}:
         return "1W"
-    if selected == "1M":
-        return "1M"
+    if selected in {"1M", "1mo", "1MO", "1Mo"}:
+        return "1mo"
     return selected.lower()
 
 
@@ -241,7 +251,27 @@ class MarketDataSettings(_SettingsBase):
         default="EUR",
         validation_alias=AliasChoices("QUOTE_CURRENCY", "PORTFOLIO_BASE_CURRENCY"),
     )
-    timeframes: CsvList = Field(default_factory=lambda: ["5m", "15m", "1h", "4h", "1d"])
+    timeframes: CsvList = Field(
+        default_factory=lambda: [
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "3h",
+            "4h",
+            "6h",
+            "8h",
+            "12h",
+            "1d",
+            "2d",
+            "3d",
+            "1W",
+            "1mo",
+        ]
+    )
     base_timeframe: str = "1h"
     start_date: datetime | None = None
     end_date: datetime | None = None
@@ -269,18 +299,22 @@ class MarketDataSettings(_SettingsBase):
     candle_close_grace_seconds_by_timeframe: dict[str, float] = Field(
         default_factory=lambda: {
             "1m": 3.0,
+            "3m": 4.0,
             "5m": 5.0,
             "15m": 8.0,
             "30m": 10.0,
             "1h": 15.0,
             "2h": 20.0,
+            "3h": 25.0,
             "4h": 30.0,
             "6h": 45.0,
             "8h": 60.0,
             "12h": 60.0,
             "1d": 120.0,
+            "2d": 150.0,
+            "3d": 180.0,
             "1w": 300.0,
-            "1M": 600.0,
+            "1mo": 600.0,
         }
     )
 
@@ -434,7 +468,10 @@ class RiskSettings(_SettingsBase):
 
 
 class ResearchSettings(_SettingsBase):
+    model_config = SettingsConfigDict(env_prefix="RESEARCH_")
+
     minimum_trades: int = Field(default=100, ge=1)
+    minimum_history_days: int = Field(default=2_557, ge=365)
     minimum_effective_sample_size: int = Field(default=60, ge=1)
     minimum_profit_factor: float = Field(default=1.15, gt=0.0)
     minimum_stressed_profit_factor: float = Field(default=1.00, gt=0.0)
@@ -503,8 +540,8 @@ class LabSettings(_SettingsBase):
 
     model_config = SettingsConfigDict(env_prefix="LAB_")
 
-    universe_target_size: int = Field(default=25, ge=20, le=25)
-    universe_scan_limit: int = Field(default=100, ge=25, le=5_000)
+    universe_target_size: int = Field(default=50, ge=20, le=50)
+    universe_scan_limit: int = Field(default=100, ge=50, le=5_000)
     minimum_volume_24h_eur: float = Field(default=10_000_000.0, ge=0.0)
     minimum_history_rows: int = Field(default=500, ge=100)
     deep_minimum_history_rows: int = Field(default=2_000, ge=500)
@@ -537,13 +574,365 @@ class LabSettings(_SettingsBase):
     deterministic_seed: int = 20260317
 
 
+class PracticalGovernanceSettings(_SettingsBase):
+    """Execution-first lifecycle rules with academic evidence as warnings."""
+
+    model_config = SettingsConfigDict(env_prefix="GOVERNANCE_")
+
+    practical_enabled: bool = True
+    academic_tests_are_warnings_for_canary: bool = True
+    minimum_positive_profit_factor: float = Field(default=1.0, ge=1.0)
+    minimum_canary_profit_factor: float = Field(default=1.10, ge=1.0)
+    preferred_stressed_profit_factor: float = Field(default=1.0, ge=0.0)
+    require_operator_approval_per_live_dna: bool = True
+
+
+class PaperAutomationSettings(_SettingsBase):
+    """Persistent paper lifecycle and automatic positive-strategy promotion."""
+
+    model_config = SettingsConfigDict(env_prefix="PAPER_")
+
+    autotrade_enabled: bool = True
+    auto_promotion_from_research_positive: bool = True
+    max_open_positions: int = Field(default=5, ge=1, le=100)
+    max_new_orders_per_day: int = Field(default=10, ge=1, le=1_000)
+    max_total_exposure_pct: float = Field(default=100.0, gt=0.0, le=100.0)
+    max_risk_per_trade_pct: float = Field(default=0.50, gt=0.0, le=5.0)
+    max_daily_loss_pct: float = Field(default=3.0, gt=0.0, le=20.0)
+    max_drawdown_pct: float = Field(default=10.0, gt=0.0, le=50.0)
+    initial_capital_eur: float = Field(default=2_000.0, gt=0.0)
+
+
+class AutopilotExecutionSettings(_SettingsBase):
+    """Budgets for the permanent research, paper and canary orchestrator."""
+
+    model_config = SettingsConfigDict(env_prefix="AUTOPILOT_")
+
+    enabled: bool = True
+    top50_enabled: bool = True
+    max_new_strategies_per_day: int = Field(default=100, ge=0, le=10_000)
+    max_parameter_variants_per_strategy: int = Field(default=50, ge=1, le=1_000)
+    max_total_backtests_per_day: int = Field(
+        default=2_500,
+        ge=1,
+        le=100_000,
+        validation_alias=AliasChoices(
+            "AUTOPILOT_MAX_TOTAL_BACKTESTS_PER_DAY",
+            "AUTOPILOT_MAX_BACKTESTS_PER_DAY",
+        ),
+    )
+    max_runtime_minutes_per_cycle: int = Field(default=180, ge=1, le=1_440)
+    min_cycle_interval_hours: float = Field(default=4.0, gt=0.0, le=24.0)
+    execution_cycle_seconds: int = Field(default=300, ge=60, le=3_600)
+    max_disk_gb: float = Field(default=100.0, gt=0.0)
+    max_failures_per_cycle: int = Field(default=100, ge=1, le=10_000)
+    auto_paper_promotion: bool = True
+    auto_live_promotion: bool = False
+    windows_task_name: str = "CryptoPracticalAutopilot"
+
+
+class HMMRegimeSettings(_SettingsBase):
+    """Causal, observer-only HMM regime research configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="HMM_")
+
+    enabled: bool = True
+    observer_only: bool = True
+    random_seed: int = Field(default=20260727, ge=0, le=2**32 - 1)
+    covariance_type: Literal["diag"] = "diag"
+    maximum_iterations: int = Field(default=250, ge=25, le=2_000)
+    convergence_tolerance: float = Field(default=1e-4, gt=0.0, le=0.1)
+    probability_floor: float = Field(default=1e-12, gt=0.0, le=1e-3)
+    maximum_training_observations: int = Field(default=4_000, ge=250, le=100_000)
+    refit_interval_15m: int = Field(default=672, ge=24)
+    refit_interval_1h: int = Field(default=168, ge=12)
+    refit_interval_4h: int = Field(default=42, ge=6)
+    refit_interval_1d: int = Field(default=30, ge=5)
+    refit_interval_1w: int = Field(default=13, ge=2)
+    maximum_total_exposure: float = Field(default=0.40, gt=0.0, le=0.40)
+    maximum_asset_exposure: float = Field(default=0.20, gt=0.0, le=0.20)
+    minimum_cash_fraction: float = Field(default=0.60, ge=0.60, lt=1.0)
+
+    @model_validator(mode="after")
+    def enforce_observer_and_exposure_limits(self) -> "HMMRegimeSettings":
+        if not self.observer_only:
+            raise ValueError("HMM v1 must remain observer-only")
+        if self.maximum_asset_exposure > self.maximum_total_exposure:
+            raise ValueError("HMM asset exposure exceeds total exposure")
+        if self.maximum_total_exposure + self.minimum_cash_fraction > 1.0 + 1e-12:
+            raise ValueError("HMM exposure and cash constraints exceed equity")
+        return self
+
+
+class PortfolioAllocationSettings(_SettingsBase):
+    """Dynamic portfolio caps; allocations remain zero without positive edge."""
+
+    model_config = SettingsConfigDict(env_prefix="PORTFOLIO_")
+
+    dynamic_management: bool = True
+    max_single_coin_exposure_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    max_high_beta_altcoin_exposure_pct: float = Field(default=25.0, gt=0.0, le=100.0)
+    max_correlated_cluster_exposure_pct: float = Field(default=30.0, gt=0.0, le=100.0)
+    intraday_bucket_pct: float = Field(default=15.0, ge=0.0, le=100.0)
+    swing_bucket_pct: float = Field(default=30.0, ge=0.0, le=100.0)
+    daily_bucket_pct: float = Field(default=30.0, ge=0.0, le=100.0)
+    weekly_bucket_pct: float = Field(default=20.0, ge=0.0, le=100.0)
+    monthly_bucket_pct: float = Field(default=5.0, ge=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def validate_bucket_total(self) -> "PortfolioAllocationSettings":
+        total = (
+            self.intraday_bucket_pct
+            + self.swing_bucket_pct
+            + self.daily_bucket_pct
+            + self.weekly_bucket_pct
+            + self.monthly_bucket_pct
+        )
+        if abs(total - 100.0) > 1e-9:
+            raise ValueError("portfolio timeframe risk buckets must total 100%")
+        return self
+
+
+class DailyProfitTargetSettings(_SettingsBase):
+    """Aspirational mark-to-market target that never overrides risk controls."""
+
+    model_config = SettingsConfigDict(env_prefix="DAILY_PROFIT_TARGET_")
+
+    enabled: bool = True
+    reference_equity_eur: float = Field(default=50_000.0, gt=0.0)
+    reference_target_eur: float = Field(default=250.0, gt=0.0)
+    force_trades: bool = False
+    override_risk_limits: bool = False
+
+    @model_validator(mode="after")
+    def enforce_non_binding_target(self) -> "DailyProfitTargetSettings":
+        target_fraction = self.reference_target_eur / self.reference_equity_eur
+        if target_fraction > 0.10:
+            raise ValueError("daily profit target may not exceed 10% of reference equity")
+        if self.force_trades or self.override_risk_limits:
+            raise ValueError("daily profit target must remain non-binding")
+        return self
+
+
+class AutonomousLiveSettings(_SettingsBase):
+    """Runtime limits for the dynamic Shariah-filtered spot supervisor."""
+
+    model_config = SettingsConfigDict(env_prefix="AUTONOMOUS_LIVE_")
+
+    markets: CsvList = Field(
+        default_factory=lambda: [
+            "BTC-EUR",
+            "ETH-EUR",
+            "SOL-EUR",
+            "LINK-EUR",
+            "TAO-EUR",
+            "NPC-EUR",
+            "ADA-EUR",
+        ]
+    )
+    # Markets in this list receive market-data, ticker and microstructure
+    # coverage for research/alerts, but never inherit execution authority.
+    monitor_only_markets: CsvList = Field(
+        default_factory=lambda: ["PYR-EUR"]
+    )
+    approval_phrase: str = "LIVE_SPOT_CONFIRMED"
+    reconciliation_seconds: int = Field(default=30, ge=15, le=300)
+    execution_cycle_seconds: int = Field(default=300, ge=60, le=3_600)
+    active_trading_scan_minutes: int = Field(
+        default=5,
+        ge=5,
+        le=60,
+        validation_alias=AliasChoices(
+            "active_trading_scan_minutes",
+            "AUTONOMOUS_LIVE_ACTIVE_TRADING_SCAN_MINUTES",
+        ),
+    )
+    active_trading_poll_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        validation_alias=AliasChoices(
+            "active_trading_poll_seconds",
+            "AUTONOMOUS_LIVE_ACTIVE_TRADING_POLL_SECONDS",
+        ),
+    )
+    active_trading_maximum_rows: int = Field(
+        default=1_500,
+        ge=500,
+        le=10_000,
+        validation_alias=AliasChoices(
+            "active_trading_maximum_rows",
+            "AUTONOMOUS_LIVE_ACTIVE_TRADING_MAXIMUM_ROWS",
+        ),
+    )
+    health_seconds: int = Field(default=10, ge=5, le=300)
+    intensive_market_limit: int = Field(default=35, ge=10, le=50)
+    intensive_mover_slots: int = Field(default=20, ge=1, le=30)
+    intensive_rotation_seconds: int = Field(default=10, ge=5, le=900)
+    windows_task_name: str = "CryptoAutonomousLive"
+
+    @model_validator(mode="after")
+    def validate_intensive_market_rotation(self) -> "AutonomousLiveSettings":
+        if self.intensive_mover_slots >= self.intensive_market_limit:
+            raise ValueError(
+                "intensive mover slots must be smaller than intensive market limit"
+            )
+        return self
+    websocket_queue_size: int = Field(default=2_000, ge=100, le=100_000)
+    maximum_risk_per_trade_pct: float = Field(default=0.25, gt=0.0, le=1.0)
+    maximum_total_open_risk_pct: float = Field(default=1.0, gt=0.0, le=5.0)
+    maximum_asset_exposure_pct: float = Field(default=25.0, gt=0.0, le=100.0)
+    maximum_total_crypto_exposure_pct: float = Field(default=80.0, gt=0.0, le=100.0)
+    minimum_cash_reserve_pct: float = Field(default=20.0, ge=0.0, lt=100.0)
+    daily_loss_limit_pct: float = Field(default=1.5, gt=0.0, le=10.0)
+    soft_drawdown_pct: float = Field(default=3.0, gt=0.0, le=25.0)
+    hard_drawdown_pct: float = Field(default=7.5, gt=0.0, le=50.0)
+    maximum_consecutive_losses: int = Field(default=5, ge=1, le=100)
+    maximum_orders_per_market_per_hour: int = Field(default=4, ge=1, le=100)
+    maximum_portfolio_orders_per_hour: int = Field(default=10, ge=1, le=1_000)
+    live_canary_order_eur: float = Field(default=10.0, gt=0.0)
+    live_canary_max_position_eur: float = Field(default=15.0, gt=0.0)
+    live_reduced_max_position_pct: float = Field(default=0.50, gt=0.0, le=25.0)
+    live_active_max_position_pct: float = Field(default=1.00, gt=0.0, le=25.0)
+    maximum_visible_liquidity_participation_pct: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=10.0,
+    )
+    btc_maximum_spread_bps: float = Field(default=20.0, gt=0.0)
+    eth_maximum_spread_bps: float = Field(default=25.0, gt=0.0)
+    sol_maximum_spread_bps: float = Field(default=40.0, gt=0.0)
+    link_maximum_spread_bps: float = Field(default=50.0, gt=0.0)
+    tao_maximum_spread_bps: float = Field(default=75.0, gt=0.0)
+    npc_maximum_spread_bps: float = Field(default=150.0, gt=0.0)
+    btc_maximum_slippage_bps: float = Field(default=20.0, gt=0.0)
+    eth_maximum_slippage_bps: float = Field(default=25.0, gt=0.0)
+    sol_maximum_slippage_bps: float = Field(default=40.0, gt=0.0)
+    link_maximum_slippage_bps: float = Field(default=50.0, gt=0.0)
+    tao_maximum_slippage_bps: float = Field(default=75.0, gt=0.0)
+    npc_maximum_slippage_bps: float = Field(default=150.0, gt=0.0)
+    btc_minimum_visible_ask_depth_eur: float = Field(default=5_000.0, gt=0.0)
+    eth_minimum_visible_ask_depth_eur: float = Field(default=5_000.0, gt=0.0)
+    sol_minimum_visible_ask_depth_eur: float = Field(default=2_500.0, gt=0.0)
+    link_minimum_visible_ask_depth_eur: float = Field(default=1_000.0, gt=0.0)
+    tao_minimum_visible_ask_depth_eur: float = Field(default=500.0, gt=0.0)
+    npc_minimum_visible_ask_depth_eur: float = Field(default=100.0, gt=0.0)
+    btc_minimum_24h_quote_volume_eur: float = Field(default=1_000_000.0, gt=0.0)
+    eth_minimum_24h_quote_volume_eur: float = Field(default=1_000_000.0, gt=0.0)
+    sol_minimum_24h_quote_volume_eur: float = Field(default=500_000.0, gt=0.0)
+    link_minimum_24h_quote_volume_eur: float = Field(default=250_000.0, gt=0.0)
+    tao_minimum_24h_quote_volume_eur: float = Field(default=100_000.0, gt=0.0)
+    npc_minimum_24h_quote_volume_eur: float = Field(default=10_000.0, gt=0.0)
+    dynamic_maximum_spread_bps: float = Field(default=75.0, gt=0.0)
+    dynamic_maximum_slippage_bps: float = Field(default=75.0, gt=0.0)
+    dynamic_minimum_visible_ask_depth_eur: float = Field(
+        default=500.0,
+        gt=0.0,
+    )
+    dynamic_minimum_24h_quote_volume_eur: float = Field(
+        default=100_000.0,
+        gt=0.0,
+    )
+
+    @field_validator("markets", "monitor_only_markets", mode="before")
+    @classmethod
+    def parse_markets(cls, value: Any) -> Any:
+        return _parse_csv(value)
+
+    @field_validator("markets", "monitor_only_markets")
+    @classmethod
+    def validate_markets(cls, values: list[str]) -> list[str]:
+        normalized = [
+            str(value).strip().upper().replace("/", "-").replace("_", "-")
+            for value in values
+        ]
+        if not normalized or any(
+            not value.endswith("-EUR")
+            or len(value.split("-", maxsplit=1)) != 2
+            or not value.split("-", maxsplit=1)[0].isalnum()
+            for value in normalized
+        ):
+            raise ValueError(
+                "autonomous markets must be explicit EUR spot markets"
+            )
+        return list(dict.fromkeys(normalized))
+
+    @model_validator(mode="after")
+    def validate_live_limits(self) -> "AutonomousLiveSettings":
+        if (
+            self.maximum_total_crypto_exposure_pct
+            + self.minimum_cash_reserve_pct
+            > 100.0
+        ):
+            raise ValueError("crypto exposure plus cash reserve exceeds equity")
+        if self.soft_drawdown_pct >= self.hard_drawdown_pct:
+            raise ValueError("soft drawdown must be below hard drawdown")
+        if self.live_canary_order_eur > self.live_canary_max_position_eur:
+            raise ValueError("canary order exceeds canary position cap")
+        return self
+
+    def liquidity_limits(self, market: str) -> dict[str, float]:
+        """Return strict entry-only limits for a reviewed EUR spot market."""
+
+        normalized = str(market).strip().upper().replace("/", "-")
+        parts = normalized.split("-", maxsplit=1)
+        if len(parts) != 2 or parts[1] != "EUR" or not parts[0].isalnum():
+            raise ValueError("liquidity limits require a EUR spot market")
+        base = parts[0].lower()
+        explicit = {"btc", "eth", "sol", "link", "tao", "npc"}
+        if base not in explicit:
+            return {
+                "maximum_spread_bps": float(
+                    self.dynamic_maximum_spread_bps
+                ),
+                "maximum_slippage_bps": float(
+                    self.dynamic_maximum_slippage_bps
+                ),
+                "minimum_visible_ask_depth_eur": float(
+                    self.dynamic_minimum_visible_ask_depth_eur
+                ),
+                "minimum_24h_quote_volume_eur": float(
+                    self.dynamic_minimum_24h_quote_volume_eur
+                ),
+                "maximum_visible_liquidity_participation_pct": float(
+                    self.maximum_visible_liquidity_participation_pct
+                ),
+            }
+        return {
+            "maximum_spread_bps": float(
+                getattr(self, f"{base}_maximum_spread_bps")
+            ),
+            "maximum_slippage_bps": float(
+                getattr(self, f"{base}_maximum_slippage_bps")
+            ),
+            "minimum_visible_ask_depth_eur": float(
+                getattr(self, f"{base}_minimum_visible_ask_depth_eur")
+            ),
+            "minimum_24h_quote_volume_eur": float(
+                getattr(self, f"{base}_minimum_24h_quote_volume_eur")
+            ),
+            "maximum_visible_liquidity_participation_pct": float(
+                self.maximum_visible_liquidity_participation_pct
+            ),
+        }
+
+
 class OperationalSettings(_SettingsBase):
     """Fail-closed defaults for the practical public-data operating loop."""
 
     model_config = SettingsConfigDict(env_prefix="OPERATE_")
 
     profile_name: str = "practical_spot_v1"
-    markets: CsvList = Field(default_factory=lambda: ["BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"])
+    markets: CsvList = Field(
+        default_factory=lambda: [
+            "BTC-EUR",
+            "ETH-EUR",
+            "SOL-EUR",
+            "LINK-EUR",
+            "TAO-EUR",
+            "NPC-EUR",
+        ]
+    )
     execution_timeframe: str = "1h"
     trend_timeframe: str = "4h"
     regime_timeframe: str = "1d"
@@ -617,6 +1006,45 @@ class OperationalSettings(_SettingsBase):
         return self
 
 
+class TelegramSettings(_SettingsBase):
+    """Optional, failure-isolated Telegram notification configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="TELEGRAM_")
+
+    notifications_enabled: bool = True
+    bot_token: SecretStr | None = None
+    chat_id: SecretStr | None = None
+    send_signals: bool = True
+    send_watchlist: bool = True
+    send_exits: bool = True
+    send_risk_alerts: bool = True
+    send_system_alerts: bool = True
+    min_confidence: int = Field(default=60, ge=0, le=100)
+    min_reward_risk: float = Field(default=1.5, ge=0.0, le=100.0)
+    max_messages_per_minute: int = Field(default=10, ge=1, le=60)
+    request_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    dry_run: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.bot_token
+            and self.bot_token.get_secret_value()
+            and self.chat_id
+            and self.chat_id.get_secret_value()
+        )
+
+    @property
+    def missing_configuration(self) -> tuple[str, ...]:
+        missing: list[str] = []
+        if not self.bot_token or not self.bot_token.get_secret_value():
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not self.chat_id or not self.chat_id.get_secret_value():
+            missing.append("TELEGRAM_CHAT_ID")
+        return tuple(missing)
+
+
 class ExecutionSettings(_SettingsBase):
     mode: Literal["research", "backtest", "optimize", "shadow", "paper", "live"] = Field(
         default="research",
@@ -642,9 +1070,127 @@ class ExecutionSettings(_SettingsBase):
     )
     manual_approval_phrase: SecretStr | None = None
     required_manual_approval_phrase: str = "I UNDERSTAND LIVE CRYPTO SPOT RISK"
-    maximum_live_order_eur: float = Field(default=5.0, gt=0.0, le=5.0)
-    maximum_live_total_eur: float = Field(default=5.0, gt=0.0, le=5.0)
-    maximum_live_open_positions: int = Field(default=1, ge=1, le=1)
+    maximum_live_order_eur: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=25.0,
+        validation_alias=AliasChoices(
+            "maximum_live_order_eur",
+            "EXECUTION_MAXIMUM_LIVE_ORDER_EUR",
+            "LIVE_MAX_ORDER_EUR",
+            "LIVE_CANARY_MAX_ORDER_EUR",
+        ),
+    )
+    maximum_live_total_eur: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=75.0,
+        validation_alias=AliasChoices(
+            "maximum_live_total_eur",
+            "EXECUTION_MAXIMUM_LIVE_TOTAL_EUR",
+            "LIVE_MAX_TOTAL_EXPOSURE_EUR",
+            "LIVE_CANARY_MAX_TOTAL_EXPOSURE_EUR",
+        ),
+    )
+    maximum_live_open_positions: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        validation_alias=AliasChoices(
+            "maximum_live_open_positions",
+            "EXECUTION_MAXIMUM_LIVE_OPEN_POSITIONS",
+            "LIVE_MAX_OPEN_POSITIONS",
+            "LIVE_CANARY_MAX_OPEN_POSITIONS",
+        ),
+    )
+    maximum_live_new_orders_per_day: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        validation_alias=AliasChoices(
+            "maximum_live_new_orders_per_day",
+            "EXECUTION_MAXIMUM_LIVE_NEW_ORDERS_PER_DAY",
+            "LIVE_MAX_NEW_ORDERS_PER_DAY",
+            "LIVE_CANARY_MAX_NEW_ORDERS_PER_DAY",
+        ),
+    )
+    maximum_live_risk_per_trade_eur: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=2.0,
+        validation_alias=AliasChoices(
+            "maximum_live_risk_per_trade_eur",
+            "EXECUTION_MAXIMUM_LIVE_RISK_PER_TRADE_EUR",
+            "LIVE_MAX_RISK_PER_TRADE_EUR",
+            "LIVE_CANARY_MAX_RISK_PER_TRADE_EUR",
+        ),
+    )
+    maximum_live_daily_loss_eur: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "maximum_live_daily_loss_eur",
+            "EXECUTION_MAXIMUM_LIVE_DAILY_LOSS_EUR",
+            "LIVE_MAX_DAILY_LOSS_EUR",
+        ),
+    )
+    maximum_live_drawdown_eur: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "maximum_live_drawdown_eur",
+            "EXECUTION_MAXIMUM_LIVE_DRAWDOWN_EUR",
+            "LIVE_MAX_DRAWDOWN_EUR",
+        ),
+    )
+    live_limit_entries_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "live_limit_entries_enabled",
+            "LIVE_LIMIT_ENTRIES_ENABLED",
+        ),
+    )
+    live_limit_entry_time_in_force: Literal["GTC", "IOC", "FOK"] = Field(
+        default="GTC",
+        validation_alias=AliasChoices(
+            "live_limit_entry_time_in_force",
+            "LIVE_LIMIT_ENTRY_TIME_IN_FORCE",
+        ),
+    )
+    live_limit_price_buffer_bps: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=25.0,
+        validation_alias=AliasChoices(
+            "live_limit_price_buffer_bps",
+            "LIVE_LIMIT_PRICE_BUFFER_BPS",
+        ),
+    )
+    live_limit_entry_validity_seconds: int = Field(
+        default=90,
+        ge=30,
+        le=900,
+        validation_alias=AliasChoices(
+            "live_limit_entry_validity_seconds",
+            "LIVE_LIMIT_ENTRY_VALIDITY_SECONDS",
+        ),
+    )
+    live_limit_entry_max_reprices: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        validation_alias=AliasChoices(
+            "live_limit_entry_max_reprices",
+            "LIVE_LIMIT_ENTRY_MAX_REPRICES",
+        ),
+    )
+    live_limit_market_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "live_limit_market_fallback_enabled",
+            "LIVE_LIMIT_MARKET_FALLBACK_ENABLED",
+        ),
+    )
     live_canary_enabled: bool = False
     live_canary_autoscale: bool = False
 
@@ -838,6 +1384,8 @@ class ShariahSettings(BaseModel):
     source_path: Path
     version: int = Field(ge=1)
     markets: dict[str, EligibilityRecord]
+    operator_reviewed_all_eur_spot: bool = False
+    operator_review_reason: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "ShariahSettings":
@@ -848,6 +1396,16 @@ class ShariahSettings(BaseModel):
         raw_markets = raw.get("markets")
         if not isinstance(raw_markets, dict):
             raise ValueError("allowlist must contain a markets mapping")
+        operator_review_all = bool(
+            raw.get("operator_reviewed_all_eur_spot", False)
+        )
+        operator_review_reason = (
+            str(raw.get("operator_review_reason") or "").strip() or None
+        )
+        if operator_review_all and operator_review_reason is None:
+            raise ValueError(
+                "operator-reviewed EUR spot policy requires an audit reason"
+            )
         records: dict[str, EligibilityRecord] = {}
         for market, details in raw_markets.items():
             normalized = str(market).strip().upper().replace("/", "-")
@@ -858,17 +1416,32 @@ class ShariahSettings(BaseModel):
             source_path=source,
             version=raw.get("version", 1),
             markets=records,
+            operator_reviewed_all_eur_spot=operator_review_all,
+            operator_review_reason=operator_review_reason,
         )
 
     def eligibility(self, market: str) -> EligibilityRecord:
         normalized = market.strip().upper().replace("/", "-")
-        return self.markets.get(
-            normalized,
-            EligibilityRecord(
+        configured = self.markets.get(normalized)
+        if configured is not None:
+            return configured
+        if (
+            self.operator_reviewed_all_eur_spot
+            and normalized.endswith("-EUR")
+            and len(normalized.split("-", maxsplit=1)[0]) > 0
+        ):
+            return EligibilityRecord(
                 market=normalized,
-                status=EligibilityStatus.REVIEW_REQUIRED,
-                reason="UNKNOWN_MARKET_FAIL_CLOSED",
-            ),
+                status=EligibilityStatus.ALLOWED,
+                reason=(
+                    self.operator_review_reason
+                    or "USER_OPERATOR_REVIEWED_ALL_EUR_SPOT_NOT_CERTIFICATION"
+                ),
+            )
+        return EligibilityRecord(
+            market=normalized,
+            status=EligibilityStatus.REVIEW_REQUIRED,
+            reason="UNKNOWN_MARKET_FAIL_CLOSED",
         )
 
     def require_allowed(self, market: str) -> EligibilityRecord:
@@ -890,7 +1463,15 @@ class Settings(BaseModel):
     risk: RiskSettings
     research: ResearchSettings
     lab: LabSettings
+    governance: PracticalGovernanceSettings
+    paper_automation: PaperAutomationSettings
+    autopilot_execution: AutopilotExecutionSettings
+    hmm_regime: HMMRegimeSettings
+    portfolio_allocation: PortfolioAllocationSettings
+    daily_profit_target: DailyProfitTargetSettings
+    autonomous_live: AutonomousLiveSettings
     operational: OperationalSettings
+    telegram: TelegramSettings
     execution: ExecutionSettings
     providers: ProviderSettings
     scrapers: ScraperSettings
@@ -926,7 +1507,15 @@ class Settings(BaseModel):
             risk=group(RiskSettings),
             research=group(ResearchSettings),
             lab=group(LabSettings),
+            governance=group(PracticalGovernanceSettings),
+            paper_automation=group(PaperAutomationSettings),
+            autopilot_execution=group(AutopilotExecutionSettings),
+            hmm_regime=group(HMMRegimeSettings),
+            portfolio_allocation=group(PortfolioAllocationSettings),
+            daily_profit_target=group(DailyProfitTargetSettings),
+            autonomous_live=group(AutonomousLiveSettings),
             operational=group(OperationalSettings),
+            telegram=group(TelegramSettings),
             execution=group(ExecutionSettings),
             providers=group(ProviderSettings),
             scrapers=group(ScraperSettings),
@@ -987,22 +1576,32 @@ def get_settings() -> Settings:
 
 
 __all__ = [
+    "ACTIVE_SWING_TIMEFRAMES",
+    "DISABLED_EXECUTION_TIMEFRAMES",
     "AppSettings",
+    "AutonomousLiveSettings",
+    "AutopilotExecutionSettings",
     "CostSettings",
+    "DailyProfitTargetSettings",
     "DEFAULT_MARKETS",
     "EligibilityRecord",
     "EligibilityStatus",
     "ExecutionSettings",
+    "HMMRegimeSettings",
     "LabSettings",
     "MarketDataSettings",
+    "PaperAutomationSettings",
     "OperationalSettings",
     "PathSettings",
     "ProviderSettings",
+    "PortfolioAllocationSettings",
+    "PracticalGovernanceSettings",
     "ResearchSettings",
     "RiskSettings",
     "ScraperSettings",
     "Settings",
     "ShariahSettings",
+    "TelegramSettings",
     "SUPPORTED_PROVIDERS",
     "SUPPORTED_TIMEFRAMES",
     "TIMEFRAME_SECONDS",

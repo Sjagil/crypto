@@ -17,7 +17,12 @@ import numpy as np
 import pandas as pd
 
 from core.contracts import IntelligenceRecord
-from data.market_data import OHLCV_COLUMNS, timeframe_delta, validate_ohlcv
+from data.market_data import (
+    OHLCV_COLUMNS,
+    candle_close_index,
+    timeframe_delta,
+    validate_ohlcv,
+)
 from utils.common import atomic_write_json, stable_hash
 
 EPSILON = 1e-12
@@ -284,11 +289,14 @@ def return_features(
     output["weighted_close"] = (data["high"] + data["low"] + 2.0 * close) / 4.0
     output["ohlc_average"] = data[["open", "high", "low", "close"]].mean(axis=1)
     output["absolute_return"] = close.diff()
-    output["percentage_return"] = close.pct_change()
+    output["percentage_return"] = close.pct_change(fill_method=None)
     output["log_return"] = np.log(close).diff()
     output["cumulative_return"] = (1.0 + output["percentage_return"]).cumprod() - 1.0
     for period in (7, 20, 30):
-        output[f"rolling_return_{period}"] = close.pct_change(period)
+        output[f"rolling_return_{period}"] = close.pct_change(
+            period,
+            fill_method=None,
+        )
     realized = output["log_return"].rolling(20, min_periods=20).std(ddof=0)
     output["volatility_adjusted_return_20"] = output["percentage_return"] / realized.replace(
         0, np.nan
@@ -300,7 +308,7 @@ def return_features(
             maximum_age=maximum_benchmark_age,
             target_timeframe=target_timeframe,
         )
-        benchmark_return = benchmark_close.pct_change()
+        benchmark_return = benchmark_close.pct_change(fill_method=None)
         output["benchmark_relative_return"] = output["percentage_return"] - benchmark_return
         covariance = output["percentage_return"].rolling(60).cov(benchmark_return)
         variance = benchmark_return.rolling(60).var(ddof=1)
@@ -327,9 +335,43 @@ def trend_features(data: pd.DataFrame) -> pd.DataFrame:
     output["tema_20"] = tema(data["close"], 20)
     output["hma_20"] = hma(data["close"], 20)
     output["kama_10"] = kama(data["close"], 10)
-    output["ema_50_slope"] = output["ema_50"].pct_change(5) / 5.0
+    output["ema_50_slope"] = (
+        output["ema_50"].pct_change(5, fill_method=None) / 5.0
+    )
     output["distance_ema_20"] = data["close"] / output["ema_20"] - 1.0
     output["distance_ema_50"] = data["close"] / output["ema_50"] - 1.0
+    close_change = data["close"].diff().abs()
+    output["trend_efficiency_20"] = (
+        data["close"].diff(20).abs()
+        / close_change.rolling(20, min_periods=20).sum().replace(0, np.nan)
+    )
+
+    regression_x = np.arange(50, dtype=float)
+    regression_x_centered = regression_x - regression_x.mean()
+    regression_denominator = float(np.dot(regression_x_centered, regression_x_centered))
+
+    def regression_slope(values: np.ndarray) -> float:
+        centered = values - float(np.mean(values))
+        scale = max(abs(float(np.mean(values))), EPSILON)
+        return float(np.dot(regression_x_centered, centered) / regression_denominator / scale)
+
+    def regression_r_squared(values: np.ndarray) -> float:
+        centered = values - float(np.mean(values))
+        total = float(np.dot(centered, centered))
+        if total <= EPSILON:
+            return 0.0
+        slope = float(np.dot(regression_x_centered, centered) / regression_denominator)
+        fitted = slope * regression_x_centered
+        return float(np.clip(np.dot(fitted, fitted) / total, 0.0, 1.0))
+
+    output["linear_regression_slope_50"] = data["close"].rolling(
+        50,
+        min_periods=50,
+    ).apply(regression_slope, raw=True)
+    output["linear_regression_r2_50"] = data["close"].rolling(
+        50,
+        min_periods=50,
+    ).apply(regression_r_squared, raw=True)
     for period in (20, 55):
         output[f"donchian_high_{period}"] = data["high"].rolling(period).max().shift(1)
         output[f"donchian_low_{period}"] = data["low"].rolling(period).min().shift(1)
@@ -375,6 +417,44 @@ def trend_features(data: pd.DataFrame) -> pd.DataFrame:
     line, direction = supertrend(data, period=10, multiplier=3.0)
     output["supertrend"] = line
     output["supertrend_direction"] = direction
+    output["supertrend_bullish_flip"] = (direction > 0) & (direction.shift(1) < 0)
+
+    tenkan_high = data["high"].rolling(9, min_periods=9).max()
+    tenkan_low = data["low"].rolling(9, min_periods=9).min()
+    kijun_high = data["high"].rolling(26, min_periods=26).max()
+    kijun_low = data["low"].rolling(26, min_periods=26).min()
+    cloud_high = data["high"].rolling(52, min_periods=52).max()
+    cloud_low = data["low"].rolling(52, min_periods=52).min()
+    output["ichimoku_tenkan"] = (tenkan_high + tenkan_low) / 2.0
+    output["ichimoku_kijun"] = (kijun_high + kijun_low) / 2.0
+    # These are current, backward-only cloud values. They are deliberately not
+    # shifted into the future as charting packages commonly do.
+    output["ichimoku_cloud_a_causal"] = (
+        output["ichimoku_tenkan"] + output["ichimoku_kijun"]
+    ) / 2.0
+    output["ichimoku_cloud_b_causal"] = (cloud_high + cloud_low) / 2.0
+    cloud_top = output[["ichimoku_cloud_a_causal", "ichimoku_cloud_b_causal"]].max(axis=1)
+    output["ichimoku_bullish_reclaim"] = (
+        (data["close"] > cloud_top)
+        & (data["close"].shift(1) <= cloud_top.shift(1))
+        & (output["ichimoku_tenkan"] > output["ichimoku_kijun"])
+    )
+
+    true_range_sum = true_range(data).rolling(period, min_periods=period).sum()
+    positive_vm = (data["high"] - data["low"].shift(1)).abs()
+    negative_vm = (data["low"] - data["high"].shift(1)).abs()
+    output["vortex_plus_14"] = (
+        positive_vm.rolling(period, min_periods=period).sum()
+        / true_range_sum.replace(0, np.nan)
+    )
+    output["vortex_minus_14"] = (
+        negative_vm.rolling(period, min_periods=period).sum()
+        / true_range_sum.replace(0, np.nan)
+    )
+    output["vortex_bullish_cross"] = (
+        (output["vortex_plus_14"] > output["vortex_minus_14"])
+        & (output["vortex_plus_14"].shift(1) <= output["vortex_minus_14"].shift(1))
+    )
     return output
 
 
@@ -451,7 +531,7 @@ def momentum_features(data: pd.DataFrame) -> pd.DataFrame:
     output["macd_signal"] = ema(output["macd"], 9)
     output["macd_histogram"] = output["macd"] - output["macd_signal"]
     output["ppo"] = 100.0 * (fast - slow) / slow.replace(0, np.nan)
-    output["roc_12"] = close.pct_change(12) * 100.0
+    output["roc_12"] = close.pct_change(12, fill_method=None) * 100.0
     typical = (data["high"] + data["low"] + close) / 3.0
     typical_mean = typical.rolling(20).mean()
     mean_deviation = typical.rolling(20).apply(
@@ -469,12 +549,57 @@ def momentum_features(data: pd.DataFrame) -> pd.DataFrame:
     money_ratio = positive_flow / negative_flow.replace(0, np.nan)
     output["mfi_14"] = 100.0 - 100.0 / (1.0 + money_ratio)
     streak_rsi = rsi(_streak(close), 2)
-    change = close.pct_change()
+    change = close.pct_change(fill_method=None)
     percent_rank = change.rolling(100).apply(
         lambda values: 100.0 * np.mean(values[:-1] < values[-1]),
         raw=True,
     )
     output["connors_rsi"] = (rsi(close, 3) + streak_rsi + percent_rank) / 3.0
+    output["macd_bullish_cross"] = (output["macd"] > output["macd_signal"]) & (
+        output["macd"].shift(1) <= output["macd_signal"].shift(1)
+    )
+    output["mfi_bullish_reclaim"] = (output["mfi_14"] > 40.0) & (
+        output["mfi_14"].shift(1) <= 40.0
+    )
+    momentum_20 = close.pct_change(20, fill_method=None)
+    momentum_60 = close.pct_change(60, fill_method=None)
+    output["momentum_acceleration"] = momentum_20 - momentum_20.shift(10)
+    output["multi_horizon_momentum_score"] = pd.concat(
+        [
+            close.pct_change(20, fill_method=None) > 0.0,
+            momentum_60 > 0.0,
+            close.pct_change(120, fill_method=None) > 0.0,
+            close.pct_change(240, fill_method=None) > 0.0,
+        ],
+        axis=1,
+    ).mean(axis=1)
+    rolling_volatility = np.log(close).diff().rolling(20, min_periods=20).std(ddof=0)
+    output["volatility_adjusted_momentum_20"] = (
+        momentum_20 / rolling_volatility.replace(0, np.nan)
+    )
+    return output
+
+
+def mean_reversion_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Robust, backward-only deviation and reclaim features."""
+
+    output = pd.DataFrame(index=data.index)
+    close = data["close"].astype(float)
+    median = close.rolling(30, min_periods=30).median()
+    mad = close.rolling(30, min_periods=30).apply(
+        lambda values: float(np.median(np.abs(values - np.median(values)))),
+        raw=True,
+    )
+    output["mad_zscore_30"] = (
+        (close - median) / (1.4826 * mad).replace(0, np.nan)
+    )
+    output["mad_zscore_reclaim"] = (output["mad_zscore_30"] > -2.0) & (
+        output["mad_zscore_30"].shift(1) <= -2.0
+    )
+    output["keltner_lower_reclaim"] = (
+        (close > ema(close, 20) - 2.0 * atr(data, 10))
+        & (close.shift(1) <= (ema(close, 20) - 2.0 * atr(data, 10)).shift(1))
+    )
     return output
 
 
@@ -532,6 +657,27 @@ def volatility_features(data: pd.DataFrame) -> pd.DataFrame:
     )
     output["yang_zhang_volatility_20"] = np.sqrt(yz_variance.clip(lower=0))
     output["ewma_volatility"] = returns.ewm(alpha=0.06, adjust=False).std(bias=False)
+    output["downside_volatility_20"] = (
+        returns.clip(upper=0.0).pow(2).rolling(20, min_periods=20).mean().pow(0.5)
+    )
+    output["upside_volatility_20"] = (
+        returns.clip(lower=0.0).pow(2).rolling(20, min_periods=20).mean().pow(0.5)
+    )
+    output["volatility_of_volatility_20"] = output[
+        "rolling_volatility_20"
+    ].rolling(20, min_periods=20).std(ddof=0)
+    output["atr_percentile_100"] = output["normalized_atr_14"].rolling(
+        100,
+        min_periods=50,
+    ).rank(pct=True)
+    prior_range_median = tr.shift(1).rolling(50, min_periods=20).median()
+    output["range_expansion_score"] = tr / prior_range_median.replace(0, np.nan)
+    prior_volatility = output["rolling_volatility_20"].shift(1)
+    output["jump_score"] = returns.abs() / prior_volatility.replace(0, np.nan)
+    output["volatility_expansion_breakout"] = (
+        (output["range_expansion_score"] > 1.5)
+        & (data["close"] > data["high"].shift(1))
+    )
     return output
 
 
@@ -602,7 +748,10 @@ def volume_features(data: pd.DataFrame) -> pd.DataFrame:
         20,
         min_periods=20,
     ).mean().replace(0, np.nan)
-    output["volume_rate_of_change_10"] = volume.pct_change(10)
+    output["volume_rate_of_change_10"] = volume.pct_change(
+        10,
+        fill_method=None,
+    )
     output["volume_oscillator_5_20"] = (
         output["volume_average_5"] / volume_mean.replace(0, np.nan) - 1.0
     )
@@ -636,6 +785,9 @@ def volume_features(data: pd.DataFrame) -> pd.DataFrame:
     )
     output["obv"] = output["cumulative_directional_volume_proxy"]
     output["obv_change_20"] = output["obv"].diff(20)
+    output["obv_breakout_20"] = (
+        output["obv"] > output["obv"].shift(1).rolling(20, min_periods=20).max()
+    )
 
     price_return = close.pct_change(fill_method=None).replace(
         [np.inf, -np.inf],
@@ -655,6 +807,10 @@ def volume_features(data: pd.DataFrame) -> pd.DataFrame:
     output["chaikin_money_flow_20"] = money_flow_volume.rolling(
         20
     ).sum() / volume.rolling(20).sum().replace(0, np.nan)
+    output["chaikin_money_flow_reclaim"] = (
+        (output["chaikin_money_flow_20"] > 0.0)
+        & (output["chaikin_money_flow_20"].shift(1) <= 0.0)
+    )
 
     negative_volume_return = price_return.where(
         volume < volume.shift(1),
@@ -734,6 +890,15 @@ def volume_features(data: pd.DataFrame) -> pd.DataFrame:
         / volume.rolling(20, min_periods=20).sum().replace(0.0, np.nan)
     )
     output["anchored_vwap"] = anchored_vwap(data)
+    output["vwap_reclaim"] = (close > output["vwap_20"]) & (
+        close.shift(1) <= output["vwap_20"].shift(1)
+    )
+    output["anchored_vwap_reclaim"] = (close > output["anchored_vwap"]) & (
+        close.shift(1) <= output["anchored_vwap"].shift(1)
+    )
+    output["prior_volume_dryup"] = (
+        output["relative_volume_20"].shift(1).rolling(5, min_periods=3).mean() < 0.75
+    )
     output["amihud_illiquidity_20"] = (
         price_return.abs()
         / quote_volume.replace(0.0, np.nan)
@@ -805,6 +970,7 @@ def candle_features(data: pd.DataFrame) -> pd.DataFrame:
     output["candle_body_fraction"] = body / candle_range
     output["upper_wick_fraction"] = upper / candle_range
     output["lower_wick_fraction"] = lower / candle_range
+    output["close_location_value"] = (data["close"] - data["low"]) / candle_range
     output["doji"] = output["candle_body_fraction"] <= 0.10
     output["spinning_top"] = (
         output["candle_body_fraction"].between(0.10, 0.30) & (upper >= body) & (lower >= body)
@@ -1088,7 +1254,10 @@ def market_structure_features(
         relative_volume > 1.0
     )
     if "open_interest" in data:
-        oi_change = pd.to_numeric(data["open_interest"], errors="coerce").pct_change()
+        oi_change = pd.to_numeric(
+            data["open_interest"],
+            errors="coerce",
+        ).pct_change(fill_method=None)
         output["fractal_breakout_open_interest_confirmation"] = output["fractal_high_breakout"] & (
             oi_change > 0
         )
@@ -1098,6 +1267,40 @@ def market_structure_features(
         output["fractal_amplitude_atr"].clip(lower=0, upper=5) / 5.0
         + relative_volume.clip(lower=0, upper=3).fillna(0) / 3.0
     ) / 2.0
+    recent_higher_low = output["higher_low"].shift(1).rolling(
+        20,
+        min_periods=1,
+    ).max().astype(bool)
+    output["higher_low_continuation"] = recent_higher_low & output["bullish_bos"]
+    output["failed_breakout_reclaim"] = output["bullish_liquidity_sweep"]
+    prior_inside_bar = (
+        (data["high"] < data["high"].shift(1))
+        & (data["low"] > data["low"].shift(1))
+    )
+    output["inside_bar_breakout"] = (
+        data["close"] > data["high"].shift(1)
+    ) & prior_inside_bar.shift(1, fill_value=False)
+
+    if isinstance(data.index, pd.DatetimeIndex):
+        day_key = data.index.normalize()
+        day_high = data["high"].groupby(day_key).max().shift(1)
+        output["previous_day_high"] = pd.Series(day_key, index=data.index).map(day_high)
+        week_key = day_key - pd.to_timedelta(data.index.dayofweek, unit="D")
+        week_high = data["high"].groupby(week_key).max().shift(1)
+        output["previous_week_high"] = pd.Series(week_key, index=data.index).map(week_high)
+        output["previous_day_high_breakout"] = (
+            (data["close"] > output["previous_day_high"])
+            & (data["close"].shift(1) <= output["previous_day_high"].shift(1))
+        )
+        output["previous_week_high_breakout"] = (
+            (data["close"] > output["previous_week_high"])
+            & (data["close"].shift(1) <= output["previous_week_high"].shift(1))
+        )
+    else:
+        output["previous_day_high"] = np.nan
+        output["previous_week_high"] = np.nan
+        output["previous_day_high_breakout"] = False
+        output["previous_week_high_breakout"] = False
     return output
 
 
@@ -1129,7 +1332,10 @@ def multi_timeframe_fractal_alignment(
         state = pd.Series(np.nan, index=frame.index, dtype=float)
         state.loc[fractals["confirmed_fractal_low"]] = 1.0
         state.loc[fractals["confirmed_fractal_high"]] = -1.0
-        available_index = frame.index + pd.Timedelta(timeframe_delta(timeframe))
+        available_index = candle_close_index(
+            frame.index,
+            timeframe,
+        )
         available_state = pd.Series(
             state.to_numpy(),
             index=available_index,
@@ -1181,13 +1387,26 @@ def higher_timeframe_regime_features(
             & (trend["ema_50_slope"] > 0)
             & (trend["adx_14"] >= 20)
         )
-        available_index = frame.index + pd.Timedelta(timeframe_delta(timeframe))
-        aligned = pd.Series(
-            regime.to_numpy(dtype=bool),
-            index=available_index,
-        ).reindex(decision_index, method="ffill")
-        aligned.index = base_index
-        output[f"htf_{timeframe}_regime_bullish"] = aligned.fillna(False)
+        short_trend = (
+            (frame["close"] > trend["ema_50"])
+            & (trend["ema_50_slope"] > 0)
+        )
+        available_index = candle_close_index(
+            frame.index,
+            timeframe,
+        )
+        for suffix, state in (
+            ("regime_bullish", regime),
+            ("trend_bullish", short_trend),
+        ):
+            aligned = pd.Series(
+                state.to_numpy(dtype=bool),
+                index=available_index,
+            ).reindex(decision_index, method="ffill")
+            aligned.index = base_index
+            output[f"htf_{timeframe}_{suffix}"] = (
+                aligned.astype("boolean").fillna(False).astype(bool)
+            )
         source_timestamp = pd.Series(
             frame.index,
             index=available_index,
@@ -1269,10 +1488,125 @@ def hurst_exponent(values: np.ndarray) -> float:
     return math.log(rescaled_range / standard) / math.log(len(values))
 
 
+def detrended_fluctuation_exponent(values: np.ndarray) -> float:
+    """Small-window DFA estimate using only observations in ``values``."""
+
+    centered = values - float(np.mean(values))
+    integrated = np.cumsum(centered)
+    scales = [size for size in (8, 16, 32, 64) if size <= len(values) // 2]
+    fluctuations: list[float] = []
+    usable_scales: list[float] = []
+    for scale in scales:
+        segment_count = len(values) // scale
+        if segment_count < 2:
+            continue
+        residuals: list[float] = []
+        x = np.arange(scale, dtype=float)
+        for segment in range(segment_count):
+            selected = integrated[segment * scale : (segment + 1) * scale]
+            fitted = np.polyval(np.polyfit(x, selected, 1), x)
+            residuals.append(float(np.mean((selected - fitted) ** 2)))
+        fluctuation = math.sqrt(max(float(np.mean(residuals)), 0.0))
+        if fluctuation > 0.0:
+            usable_scales.append(math.log(float(scale)))
+            fluctuations.append(math.log(fluctuation))
+    if len(fluctuations) < 2:
+        return np.nan
+    return float(np.polyfit(usable_scales, fluctuations, 1)[0])
+
+
+def generalized_hurst_width(values: np.ndarray) -> float:
+    """Difference between q=1 and q=2 scaling exponents."""
+
+    lags = np.asarray([1, 2, 4, 8, 16], dtype=int)
+    lags = lags[lags < len(values) // 2]
+    if len(lags) < 3:
+        return np.nan
+    exponents: list[float] = []
+    for order in (1.0, 2.0):
+        moments = np.asarray(
+            [
+                np.mean(np.abs(values[lag:] - values[:-lag]) ** order)
+                for lag in lags
+            ],
+            dtype=float,
+        )
+        if np.any(moments <= 0.0):
+            return np.nan
+        slope = float(np.polyfit(np.log(lags), np.log(moments), 1)[0])
+        exponents.append(slope / order)
+    return abs(exponents[0] - exponents[1])
+
+
+def complexity_features(close: pd.Series, *, window: int = 64) -> pd.DataFrame:
+    """Fast causal entropy and multi-scale energy features."""
+
+    if window < 16:
+        raise ValueError("complexity window must be at least 16")
+    output = pd.DataFrame(index=close.index)
+    returns = np.log(close).diff()
+    positive = (returns > 0.0).astype(float)
+    probability = positive.rolling(window, min_periods=window).mean()
+    complement = 1.0 - probability
+    output["sign_entropy"] = -(
+        probability * np.log2(probability.clip(lower=EPSILON))
+        + complement * np.log2(complement.clip(lower=EPSILON))
+    )
+
+    first = returns.shift(2)
+    second = returns.shift(1)
+    third = returns
+    permutation_code = (
+        (first > second).astype(int)
+        + 2 * (first > third).astype(int)
+        + 4 * (second > third).astype(int)
+    )
+    permutation_entropy = pd.Series(0.0, index=close.index)
+    for code in range(8):
+        frequency = (permutation_code == code).astype(float).rolling(
+            window,
+            min_periods=window,
+        ).mean()
+        permutation_entropy -= frequency * np.log2(frequency.clip(lower=EPSILON))
+    output["permutation_entropy_3"] = permutation_entropy / math.log2(6.0)
+
+    fast_component = returns - returns.rolling(4, min_periods=4).mean()
+    medium_component = returns.rolling(4, min_periods=4).mean() - returns.rolling(
+        16,
+        min_periods=16,
+    ).mean()
+    slow_component = returns.rolling(16, min_periods=16).mean()
+    energies = pd.concat(
+        [
+            fast_component.pow(2).rolling(window, min_periods=window).mean(),
+            medium_component.pow(2).rolling(window, min_periods=window).mean(),
+            slow_component.pow(2).rolling(window, min_periods=window).mean(),
+        ],
+        axis=1,
+    )
+    energies.columns = [
+        "wavelet_energy_fast",
+        "wavelet_energy_medium",
+        "wavelet_energy_slow",
+    ]
+    energy_share = energies.div(energies.sum(axis=1).replace(0, np.nan), axis=0)
+    output = pd.concat([output, energies], axis=1)
+    output["wavelet_entropy"] = -(
+        energy_share * np.log2(energy_share.clip(lower=EPSILON))
+    ).sum(axis=1) / math.log2(3.0)
+    output["wavelet_trend_agreement"] = (
+        (slow_component > 0.0)
+        & (returns.rolling(4, min_periods=4).mean() > 0.0)
+        & (returns.rolling(16, min_periods=16).mean() > 0.0)
+    )
+    return output
+
+
 def fractal_dimension_features(
     close: pd.Series,
     *,
     window: int = 100,
+    include_advanced_estimators: bool = False,
 ) -> pd.DataFrame:
     if not isinstance(window, int):
         raise TypeError("fractal-dimension window is integer-only")
@@ -1290,6 +1624,17 @@ def fractal_dimension_features(
         ["katz_fractal_dimension", "petrosian_fractal_dimension"]
     ].mean(axis=1)
     output["hurst_exponent"] = _rolling_estimator(close, window, hurst_exponent)
+    if include_advanced_estimators:
+        output["dfa_exponent"] = _rolling_estimator(
+            close,
+            window,
+            detrended_fluctuation_exponent,
+        )
+        output["generalized_hurst_width"] = _rolling_estimator(
+            close,
+            window,
+            generalized_hurst_width,
+        )
     dimension = output["fractal_dimension_index"].clip(lower=1.0, upper=2.0)
     alpha = np.exp(-4.6 * (dimension - 1.0)).clip(lower=0.01, upper=1.0)
     values = close.to_numpy(dtype=float)
@@ -1386,6 +1731,10 @@ def relative_strength_features(
     if benchmark is None:
         output["btc_relative_strength"] = np.nan
         output["btc_relative_momentum_20"] = np.nan
+        output["btc_relative_return_zscore_60"] = np.nan
+        output["btc_relative_reversal_reclaim"] = False
+        output["btc_relative_momentum_persistence_5"] = np.nan
+        output["btc_benchmark_source_timestamp"] = pd.NaT
         return output
     benchmark_close, source_timestamp = _causal_benchmark_close(
         data.index,
@@ -1395,7 +1744,21 @@ def relative_strength_features(
     )
     ratio = data["close"] / benchmark_close
     output["btc_relative_strength"] = ratio
-    output["btc_relative_momentum_20"] = ratio.pct_change(20)
+    output["btc_relative_momentum_20"] = ratio.pct_change(
+        20,
+        fill_method=None,
+    )
+    relative_return = np.log(ratio).diff()
+    relative_mean = relative_return.rolling(60, min_periods=60).mean()
+    relative_standard = relative_return.rolling(60, min_periods=60).std(ddof=0)
+    output["btc_relative_return_zscore_60"] = (
+        (relative_return - relative_mean)
+        / relative_standard.replace(0, np.nan)
+    )
+    output["btc_relative_reversal_reclaim"] = (
+        (output["btc_relative_return_zscore_60"] > -2.0)
+        & (output["btc_relative_return_zscore_60"].shift(1) <= -2.0)
+    )
     output["btc_relative_momentum_persistence_5"] = (
         output["btc_relative_momentum_20"].rolling(5, min_periods=5).min()
     )
@@ -1489,6 +1852,7 @@ def intelligence_features(
 @dataclass(frozen=True)
 class FeaturePipeline:
     include_optional_garch: bool = False
+    include_advanced_fractal_estimators: bool = False
     fractal_left: int = 2
     fractal_right: int = 2
     fractal_dimension_window: int = 100
@@ -1518,6 +1882,7 @@ class FeaturePipeline:
             ),
             trend_features(frame),
             momentum_features(frame),
+            mean_reversion_features(frame),
             volatility_features(frame),
             volume_features(frame),
             candle_features(frame),
@@ -1527,7 +1892,12 @@ class FeaturePipeline:
                 fractal_left=self.fractal_left,
                 fractal_right=self.fractal_right,
             ),
-            fractal_dimension_features(frame["close"], window=self.fractal_dimension_window),
+            fractal_dimension_features(
+                frame["close"],
+                window=self.fractal_dimension_window,
+                include_advanced_estimators=self.include_advanced_fractal_estimators,
+            ),
+            complexity_features(frame["close"]),
             multi_timeframe_fractal_alignment(
                 frame.index,
                 higher_timeframes,

@@ -18,6 +18,7 @@ from research.portfolio_selection import (
     paired_block_bootstrap_difference,
 )
 from utils.common import stable_hash
+from utils.pandas_time import sunday_week_end_labels
 
 
 def _clean_returns(values: pd.Series) -> pd.Series:
@@ -87,13 +88,10 @@ def hac_effective_sample_size(
 
 
 def _weekly_returns(daily: pd.Series) -> pd.Series:
-    return (
-        (1.0 + _clean_returns(daily))
-        .resample("W-SUN")
-        .prod()
-        .sub(1.0)
-        .dropna()
-    )
+    selected = 1.0 + _clean_returns(daily)
+    return selected.groupby(sunday_week_end_labels(selected.index)).prod().sub(
+        1.0
+    ).dropna()
 
 
 def _trial_sharpes(matrix: pd.DataFrame) -> list[float]:

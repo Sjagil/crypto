@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
+from aiohttp import WSMsgType
 
 from config.settings import PathSettings, Settings
+from core.cli import _validated_continuous_data_service_launch, build_parser
 from core.contracts import (
+    DataValidationError,
     NormalizedDataRecord,
     NormalizedStreamEvent,
     ProviderStatus,
@@ -16,20 +23,300 @@ from core.contracts import (
 )
 from data.data_loader import ContinuousDataService, DataLoader
 from data.database import Database
-from data.market_data import timeframe_delta
+from data.market_data import (
+    drop_open_candles,
+    timeframe_delta,
+    validate_ohlcv,
+)
 from data.orderbook_l2 import Level2OrderBook, SequenceGap
-from data.websocket_manager import WebSocketManager, decode_mexc_protobuf
+from data.websocket_manager import (
+    StreamHealth,
+    WebSocketManager,
+    decode_mexc_protobuf,
+)
+from utils.common import read_json
 
 
 def isolated_cache(settings: Settings, tmp_path) -> Settings:
     return settings.model_copy(update={"paths": PathSettings(project_root=tmp_path)})
 
 
+def test_continuous_service_windows_pid_check_rejects_exited_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Kernel32:
+        def __init__(self) -> None:
+            self.closed: list[int] = []
+
+        @staticmethod
+        def OpenProcess(*_args: object) -> int:
+            return 321
+
+        @staticmethod
+        def GetExitCodeProcess(_handle: int, pointer: object) -> int:
+            ctypes.cast(pointer, ctypes.POINTER(ctypes.c_ulong)).contents.value = 0
+            return 1
+
+        def CloseHandle(self, handle: int) -> None:
+            self.closed.append(handle)
+
+    kernel32 = _Kernel32()
+    monkeypatch.setattr("data.data_loader.os.name", "nt")
+    monkeypatch.setattr(
+        "data.data_loader.ctypes.windll",
+        SimpleNamespace(kernel32=kernel32),
+    )
+
+    assert ContinuousDataService._process_alive(25712) is False
+    assert kernel32.closed == [321]
+
+
+def test_data_service_control_commands_are_registered() -> None:
+    parser = build_parser()
+
+    status = parser.parse_args(["data", "service-status"])
+    restart = parser.parse_args(["data", "service-restart", "--timeout", "30"])
+
+    assert status.data_command == "service-status"
+    assert restart.data_command == "service-restart"
+    assert restart.timeout == 30.0
+
+
+def test_data_service_restart_only_replays_validated_research_sync(
+    isolated_settings: Settings,
+) -> None:
+    executable = (
+        isolated_settings.paths.project_root / ".venv" / "Scripts" / "python.exe"
+    )
+    main = isolated_settings.paths.project_root / "main.py"
+    owner = {
+        "service_id": "continuous-data-service",
+        "mode": "research",
+        "executable": str(executable),
+        "command": [str(main), "data", "sync", "--continuous"],
+    }
+
+    validated_executable, command = _validated_continuous_data_service_launch(
+        isolated_settings, owner
+    )
+
+    assert validated_executable == executable
+    assert command == [str(main), "data", "sync", "--continuous"]
+
+
+def test_data_service_restart_rejects_unrelated_command(
+    isolated_settings: Settings,
+) -> None:
+    executable = (
+        isolated_settings.paths.project_root / ".venv" / "Scripts" / "python.exe"
+    )
+    owner = {
+        "service_id": "continuous-data-service",
+        "mode": "research",
+        "executable": str(executable),
+        "command": [str(isolated_settings.paths.project_root / "main.py"), "live", "run"],
+    }
+
+    with pytest.raises(ValueError, match="DATA_SERVICE_COMMAND_NOT_CONTINUOUS_SYNC"):
+        _validated_continuous_data_service_launch(isolated_settings, owner)
+
+
+def test_relational_candle_projection_is_batched(
+    isolated_settings: Settings,
+) -> None:
+    class RecordingDatabase:
+        def __init__(self) -> None:
+            self.batches: list[list[dict]] = []
+
+        def upsert_records(
+            self,
+            table: str,
+            records: list[dict],
+        ) -> None:
+            assert table == "candles"
+            self.batches.append(records)
+
+    market_data = isolated_settings.market_data.model_copy(
+        update={"maximum_database_batch_size": 2}
+    )
+    settings = isolated_settings.model_copy(
+        update={"market_data": market_data}
+    )
+    database = RecordingDatabase()
+    loader = DataLoader(settings, database=database)
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    records = [
+        NormalizedDataRecord(
+            provider="kraken",
+            source_symbol="XBTEUR",
+            canonical_market="BTC-EUR",
+            timestamp=start + timedelta(hours=offset),
+            observed_at=start + timedelta(hours=offset + 1),
+            available_at=start + timedelta(hours=offset + 1),
+            data_kind="ohlcv",
+            timeframe="1h",
+            closed=True,
+            retrieval_run_id="batch-test",
+            raw_hash=f"hash-{offset}",
+            raw_payload={},
+            values={
+                "open": 1,
+                "high": 2,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10,
+            },
+        )
+        for offset in range(5)
+    ]
+
+    loader._database_upsert("candles", records)
+
+    assert [len(batch) for batch in database.batches] == [2, 2, 1]
+
+
+def test_raw_batches_are_content_addressed_across_retrieval_runs(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    loader = DataLoader(settings)
+    observed = datetime(2026, 8, 11, tzinfo=UTC)
+
+    def raw_record(run_id: str) -> NormalizedDataRecord:
+        return NormalizedDataRecord(
+            provider="fred",
+            source_symbol="DGS10",
+            canonical_market="BTC-EUR",
+            timestamp=observed,
+            observed_at=observed,
+            available_at=observed,
+            data_kind="macro_observation",
+            retrieval_run_id=run_id,
+            raw_hash="same-source-payload",
+            raw_payload={"value": "4.25"},
+            values={"series_id": "DGS10", "value": "4.25"},
+        )
+
+    first = loader._persist_raw_batch([raw_record("run-one")])
+    second = loader._persist_raw_batch([raw_record("run-two")])
+
+    assert first == second
+    assert "run-one" not in first[0].name
+    assert len(list(settings.paths.raw_data_dir.rglob("*.parquet"))) == 1
+
+
+def test_storage_estimate_accounts_for_all_compressed_projections(
+    isolated_settings: Settings,
+) -> None:
+    loader = DataLoader(isolated_settings)
+    estimate = loader.estimate_fetch(
+        providers=("bitvavo", "kraken", "mexc"),
+        universe_size=2,
+        history_profile="smoke",
+        timeframes=("1m", "3m", "3h", "2d"),
+    )
+
+    assert estimate["estimated_total_storage_bytes"] == sum(
+        estimate[key]
+        for key in (
+            "estimated_compressed_storage_bytes",
+            "estimated_raw_storage_bytes",
+            "estimated_normalized_storage_bytes",
+            "estimated_context_storage_bytes",
+        )
+    )
+    assert (
+        estimate["storage_estimate_basis"]
+        == "PARQUET_COMPRESSED_CACHE_72_RAW_128_"
+        "NORMALIZED_96_CONTEXT_24_BYTES_PER_ROW"
+    )
+    assert estimate["storage_allowed"]
+
+
+def test_candle_age_is_not_reported_as_websocket_transport_latency() -> None:
+    now = datetime.now(UTC)
+    health = StreamHealth(provider="bitvavo")
+    candle = NormalizedStreamEvent(
+        event_type=StreamEventType.CANDLE,
+        provider="bitvavo",
+        source_symbol="ETH-EUR",
+        canonical_market="ETH-EUR",
+        timestamp=now - timedelta(hours=1),
+        observed_at=now,
+        message_id="candle-latency-test",
+        payload={"closed": False},
+    )
+    ticker = candle.model_copy(
+        update={
+            "event_type": StreamEventType.TICKER,
+            "timestamp": now - timedelta(milliseconds=25),
+            "message_id": "ticker-latency-test",
+        }
+    )
+
+    WebSocketManager._record_transport_latency(health, candle)
+    assert health.latencies_ms == []
+    WebSocketManager._record_transport_latency(health, ticker)
+    assert health.latencies_ms == pytest.approx([25.0])
+
+
 def test_week_and_month_timeframes_do_not_collapse_to_minutes() -> None:
+    assert timeframe_delta("3m") == timedelta(minutes=3)
+    assert timeframe_delta("3h") == timedelta(hours=3)
+    assert timeframe_delta("2d") == timedelta(days=2)
     assert timeframe_delta("1W") == timedelta(days=7)
     assert timeframe_delta("1w") == timedelta(days=7)
-    assert timeframe_delta("1M") == timedelta(days=30)
+    assert timeframe_delta("1mo") == timedelta(days=30)
     assert timeframe_delta("1m") == timedelta(minutes=1)
+
+
+def test_calendar_month_is_not_closed_before_next_month() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-01-01T00:00:00Z",
+                    "2025-02-01T00:00:00Z",
+                ]
+            ),
+            "open": [1.0, 1.0],
+            "high": [2.0, 2.0],
+            "low": [0.5, 0.5],
+            "close": [1.5, 1.5],
+            "volume": [10.0, 10.0],
+        }
+    )
+    with pytest.raises(
+        DataValidationError,
+        match="open candle",
+    ):
+        validate_ohlcv(
+            frame.iloc[:1],
+            timeframe="1mo",
+            now=datetime(
+                2025,
+                1,
+                31,
+                23,
+                59,
+                tzinfo=UTC,
+            ),
+        )
+    validated = validate_ohlcv(
+        frame.iloc[:1],
+        timeframe="1mo",
+        now=datetime(2025, 2, 1, tzinfo=UTC),
+    )
+    assert len(validated) == 1
+    closed = drop_open_candles(
+        frame,
+        timeframe="1mo",
+        now=datetime(2025, 2, 15, tzinfo=UTC),
+    )
+    assert list(closed.index) == [
+        pd.Timestamp("2025-01-01T00:00:00Z")
+    ]
 
 
 @pytest.mark.asyncio
@@ -43,10 +330,97 @@ async def test_capability_matrix_has_native_intervals_and_exact_statuses(
     assert {"bitvavo", "kraken", "mexc", "fred", "deribit"} <= set(indexed)
     assert "8h" in indexed["bitvavo"]["native_candle_intervals"]
     assert "1W" in indexed["kraken"]["native_candle_intervals"]
-    assert "1M" in indexed["mexc"]["native_candle_intervals"]
+    assert "1mo" in indexed["mexc"]["native_candle_intervals"]
     assert all(row["status"] in {status.value for status in ProviderStatus} for row in rows)
     assert (loader.settings.paths.reports_dir / "provider_capabilities.json").is_file()
     assert (loader.settings.paths.reports_dir / "provider_capabilities.csv").is_file()
+
+
+@pytest.mark.asyncio
+async def test_month_timeframe_uses_distinct_storage_and_provider_interval(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    first = datetime(2025, 1, 1, tzinfo=UTC)
+    calls: list[tuple[str, dict]] = []
+
+    async def request(method, url, params, headers):
+        del method, headers
+        selected = dict(params or {})
+        calls.append((url, selected))
+        timestamp = int(
+            selected.get(
+                "startTime",
+                first.timestamp() * 1_000,
+            )
+        )
+        if "bitvavo" in url:
+            return [
+                [
+                    timestamp,
+                    "1",
+                    "2",
+                    "0.5",
+                    "1.5",
+                    "10",
+                ]
+            ]
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                int(
+                    (
+                        first + timedelta(days=30)
+                    ).timestamp()
+                    * 1_000
+                )
+                - 1,
+                "15",
+                5,
+            ]
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    assert loader._cache_path(
+        "bitvavo",
+        "BTC-EUR",
+        "1m",
+        "ohlcv",
+    ) != loader._cache_path(
+        "bitvavo",
+        "BTC-EUR",
+        "1mo",
+        "ohlcv",
+    )
+    await loader.download_ohlcv(
+        provider="bitvavo",
+        market="BTC-EUR",
+        timeframe="1mo",
+        start=first,
+        end=first + timedelta(days=60),
+        resume=False,
+        persist=False,
+    )
+    await loader.download_ohlcv(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1mo",
+        start=first,
+        end=first + timedelta(days=60),
+        resume=False,
+        persist=False,
+    )
+    assert len(calls) >= 2
+    assert {
+        params["interval"]
+        for _, params in calls
+    } == {"1M"}
 
 
 @pytest.mark.asyncio
@@ -100,6 +474,15 @@ async def test_unsupported_native_timeframe_rejected_and_canonical_resample_is_c
     assert result[0].values["source_classification"] == "RESAMPLED_FROM_NATIVE"
     assert not result[0].values["gap_flag"]
 
+    three_hour = loader.resample_candles(
+        source,
+        target_timeframe="3h",
+    )
+    assert len(three_hour) == 1
+    assert three_hour[0].values["open"] == 1
+    assert three_hour[0].values["close"] == 3.5
+    assert three_hour[0].available_at == start + timedelta(hours=3)
+
 
 @pytest.mark.asyncio
 async def test_continuous_service_requires_explicit_stale_lock_recovery(
@@ -131,6 +514,37 @@ async def test_continuous_service_requires_explicit_stale_lock_recovery(
     assert calls == 1
     assert service.status()["status"] == "STOPPED"
     assert not service.lock_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_continuous_service_heartbeats_during_long_operation(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    service = ContinuousDataService(
+        settings,
+        heartbeat_seconds=0.01,
+        service_id="long-data-cycle",
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def operation() -> None:
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(
+        service.start(operation, interval_seconds=10.0, once=True)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await asyncio.sleep(0.03)
+    status = service.status()
+    assert status["reason_code"] == "OPERATIONAL_CYCLE_ACTIVE"
+    assert status["active_tasks"] == 1
+    release.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert service.status()["status"] == "STOPPED"
 
 
 def test_continuous_service_lock_inspection_and_owner_safe_release(
@@ -345,7 +759,11 @@ async def test_bitvavo_backward_pagination_and_resume_backfills_prefix(
             int((first + timedelta(hours=hour)).timestamp() * 1_000)
             for hour in range(8)
         ]
-        timestamps = [value for value in available if start <= value <= end][-2:]
+        timestamps = [
+            value
+            for value in available
+            if start <= value < end
+        ][-2:]
         return [
             [timestamp, "1", "2", "0.5", "1.5", "10"]
             for timestamp in reversed(timestamps)
@@ -378,8 +796,433 @@ async def test_bitvavo_backward_pagination_and_resume_backfills_prefix(
     assert {row.timestamp for row in resumed} == {
         first + timedelta(hours=hour) for hour in range(8)
     }
-    assert any(call["end"] <= int((first + timedelta(hours=1)).timestamp() * 1_000) for call in calls)
+    assert all(
+        int(call["end"]) % 3_600_000 == 0
+        for call in calls
+    )
+    assert any(
+        call["start"] == int(first.timestamp() * 1_000)
+        and call["end"]
+        <= int(
+            (first + timedelta(hours=2)).timestamp()
+            * 1_000
+        )
+        for call in calls
+    )
     assert any(call["start"] >= int((first + timedelta(hours=6)).timestamp() * 1_000) for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_bitvavo_weekly_request_never_uses_future_interval_end(
+    isolated_settings: Settings,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    observed = datetime(2026, 8, 3, 18, tzinfo=UTC)
+    calls: list[dict] = []
+
+    async def request(method, url, params, headers):
+        del method, url, headers
+        calls.append(dict(params or {}))
+        return []
+
+    monkeypatch.setattr("data.data_loader.utc_now", lambda: observed)
+    await DataLoader(settings, requester=request).download_ohlcv(
+        provider="bitvavo",
+        market="BTC-EUR",
+        timeframe="1W",
+        start=observed - timedelta(days=21),
+        end=observed,
+        resume=False,
+    )
+
+    assert calls
+    assert all(
+        int(call["end"]) <= int(observed.timestamp() * 1_000)
+        for call in calls
+    )
+    bitvavo_monday_boundary_ms = int(
+        datetime(2026, 8, 2, 22, tzinfo=UTC).timestamp() * 1_000
+    )
+    assert all(int(call["end"]) == bitvavo_monday_boundary_ms for call in calls)
+    assert all(
+        datetime.fromtimestamp(int(call["start"]) / 1_000, tz=UTC).weekday() == 6
+        for call in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_native_sync_resumes_without_full_record_materialization(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    first = datetime(2025, 1, 1, tzinfo=UTC)
+    calls = 0
+
+    async def request(method, url, params, headers):
+        nonlocal calls
+        del method, url, headers
+        calls += 1
+        start = int(params["startTime"])
+        end = int(params["endTime"])
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                timestamp + 3_600_000 - 1,
+                "15",
+                5,
+            ]
+            for timestamp in range(
+                start,
+                end + 1,
+                3_600_000,
+            )
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    first_result = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1h",
+        start=first,
+        end=first + timedelta(hours=5),
+        resume=True,
+    )
+    assert first_result["rows"] == 4
+    assert first_result["resource_batching_only"]
+    assert (
+        settings.paths.cache_dir
+        / "mexc"
+        / "BTC-USDT_1h_ohlcv.parquet"
+    ).is_file()
+    assert (
+        settings.paths.processed_data_dir
+        / "mexc"
+        / "BTC-USDT"
+        / "1h.parquet"
+    ).is_file()
+
+    calls_before_resume = calls
+    resumed = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1h",
+        start=first,
+        end=first + timedelta(hours=5),
+        resume=True,
+    )
+    assert resumed["rows"] == 4
+    assert calls == calls_before_resume
+
+
+@pytest.mark.asyncio
+async def test_compact_native_sync_persists_confirmed_empty_windows(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    paths = PathSettings(project_root=tmp_path)
+    market_data = isolated_settings.market_data.model_copy(
+        update={"maximum_database_batch_size": 1}
+    )
+    settings = isolated_settings.model_copy(
+        update={
+            "paths": paths,
+            "market_data": market_data,
+        }
+    )
+    first = datetime(2023, 1, 1, tzinfo=UTC)
+    listing = first + timedelta(hours=10_000)
+    calls = 0
+
+    async def request(method, url, params, headers):
+        nonlocal calls
+        del method, url, headers
+        calls += 1
+        start = int(params["startTime"])
+        end = int(params["endTime"])
+        if start < int(listing.timestamp() * 1_000):
+            return []
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                timestamp + 3_600_000 - 1,
+                "15",
+                5,
+            ]
+            for timestamp in range(
+                start,
+                end + 1,
+                3_600_000,
+            )
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    end = listing + timedelta(hours=4)
+    first_result = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="NEW-USDT",
+        timeframe="1h",
+        start=first,
+        end=end,
+        resume=True,
+    )
+    assert first_result["rows"] == 3
+    assert calls == 2
+    markers = list(
+        (
+            settings.paths.cache_dir
+            / "mexc"
+            / ".NEW-USDT_1h_ohlcv.compact_parts"
+        ).glob("*.done.json")
+    )
+    assert len(markers) == 2
+    assert any(
+        read_json(marker)["status"] == "CONFIRMED_EMPTY"
+        for marker in markers
+    )
+
+    calls_before_resume = calls
+    resumed = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="NEW-USDT",
+        timeframe="1h",
+        start=first,
+        end=end,
+        resume=True,
+    )
+    assert resumed["rows"] == 3
+    assert calls == calls_before_resume
+
+
+@pytest.mark.asyncio
+async def test_compact_resample_is_causal_and_drops_incomplete_bucket(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    first = datetime(2025, 1, 1, tzinfo=UTC)
+
+    async def request(method, url, params, headers):
+        del method, url, headers
+        start = int(params["startTime"])
+        end = int(params["endTime"])
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                timestamp + 3_600_000 - 1,
+                "15",
+                5,
+            ]
+            for timestamp in range(
+                start,
+                end + 1,
+                3_600_000,
+            )
+            if timestamp
+            != int(
+                (first + timedelta(hours=4)).timestamp()
+                * 1_000
+            )
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    result = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="2h",
+        start=first,
+        end=first + timedelta(hours=7),
+        resume=True,
+    )
+    assert result["rows"] == 2
+    assert result["incomplete_buckets_excluded"] == 1
+    target = (
+        settings.paths.processed_data_dir
+        / "mexc"
+        / "BTC-USDT"
+        / "2h.parquet"
+    )
+    frame = loader.load_local_dataset(target)
+    assert len(frame) == 2
+    assert set(frame["timeframe"]) == {"2h"}
+    assert frame["closed"].all()
+    resumed = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="2h",
+        start=first,
+        end=first + timedelta(hours=7),
+        resume=True,
+    )
+    assert resumed["rows"] == 2
+    assert resumed["reason_code"] == (
+        "COMPACT_RESAMPLE_UP_TO_DATE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_calendar_month_resamples_from_complete_daily_bars(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    first = datetime(2025, 1, 1, tzinfo=UTC)
+
+    async def request(method, url, params, headers):
+        del method, url, headers
+        start = int(params["startTime"])
+        end = int(params["endTime"])
+        day_ms = 86_400_000
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                timestamp + day_ms - 1,
+                "15",
+                5,
+            ]
+            for timestamp in range(
+                start,
+                end + 1,
+                day_ms,
+            )
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    result = await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1mo",
+        start=first,
+        end=datetime(2025, 3, 5, tzinfo=UTC),
+        resume=True,
+    )
+    assert result["source_timeframe"] == "1d"
+    assert result["rows"] == 2
+    target = (
+        settings.paths.processed_data_dir
+        / "mexc"
+        / "BTC-USDT"
+        / "1mo.parquet"
+    )
+    frame = loader.load_local_dataset(target)
+    assert list(
+        pd.to_datetime(frame["timestamp"], utc=True)
+    ) == [
+        pd.Timestamp("2025-01-01T00:00:00Z"),
+        pd.Timestamp("2025-02-01T00:00:00Z"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_canonical_materialization_is_streamed_and_manifested(
+    isolated_settings: Settings,
+    tmp_path,
+) -> None:
+    settings = isolated_cache(isolated_settings, tmp_path)
+    first = datetime(2025, 1, 1, tzinfo=UTC)
+
+    async def request(method, url, params, headers):
+        del method, url, headers
+        start = int(params["startTime"])
+        end = int(params["endTime"])
+        return [
+            [
+                timestamp,
+                "1",
+                "2",
+                "0.5",
+                "1.5",
+                "10",
+                timestamp + 3_600_000 - 1,
+                "15",
+                5,
+            ]
+            for timestamp in range(
+                start,
+                end + 1,
+                3_600_000,
+            )
+        ]
+
+    loader = DataLoader(settings, requester=request)
+    await loader.sync_canonical_ohlcv_compact(
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1h",
+        start=first,
+        end=first + timedelta(hours=5),
+        resume=True,
+    )
+    source = (
+        settings.paths.processed_data_dir
+        / "mexc"
+        / "BTC-USDT"
+        / "1h.parquet"
+    )
+    target = (
+        settings.paths.processed_data_dir
+        / "BTC-USDT_1h.parquet"
+    )
+    updates: list[dict[str, object]] = []
+    result = loader.materialize_provider_ohlcv_compact(
+        source,
+        target,
+        provider="mexc",
+        market="BTC-USDT",
+        timeframe="1h",
+        maximum_staleness=timedelta(days=10_000),
+        progress_callback=lambda update: updates.append(
+            dict(update)
+        ),
+    )
+    assert result["rows"] == 4
+    assert result["resource_batching_only"]
+    assert result["reason_code"] == (
+        "CANONICAL_FILE_MATERIALIZED_COMPACT"
+    )
+    canonical = pd.read_parquet(target)
+    assert list(canonical.columns) == [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]
+    assert len(canonical) == 4
+    manifest = read_json(
+        target.with_suffix(
+            f"{target.suffix}.manifest.json"
+        )
+    )
+    assert manifest["rows"] == 4
+    assert manifest["provider"] == "mexc"
+    assert manifest["quality"]["duplicate_timestamps"] == 0
+    assert updates[-1]["subphase"] == (
+        "CANONICAL_MATERIALIZATION_COMPLETE"
+    )
 
 
 def record(provider: str, close: float, timestamp: datetime) -> NormalizedDataRecord:
@@ -504,6 +1347,141 @@ async def test_websocket_bounded_queue_duplicates_reconnect_and_resubscription()
     assert manager.health_state["bitvavo"].reconnects == 1
 
 
+@pytest.mark.asyncio
+async def test_websocket_coalesces_venue_tickers_before_queue_backpressure() -> None:
+    manager = WebSocketManager(
+        queue_size=2,
+        ticker_minimum_interval_seconds=1.0,
+    )
+    now = datetime.now(UTC)
+    for number in range(3):
+        await manager._publish(
+            NormalizedStreamEvent(
+                event_type=StreamEventType.TICKER,
+                provider="bitvavo",
+                source_symbol="ADA-EUR",
+                canonical_market="ADA-EUR",
+                timestamp=now,
+                observed_at=now,
+                message_id=f"ada-ticker-{number}",
+                payload={"price": number + 1},
+            )
+        )
+
+    assert manager.queue.qsize() == 1
+    assert manager.health_state["bitvavo"].coalesced_messages == 2
+    assert manager.health_state["bitvavo"].dropped_messages == 0
+    assert manager.health("bitvavo")["coalesced_messages"] == 2
+
+
+@pytest.mark.asyncio
+async def test_websocket_burst_yields_to_execution_tasks() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.received = 0
+
+        async def send_json(self, _payload: dict) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            self.received += 1
+            if self.received >= 55:
+                manager._stop.set()
+            return SimpleNamespace(
+                type=WSMsgType.TEXT,
+                data=json.dumps(
+                    {
+                        "event": "ticker24h",
+                        "data": [
+                            {
+                                "market": "ADA-EUR",
+                                "timestamp": int(
+                                    datetime.now(UTC).timestamp() * 1_000
+                                ),
+                                "last": str(self.received),
+                                "volume": "1000",
+                                "volumeQuote": "1000",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        async def ping(self) -> None:
+            return None
+
+    class Connection:
+        async def __aenter__(self) -> Socket:
+            return socket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    socket = Socket()
+    yielded = asyncio.Event()
+
+    async def competing_execution_task() -> None:
+        await asyncio.sleep(0)
+        yielded.set()
+
+    manager = WebSocketManager(
+        queue_size=100,
+        session=SimpleNamespace(),
+        connect=lambda *_args, **_kwargs: Connection(),
+    )
+    manager.health_state["bitvavo"].last_error = "stale disconnect"
+    competitor = asyncio.create_task(competing_execution_task())
+
+    await manager._connection("bitvavo", {"ticker": ["ADA-EUR"]})
+    await competitor
+
+    assert socket.received == 55
+    assert yielded.is_set()
+    assert manager.health_state["bitvavo"].messages == 55
+    assert manager.health_state["bitvavo"].last_error is None
+    health = manager.health("bitvavo")
+    assert health["event_counts"]["ticker"] == 55
+    assert health["event_last_message_age_ms"]["ticker"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_bitvavo_dynamic_subscription_update_preserves_connection() -> None:
+    class Socket:
+        closed = False
+
+        def __init__(self) -> None:
+            self.messages: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.messages.append(payload)
+
+    manager = WebSocketManager()
+    socket = Socket()
+    manager._sockets["bitvavo"] = socket
+    manager._subscriptions["bitvavo"] = {
+        "trades": ["OLD-EUR"],
+        "book": ["OLD-EUR"],
+    }
+    manager._sequence[("bitvavo", "NEW-EUR", "book")] = 42
+
+    result = await manager.update_bitvavo_subscriptions(
+        subscribe={"trades": ("NEW-EUR",), "book": ("NEW-EUR",)},
+        unsubscribe={"trades": ("OLD-EUR",), "book": ("OLD-EUR",)},
+    )
+
+    assert [message["action"] for message in socket.messages] == [
+        "unsubscribe",
+        "subscribe",
+    ]
+    assert result["connection_preserved"] is True
+    assert ("bitvavo", "NEW-EUR", "book") not in manager._sequence
+    assert manager.health_state["bitvavo"].subscriptions == 2
+    assert manager._subscriptions["bitvavo"] == {
+        "trades": ["NEW-EUR"],
+        "book": ["NEW-EUR"],
+    }
+
+
 def test_mexc_current_protobuf_ticker_normalization() -> None:
     def varint(value: int) -> bytes:
         encoded = bytearray()
@@ -537,3 +1515,44 @@ def test_mexc_current_protobuf_ticker_normalization() -> None:
     events = WebSocketManager().parse_message("mexc", decoded)
     assert events[0].event_type is StreamEventType.TICKER
     assert events[0].canonical_market == "BTC-USDT"
+
+
+def test_bitvavo_candle_subscription_and_plural_event_are_supported() -> None:
+    manager = WebSocketManager()
+    messages = manager.subscription_messages(
+        "bitvavo",
+        {
+            "ticker": ["BTC-EUR"],
+            "candles": {
+                "markets": ["BTC-EUR", "ETH-EUR"],
+                "interval": ["15m", "1h", "4h", "1d"],
+            },
+        },
+    )
+    candle_subscription = messages[0]["channels"][1]
+    assert candle_subscription == {
+        "name": "candles",
+        "markets": ["BTC-EUR", "ETH-EUR"],
+        "interval": ["15m", "1h", "4h", "1d"],
+    }
+    events = manager.parse_message(
+        "bitvavo",
+        {
+            "event": "candles",
+            "market": "BTC-EUR",
+            "interval": "1h",
+            "candle": [
+                [
+                    "1785283200000",
+                    "100",
+                    "105",
+                    "99",
+                    "103",
+                    "12.5",
+                ]
+            ],
+        },
+    )
+    assert len(events) == 1
+    assert events[0].event_type is StreamEventType.CANDLE
+    assert events[0].payload["interval"] == "1h"

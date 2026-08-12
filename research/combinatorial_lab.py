@@ -28,7 +28,12 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from config.settings import TIMEFRAME_SECONDS, Settings, normalize_timeframe
+from config.settings import (
+    SUPPORTED_TIMEFRAMES,
+    TIMEFRAME_SECONDS,
+    Settings,
+    normalize_timeframe,
+)
 from core.contracts import (
     DataValidationError,
     EligibilityStatus,
@@ -59,6 +64,10 @@ from research.optimization import (
     run_research,
     walk_forward_validate,
 )
+from research.stochastic_validation import (
+    policy_from_research_settings,
+    validate_strategy_return_paths,
+)
 from research.strategies import Strategy, StrategyOutput
 from utils.common import (
     append_jsonl,
@@ -72,6 +81,15 @@ from utils.common import (
 )
 
 
+def _utc_boundary(value: pd.Timestamp | datetime) -> pd.Timestamp:
+    """Normalize campaign boundaries without shifting naive UTC manifests."""
+
+    selected = pd.Timestamp(value)
+    if selected.tzinfo is None:
+        return selected.tz_localize("UTC")
+    return selected.tz_convert("UTC")
+
+
 class ParameterKind(StrEnum):
     INTEGER = "INTEGER"
     HALF_STEP = "HALF_STEP"
@@ -83,10 +101,70 @@ class ParameterKind(StrEnum):
     DURATION = "DURATION"
 
 
+def validate_explicit_research_markets(
+    settings: Settings,
+    markets: Sequence[str],
+    *,
+    include_review_required_research_only: bool,
+) -> tuple[list[str], list[str]]:
+    """Validate an explicit EUR research universe without granting execution rights.
+
+    Unknown markets remain fail-closed for paper/live use.  They may only enter
+    an explicitly requested research run when the caller enables the existing
+    review-required research-only policy.
+    """
+
+    normalized = [str(market).strip().upper().replace("/", "-") for market in markets]
+    if any(not market.endswith("-EUR") for market in normalized):
+        raise ValueError("lab market overrides require EUR spot markets")
+    review_only: list[str] = []
+    for market in normalized:
+        eligibility = settings.shariah.eligibility(market)
+        if eligibility.status is EligibilityStatus.ALLOWED:
+            continue
+        if (
+            eligibility.status is EligibilityStatus.REVIEW_REQUIRED
+            and include_review_required_research_only
+        ):
+            review_only.append(market)
+            continue
+        raise PermissionError(
+            f"market is not ALLOWED for this lab run: {market} ({eligibility.reason})"
+        )
+    return normalized, review_only
+
+
+def prefer_deeper_derived_frame(
+    native_frame: pd.DataFrame,
+    derived_frame: pd.DataFrame,
+) -> bool:
+    """Return true only when a deeper derivation adds history without losing recency."""
+
+    if len(derived_frame) <= len(native_frame):
+        return False
+    if native_frame.empty:
+        return True
+    return pd.Timestamp(derived_frame.index[-1]) >= pd.Timestamp(native_frame.index[-1])
+
+
 class ExitProfile(StrEnum):
     FIXED_R = "FIXED_R"
     TRAILING_TREND = "TRAILING_TREND"
     TIME_REGIME = "TIME_REGIME"
+    TIME_ONLY = "TIME_ONLY"
+    ATR_STOP_ONLY = "ATR_STOP_ONLY"
+    ATR_TRAILING_ONLY = "ATR_TRAILING_ONLY"
+    EMA20_EXIT = "EMA20_EXIT"
+    EMA50_EXIT = "EMA50_EXIT"
+    VWAP_EXIT = "VWAP_EXIT"
+    SUPERTREND_EXIT = "SUPERTREND_EXIT"
+    RSI_EXTREME_EXIT = "RSI_EXTREME_EXIT"
+    MOMENTUM_LOSS_EXIT = "MOMENTUM_LOSS_EXIT"
+    VOLUME_WEAKNESS_EXIT = "VOLUME_WEAKNESS_EXIT"
+    ADX_WEAKNESS_EXIT = "ADX_WEAKNESS_EXIT"
+    N_BAR_LOW_EXIT = "N_BAR_LOW_EXIT"
+    FRACTAL_LOW_EXIT = "FRACTAL_LOW_EXIT"
+    REGIME_EXIT = "REGIME_EXIT"
 
 
 class BlockRole(StrEnum):
@@ -422,6 +500,10 @@ class SignalBlock:
             signal = source.astype(bool)
         elif self.operator is SignalOperator.BOOLEAN_FALSE:
             signal = ~source.astype(bool)
+        elif self.operator is SignalOperator.RISING:
+            signal = source.astype(float).diff() > 0.0
+        elif self.operator is SignalOperator.FALLING:
+            signal = source.astype(float).diff() < 0.0
         elif self.operator is SignalOperator.GREATER_THAN:
             signal = source.astype(float) > float(threshold)
         elif self.operator is SignalOperator.GREATER_THAN_OR_EQUAL:
@@ -525,11 +607,11 @@ class SignalBlock:
         return _canonical_value(payload)
 
 
-ALL_TIMEFRAMES = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1W")
+ALL_TIMEFRAMES = tuple(SUPPORTED_TIMEFRAMES)
 TECH_TIMEFRAMES = ALL_TIMEFRAMES
 FAST_SCREEN_VERSION = "2.0.0"
 SCREEN_POLICY_VERSION = "2.1.0"
-EXIT_MODEL_VERSION = "2.2.0"
+EXIT_MODEL_VERSION = "3.0.0"
 SURVIVOR_POLICY_VERSION = "2.1.0"
 FAST_SCREEN_MINIMUM_TRADES = 30
 DEFAULT_COMPATIBLE = tuple(BlockRole)
@@ -603,6 +685,7 @@ def _block(
         defaults[specification.name] = specification.default
     operator = {
         "BOOL": SignalOperator.BOOLEAN_TRUE,
+        "BOOL_FALSE": SignalOperator.BOOLEAN_FALSE,
         "GT": SignalOperator.GREATER_THAN,
         "LT": SignalOperator.LESS_THAN,
         "ABOVE_FEATURE": SignalOperator.ABOVE_FEATURE,
@@ -883,7 +966,28 @@ def signal_block_registry() -> dict[str, SignalBlock]:
             signal_kind="BOOL",
             warmup=200,
             redundancy="htf_4h_regime",
-            timeframes=("5m", "15m", "30m", "1h", "2h"),
+            timeframes=tuple(
+                timeframe
+                for timeframe in ALL_TIMEFRAMES
+                if TIMEFRAME_SECONDS[timeframe]
+                < TIMEFRAME_SECONDS["4h"]
+            ),
+        ),
+        _block(
+            "htf_4h_trend_bullish",
+            family="MULTI_TIMEFRAME",
+            role=BlockRole.CONFIRMATION,
+            direction=BlockDirection.BULLISH,
+            feature="htf_4h_trend_bullish",
+            signal_kind="BOOL",
+            warmup=200,
+            redundancy="htf_4h_trend",
+            timeframes=tuple(
+                timeframe
+                for timeframe in ALL_TIMEFRAMES
+                if TIMEFRAME_SECONDS[timeframe]
+                < TIMEFRAME_SECONDS["4h"]
+            ),
         ),
         _block(
             "htf_1d_regime_bullish",
@@ -894,7 +998,47 @@ def signal_block_registry() -> dict[str, SignalBlock]:
             signal_kind="BOOL",
             warmup=200,
             redundancy="htf_1d_regime",
-            timeframes=("5m", "15m", "30m", "1h", "2h", "4h"),
+            timeframes=tuple(
+                timeframe
+                for timeframe in ALL_TIMEFRAMES
+                if TIMEFRAME_SECONDS[timeframe]
+                < TIMEFRAME_SECONDS["1d"]
+            ),
+        ),
+        _block(
+            "htf_1d_regime_bearish",
+            family="MULTI_TIMEFRAME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.BEARISH,
+            feature="htf_1d_regime_bullish",
+            signal_kind="BOOL_FALSE",
+            warmup=200,
+            redundancy="htf_1d_regime",
+            timeframes=tuple(
+                timeframe
+                for timeframe in ALL_TIMEFRAMES
+                if TIMEFRAME_SECONDS[timeframe]
+                < TIMEFRAME_SECONDS["1d"]
+            ),
+            description=(
+                "Causal bearish 1d context from the last fully closed daily candle."
+            ),
+        ),
+        _block(
+            "htf_1W_regime_bullish",
+            family="MULTI_TIMEFRAME",
+            role=BlockRole.REGIME_FILTER,
+            direction=BlockDirection.BULLISH,
+            feature="htf_1W_regime_bullish",
+            signal_kind="BOOL",
+            warmup=200,
+            redundancy="htf_1W_regime",
+            timeframes=tuple(
+                timeframe
+                for timeframe in ALL_TIMEFRAMES
+                if TIMEFRAME_SECONDS[timeframe]
+                < TIMEFRAME_SECONDS["1W"]
+            ),
         ),
         _block(
             "rsi_oversold",
@@ -1263,6 +1407,284 @@ def signal_block_registry() -> dict[str, SignalBlock]:
     ]
     blocks.extend(
         [
+            _block(
+                "supertrend_bullish_flip",
+                family="TREND",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="supertrend_bullish_flip",
+                warmup=20,
+                redundancy="supertrend_trigger",
+            ),
+            _block(
+                "ema20_bullish_reclaim",
+                family="TREND",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="close",
+                signal_kind="CROSS_ABOVE",
+                compare="ema_20",
+                warmup=20,
+                redundancy="ema_reclaim_trigger",
+            ),
+            _block(
+                "ichimoku_bullish_reclaim",
+                family="TREND",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="ichimoku_bullish_reclaim",
+                warmup=52,
+                redundancy="ichimoku_trigger",
+            ),
+            _block(
+                "vortex_bullish_cross",
+                family="TREND",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="vortex_bullish_cross",
+                warmup=20,
+                redundancy="vortex_trigger",
+            ),
+            _block(
+                "regression_slope_positive",
+                family="TREND",
+                role=BlockRole.TREND_FILTER,
+                direction=BlockDirection.BULLISH,
+                feature="linear_regression_slope_50",
+                signal_kind="POSITIVE",
+                warmup=50,
+                redundancy="regression_trend",
+            ),
+            _block(
+                "regression_quality",
+                family="TREND",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="linear_regression_r2_50",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=50,
+                redundancy="regression_quality",
+            ),
+            _block(
+                "trend_efficiency_high",
+                family="TREND",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="trend_efficiency_20",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=20,
+                redundancy="trend_efficiency",
+            ),
+            _block(
+                "macd_bullish_cross",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="macd_bullish_cross",
+                warmup=35,
+                redundancy="macd_trigger",
+            ),
+            _block(
+                "mfi_bullish_reclaim",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="mfi_bullish_reclaim",
+                warmup=20,
+                redundancy="mfi_trigger",
+            ),
+            _block(
+                "momentum_acceleration_positive",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="momentum_acceleration",
+                signal_kind="POSITIVE",
+                warmup=30,
+                redundancy="momentum_acceleration",
+            ),
+            _block(
+                "multi_horizon_momentum",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="multi_horizon_momentum_score",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=240,
+                redundancy="multi_horizon_momentum",
+            ),
+            _block(
+                "volatility_adjusted_momentum",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="volatility_adjusted_momentum_20",
+                signal_kind="POSITIVE",
+                warmup=20,
+                redundancy="vol_adjusted_momentum",
+            ),
+            _block(
+                "robust_zscore_reclaim",
+                family="MOMENTUM",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="mad_zscore_reclaim",
+                warmup=30,
+                redundancy="robust_reversion",
+            ),
+            _block(
+                "keltner_lower_reclaim",
+                family="VOLATILITY",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="keltner_lower_reclaim",
+                warmup=20,
+                redundancy="keltner_reversion",
+            ),
+            _block(
+                "volatility_expansion_breakout",
+                family="VOLATILITY",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="volatility_expansion_breakout",
+                warmup=50,
+                redundancy="volatility_expansion",
+            ),
+            _block(
+                "atr_low_regime",
+                family="VOLATILITY",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="atr_percentile_100",
+                signal_kind="LT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=100,
+                redundancy="volatility_percentile",
+            ),
+            _block(
+                "atr_high_regime",
+                family="VOLATILITY",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="atr_percentile_100",
+                signal_kind="GT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=100,
+                redundancy="volatility_percentile",
+            ),
+            _block(
+                "obv_breakout_confirmation",
+                family="VOLUME_FLOW",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="obv_breakout_20",
+                warmup=20,
+                redundancy="obv_breakout",
+            ),
+            _block(
+                "cmf_bullish_reclaim",
+                family="VOLUME_FLOW",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="chaikin_money_flow_reclaim",
+                warmup=20,
+                redundancy="cmf_trigger",
+            ),
+            _block(
+                "vwap_bullish_reclaim",
+                family="VOLUME_FLOW",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="vwap_reclaim",
+                warmup=20,
+                redundancy="vwap_trigger",
+            ),
+            _block(
+                "anchored_vwap_bullish_reclaim",
+                family="VOLUME_FLOW",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="anchored_vwap_reclaim",
+                warmup=20,
+                redundancy="anchored_vwap_trigger",
+            ),
+            _block(
+                "prior_volume_dryup",
+                family="VOLUME_FLOW",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.NEUTRAL,
+                feature="prior_volume_dryup",
+                warmup=25,
+                redundancy="volume_dryup",
+            ),
+            _block(
+                "btc_relative_momentum_entry",
+                family="PRICE_RETURNS",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="btc_relative_momentum_20",
+                signal_kind="POSITIVE",
+                warmup=20,
+                redundancy="relative_momentum_entry",
+            ),
+            _block(
+                "btc_relative_reversal_reclaim",
+                family="PRICE_RETURNS",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="btc_relative_reversal_reclaim",
+                warmup=60,
+                redundancy="relative_reversion",
+            ),
+            _block(
+                "hurst_mean_reverting_regime",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="hurst_exponent",
+                signal_kind="LT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=100,
+                redundancy="hurst_regime",
+            ),
+            _block(
+                "high_fractal_dimension_regime",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="fractal_dimension_index",
+                signal_kind="GT",
+                threshold=("1.0", "2.0", "1.5"),
+                warmup=100,
+                redundancy="fractal_dimension_range",
+            ),
+            _block(
+                "wavelet_trend_agreement",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.CONFIRMATION,
+                direction=BlockDirection.BULLISH,
+                feature="wavelet_trend_agreement",
+                warmup=80,
+                redundancy="wavelet_trend",
+            ),
+            _block(
+                "low_entropy_trend_regime",
+                family="STATISTICAL_REGIME",
+                role=BlockRole.REGIME_FILTER,
+                direction=BlockDirection.NEUTRAL,
+                feature="permutation_entropy_3",
+                signal_kind="LT",
+                threshold=("0.0", "1.0", "0.5"),
+                warmup=70,
+                redundancy="entropy_regime",
+            ),
+        ]
+    )
+    blocks.extend(
+        [
             SignalBlock(
                 block_id="rsi_threshold",
                 version="1.0.0",
@@ -1476,6 +1898,63 @@ def signal_block_registry() -> dict[str, SignalBlock]:
                 threshold=("1.0", "2.0", "1.5"),
                 warmup=100,
                 redundancy="fractal_dimension",
+            ),
+            _block(
+                "higher_low_continuation",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="higher_low_continuation",
+                warmup=55,
+                redundancy="higher_low_continuation",
+            ),
+            _block(
+                "failed_breakout_reclaim",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="failed_breakout_reclaim",
+                warmup=55,
+                redundancy="failed_breakout",
+            ),
+            _block(
+                "inside_bar_breakout",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="inside_bar_breakout",
+                warmup=3,
+                redundancy="inside_bar_breakout",
+            ),
+            _block(
+                "previous_day_high_breakout",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="previous_day_high_breakout",
+                warmup=3,
+                redundancy="calendar_breakout",
+                timeframes=tuple(
+                    timeframe
+                    for timeframe in ALL_TIMEFRAMES
+                    if TIMEFRAME_SECONDS[timeframe]
+                    < TIMEFRAME_SECONDS["1d"]
+                ),
+            ),
+            _block(
+                "previous_week_high_breakout",
+                family="MARKET_STRUCTURE",
+                role=BlockRole.ENTRY_TRIGGER,
+                direction=BlockDirection.BULLISH,
+                feature="previous_week_high_breakout",
+                warmup=10,
+                redundancy="calendar_breakout",
+                timeframes=tuple(
+                    timeframe
+                    for timeframe in ALL_TIMEFRAMES
+                    if TIMEFRAME_SECONDS[timeframe]
+                    < TIMEFRAME_SECONDS["1W"]
+                ),
             ),
         ]
     )
@@ -1792,6 +2271,78 @@ class CombinationGenerator:
             "warning": "Upper bounds precede static/family-aware rejection.",
         }
 
+    def materialize_membership(
+        self,
+        membership: Iterable[str],
+        *,
+        logic_mode: LogicMode = LogicMode.LAYERED,
+        mode: GenerationMode = GenerationMode.FAMILY_AWARE,
+        timeframes: Iterable[str] = ("1h", "4h", "1d"),
+    ) -> StrategyCombination:
+        """Materialize one deterministic membership without scanning its siblings."""
+
+        selected = tuple(sorted(dict.fromkeys(str(value) for value in membership)))
+        if not selected:
+            raise ValueError("a strategy combination requires at least one block")
+        if len(selected) > 5:
+            raise ValueError("combination sizes must be between one and five")
+        unknown = sorted(set(selected) - set(self.registry))
+        if unknown:
+            raise KeyError(f"unknown signal blocks: {unknown}")
+        selected_timeframes = set(timeframes)
+        state, reason = self._validate(
+            selected,
+            logic_mode=logic_mode,
+            mode=mode,
+            timeframes=selected_timeframes,
+        )
+        blocks = [self.registry[block_id] for block_id in selected]
+        common_timeframes = set.intersection(
+            *(set(block.supported_timeframes) for block in blocks)
+        )
+        defaults = {
+            block.block_id: canonical_parameters(block.default_parameters)
+            for block in blocks
+        }
+        dna = {
+            "blocks": [
+                {"id": block.block_id, "version": block.version}
+                for block in blocks
+            ],
+            "logic_mode": logic_mode,
+        }
+        dna_hash = stable_hash(dna)
+        return StrategyCombination(
+            combination_id=f"cmb-{dna_hash[:20]}",
+            strategy_dna_hash=dna_hash,
+            combination_size=len(selected),
+            block_ids=selected,
+            families=tuple(sorted({block.family for block in blocks})),
+            roles=tuple(sorted({block.role.value for block in blocks})),
+            redundancy_score=self._redundancy(blocks),
+            logic_mode=logic_mode,
+            default_parameters=defaults,
+            parameter_space_size=math.prod(
+                block.parameter_space_size for block in blocks
+            ),
+            estimated_computational_cost=sum(
+                {"LOW": 1, "MEDIUM": 3, "HIGH": 8}[
+                    block.computational_cost_class
+                ]
+                for block in blocks
+            ),
+            eligibility_status=state,
+            generated_at=utc_now(),
+            exclusion_reason=reason,
+            requested_timeframes=tuple(sorted(selected_timeframes)),
+            common_supported_timeframes=tuple(
+                sorted(common_timeframes.intersection(selected_timeframes))
+            ),
+            excluded_timeframes=tuple(
+                sorted(selected_timeframes - common_timeframes)
+            ),
+        )
+
     def generate(
         self,
         *,
@@ -1822,62 +2373,28 @@ class CombinationGenerator:
                         state, reason = CombinationState.DUPLICATE, "DUPLICATE"
                     else:
                         seen.add(key)
-                        state, reason = self._validate(
-                            membership,
-                            logic_mode=logic_mode,
-                            mode=mode,
-                            timeframes=selected_timeframes,
-                        )
-                    blocks = [self.registry[block_id] for block_id in membership]
-                    common_timeframes = set.intersection(
-                        *(set(block.supported_timeframes) for block in blocks)
+                        state, reason = CombinationState.GENERATED, None
+                    combination = self.materialize_membership(
+                        membership,
+                        logic_mode=logic_mode,
+                        mode=mode,
+                        timeframes=selected_timeframes,
                     )
-                    defaults = {
-                        block.block_id: canonical_parameters(block.default_parameters)
-                        for block in blocks
-                    }
-                    dna = {
-                        "blocks": [
-                            {"id": block.block_id, "version": block.version} for block in blocks
-                        ],
-                        "logic_mode": logic_mode,
-                    }
-                    dna_hash = stable_hash(dna)
+                    if state is CombinationState.DUPLICATE:
+                        combination = replace(
+                            combination,
+                            eligibility_status=state,
+                            exclusion_reason=reason,
+                        )
                     traversed += 1
                     if cursor_pending:
-                        if dna_hash == continuation_cursor:
+                        if (
+                            combination.strategy_dna_hash
+                            == continuation_cursor
+                        ):
                             cursor_pending = False
                         continue
-                    generated.append(
-                        StrategyCombination(
-                            combination_id=f"cmb-{dna_hash[:20]}",
-                            strategy_dna_hash=dna_hash,
-                            combination_size=size,
-                            block_ids=membership,
-                            families=tuple(sorted({block.family for block in blocks})),
-                            roles=tuple(sorted({block.role.value for block in blocks})),
-                            redundancy_score=self._redundancy(blocks),
-                            logic_mode=logic_mode,
-                            default_parameters=defaults,
-                            parameter_space_size=math.prod(
-                                block.parameter_space_size for block in blocks
-                            ),
-                            estimated_computational_cost=sum(
-                                {"LOW": 1, "MEDIUM": 3, "HIGH": 8}[block.computational_cost_class]
-                                for block in blocks
-                            ),
-                            eligibility_status=state,
-                            generated_at=utc_now(),
-                            exclusion_reason=reason,
-                            requested_timeframes=tuple(sorted(selected_timeframes)),
-                            common_supported_timeframes=tuple(
-                                sorted(common_timeframes.intersection(selected_timeframes))
-                            ),
-                            excluded_timeframes=tuple(
-                                sorted(selected_timeframes - common_timeframes)
-                            ),
-                        )
-                    )
+                    generated.append(combination)
                     if maximum_rows and len(generated) >= maximum_rows:
                         total = sum(
                             math.comb(len(selected_ids), requested_size) * len(set(logic_modes))
@@ -2356,8 +2873,17 @@ class CombinatorialStrategy(Strategy):
     ) -> None:
         self.combination = combination
         self.registry = dict(registry)
+        supplied_parameters = {
+            key: dict(value)
+            for key, value in (block_parameters or {}).items()
+        }
+        strategy_parameter_overrides = supplied_parameters.pop(
+            "__strategy__",
+            {},
+        )
         self.block_parameters = {
-            key: dict(value) for key, value in (block_parameters or {}).items()
+            key: dict(value)
+            for key, value in supplied_parameters.items()
         }
         self.strategy_id = f"lab_{combination.strategy_dna_hash[:24]}"
         defaults: dict[str, Any] = {
@@ -2370,6 +2896,15 @@ class CombinatorialStrategy(Strategy):
             "risk__position_fraction": Decimal("1.0"),
             "logic__vote_threshold": Decimal("0.5"),
         }
+        unknown_strategy_parameters = sorted(
+            set(strategy_parameter_overrides) - set(defaults)
+        )
+        if unknown_strategy_parameters:
+            raise ValueError(
+                "unknown combinatorial strategy parameters: "
+                f"{unknown_strategy_parameters}"
+            )
+        defaults.update(strategy_parameter_overrides)
         spaces: dict[str, tuple[Any, ...]] = {
             "exit__profile": tuple(profile.value for profile in ExitProfile),
             "exit__stop_atr": tuple(
@@ -2601,18 +3136,90 @@ class CombinatorialStrategy(Strategy):
             index=features.index,
         )
         exit_profile = ExitProfile(str(selected["exit__profile"]))
+        profile_exit = false.copy()
+
+        def numeric_feature(name: str) -> pd.Series:
+            if name not in features:
+                return pd.Series(np.nan, index=features.index)
+            return features[name].astype(float)
+
+        close = numeric_feature("close")
+        if exit_profile is ExitProfile.EMA20_EXIT:
+            profile_exit = close < numeric_feature("ema_20")
+        elif exit_profile is ExitProfile.EMA50_EXIT:
+            profile_exit = close < numeric_feature("ema_50")
+        elif exit_profile is ExitProfile.VWAP_EXIT:
+            profile_exit = close < numeric_feature("vwap_20")
+        elif exit_profile is ExitProfile.SUPERTREND_EXIT:
+            profile_exit = (
+                numeric_feature("supertrend_direction") < 0.0
+            )
+        elif exit_profile is ExitProfile.RSI_EXTREME_EXIT:
+            profile_exit = numeric_feature("rsi_14") >= 75.0
+        elif exit_profile is ExitProfile.MOMENTUM_LOSS_EXIT:
+            profile_exit = numeric_feature("roc_12") < 0.0
+        elif exit_profile is ExitProfile.VOLUME_WEAKNESS_EXIT:
+            profile_exit = (
+                numeric_feature("relative_volume_20") < 0.75
+            ) & (close < numeric_feature("ema_20"))
+        elif exit_profile is ExitProfile.ADX_WEAKNESS_EXIT:
+            profile_exit = numeric_feature("adx_14") < 18.0
+        elif exit_profile is ExitProfile.N_BAR_LOW_EXIT:
+            profile_exit = close < numeric_feature(
+                "donchian_low_20"
+            )
+        elif exit_profile is ExitProfile.FRACTAL_LOW_EXIT:
+            confirmed_low = numeric_feature(
+                "confirmed_fractal_low_price"
+            ).ffill()
+            profile_exit = close < confirmed_low
+        elif exit_profile in {
+            ExitProfile.REGIME_EXIT,
+            ExitProfile.TIME_REGIME,
+        }:
+            if "bear_regime" in features:
+                profile_exit = features["bear_regime"].fillna(
+                    False
+                ).astype(bool)
+            else:
+                profile_exit = close < numeric_feature("ema_200")
+        exit_signal = exit_signal | profile_exit.fillna(False)
         stop_atr = selected["exit__stop_atr"]
         target_atr = selected["exit__target_atr"]
         trailing_atr = selected["exit__trailing_atr"]
-        maximum_holding_bars = selected["exit__maximum_holding_bars"]
+        maximum_holding_bars: int | None = int(
+            selected["exit__maximum_holding_bars"]
+        )
         if exit_profile is ExitProfile.FIXED_R:
             trailing_atr = Decimal("0")
-        elif exit_profile is ExitProfile.TRAILING_TREND:
-            target_atr = max(_decimal(target_atr), Decimal("20"))
-            trailing_atr = max(_decimal(trailing_atr), Decimal("2.5"))
-        else:
-            target_atr = max(_decimal(target_atr), Decimal("20"))
+        elif exit_profile in {
+            ExitProfile.TRAILING_TREND,
+            ExitProfile.ATR_TRAILING_ONLY,
+        }:
+            target_atr = Decimal("1000000")
+            trailing_atr = max(
+                _decimal(trailing_atr),
+                Decimal("2.5"),
+            )
+            if exit_profile is ExitProfile.ATR_TRAILING_ONLY:
+                maximum_holding_bars = None
+        elif exit_profile is ExitProfile.ATR_STOP_ONLY:
+            target_atr = Decimal("1000000")
             trailing_atr = Decimal("0")
+            maximum_holding_bars = None
+        elif exit_profile is ExitProfile.TIME_ONLY:
+            target_atr = Decimal("1000000")
+            trailing_atr = Decimal("0")
+        elif exit_profile is ExitProfile.TIME_REGIME:
+            target_atr = Decimal("1000000")
+            trailing_atr = Decimal("0")
+        else:
+            # Indicator exits retain an ATR stop as a non-overridable risk
+            # bound.  A deliberately unreachable target prevents a hidden
+            # fixed-target exit from contaminating the profile comparison.
+            target_atr = Decimal("1000000")
+            trailing_atr = Decimal("0")
+            maximum_holding_bars = None
         execution_parameters = {
             "stop_atr": stop_atr,
             "target_atr": target_atr,
@@ -2654,11 +3261,12 @@ def _canonical_backtest_worker(
     frames: dict[str, pd.DataFrame],
     combination: StrategyCombination,
     block_parameters: dict[str, dict[str, Any]],
+    registry: Mapping[str, SignalBlock] | None = None,
 ) -> BacktestResult:
     """Process-safe entry point for CPU-heavy canonical backtests."""
     strategy = CombinatorialStrategy(
         combination,
-        signal_block_registry(),
+        registry or signal_block_registry(),
         block_parameters=block_parameters,
     )
     return BacktestEngine(config, settings=settings).run(frames, strategy)
@@ -2669,12 +3277,13 @@ def _fast_screen_worker(
     combination: StrategyCombination,
     block_parameters: dict[str, dict[str, Any]],
     round_trip_cost: float,
+    registry: Mapping[str, SignalBlock] | None = None,
 ) -> dict[str, Any]:
     """Process-safe causal coarse screen; never produces a paper candidate."""
 
     strategy = CombinatorialStrategy(
         combination,
-        signal_block_registry(),
+        registry or signal_block_registry(),
         block_parameters=block_parameters,
     )
     return fast_screen(
@@ -2700,11 +3309,12 @@ def _canonical_research_worker(
     search_method: Literal["grid", "random", "coordinate", "optuna"],
     search_trials: int,
     allow_review_required_research_only: bool,
+    registry: Mapping[str, SignalBlock] | None = None,
 ) -> LabResearchResult:
     """Process-safe adapter around the existing canonical research pipeline."""
     strategy = CombinatorialStrategy(
         combination,
-        signal_block_registry(),
+        registry or signal_block_registry(),
         block_parameters=block_parameters,
     )
     outcome = run_research(
@@ -2756,6 +3366,41 @@ def _canonical_research_worker(
     return LabResearchResult(outcome, rolling, double_cost_result)
 
 
+def _terminate_process_pool(executor: ProcessPoolExecutor) -> list[int]:
+    """Hard-stop only the workers owned by a timed-out dedicated pool."""
+
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    process_ids = [
+        int(process.pid)
+        for process in processes
+        if getattr(process, "pid", None) is not None
+    ]
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=5.0)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5.0)
+    executor.shutdown(wait=False, cancel_futures=True)
+    return process_ids
+
+
+def _daily_equity_returns(result: BacktestResult) -> pd.Series:
+    """Return one causal daily portfolio return path from canonical equity."""
+
+    return (
+        result.equity_curve["equity"]
+        .astype(float)
+        .resample("1D")
+        .last()
+        .pct_change()
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+
 @dataclass(frozen=True)
 class LabPaths:
     root: Path
@@ -2794,6 +3439,37 @@ class LabPaths:
 
 def _payload_rows(database: Database, table_name: str) -> list[dict[str, Any]]:
     return [dict(row["payload"]) for row in database.fetch_records(table_name)]
+
+
+def _payload_rows_by_identity(
+    database: Database,
+    table_name: str,
+    *,
+    key: str,
+    values: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Read a bounded identity slice, with a compatibility fallback for fakes."""
+
+    selected = {str(value) for value in values if str(value)}
+    if not selected:
+        return []
+    fetch_filtered = getattr(
+        database,
+        "fetch_records_by_payload_values",
+        None,
+    )
+    if callable(fetch_filtered):
+        rows = fetch_filtered(
+            table_name,
+            key=key,
+            values=selected,
+        )
+        return [dict(row["payload"]) for row in rows]
+    return [
+        payload
+        for payload in _payload_rows(database, table_name)
+        if str(payload.get(key) or "") in selected
+    ]
 
 
 def _frame_content_hash(frame: pd.DataFrame) -> str:
@@ -3190,6 +3866,16 @@ class LabStore:
             else base_experiment
         )
         job_id = f"{base_job_id}-{run_version}" if run_version else base_job_id
+        strategy_variant_dna_hash = stable_hash(
+            {
+                "block_strategy_dna_hash": (
+                    combination.strategy_dna_hash
+                ),
+                "parameters": canonical_parameters(parameters),
+                "exit_model_version": EXIT_MODEL_VERSION,
+            },
+            length=64,
+        )
         result_type = (
             "PARAMETER_SENSITIVITY"
             if sensitivity_parameter and sensitivity_parameter != "CLI_OVERRIDE"
@@ -3204,6 +3890,9 @@ class LabStore:
             "run_id": run_id,
             "combination_id": combination.combination_id,
             "strategy_dna_hash": combination.strategy_dna_hash,
+            "strategy_variant_dna_hash": (
+                strategy_variant_dna_hash
+            ),
             "experiment_hash": experiment,
             "base_experiment_hash": base_experiment,
             "run_version": run_version or "original",
@@ -3283,8 +3972,57 @@ class LabStore:
         )
         return dict(row["payload"]) if row is not None else None
 
-    def jobs(self) -> list[dict[str, Any]]:
-        return _payload_rows(self.database, "experiment_jobs")
+    def jobs(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        selected_statuses = {
+            str(value)
+            for value in (statuses or ())
+            if str(value)
+        }
+        if run_id:
+            payloads = _payload_rows_by_identity(
+                self.database,
+                "experiment_jobs",
+                key="run_id",
+                values=(run_id,),
+            )
+            if selected_statuses:
+                payloads = [
+                    payload
+                    for payload in payloads
+                    if str(payload.get("status") or "")
+                    in selected_statuses
+                ]
+            return payloads
+        fetch_by_status = getattr(
+            self.database,
+            "fetch_records_by_statuses",
+            None,
+        )
+        if selected_statuses and callable(fetch_by_status):
+            return [
+                dict(row["payload"])
+                for row in fetch_by_status(
+                    "experiment_jobs",
+                    statuses=selected_statuses,
+                )
+            ]
+        payloads = _payload_rows(
+            self.database,
+            "experiment_jobs",
+        )
+        if selected_statuses:
+            return [
+                payload
+                for payload in payloads
+                if str(payload.get("status") or "")
+                in selected_statuses
+            ]
+        return payloads
 
     def update_job(
         self,
@@ -3360,7 +4098,7 @@ class LabStore:
             CombinationState.VALIDATION_RUNNING.value,
         }
         recovered = 0
-        for job in self.jobs():
+        for job in self.jobs(statuses=stale_states):
             if job.get("status") in stale_states:
                 self.update_job(
                     job,
@@ -3384,8 +4122,13 @@ class LabStore:
             CombinationState.ERROR_FINAL.value,
             CombinationState.SUPERSEDED.value,
         }
+        incomplete_states = {
+            state.value
+            for state in CombinationState
+            if state.value not in terminal_states
+        }
         superseded = 0
-        for job in self.jobs():
+        for job in self.jobs(statuses=incomplete_states):
             if (
                 str(job.get("run_id")) != active_run_id
                 and str(job.get("status")) not in terminal_states
@@ -3431,7 +4174,16 @@ class LabStore:
         )
 
     def queue_status(self, *, run_id: str | None = None) -> dict[str, Any]:
-        jobs = [job for job in self.jobs() if run_id is None or str(job.get("run_id")) == run_id]
+        cached_path = self.paths.state / "queue_status.json"
+        if run_id is not None and cached_path.is_file():
+            cached = read_json(cached_path)
+            if str(cached.get("run_id") or "") == str(run_id):
+                return dict(cached)
+        jobs = (
+            self.jobs(run_id=run_id)
+            if run_id is not None
+            else self.jobs()
+        )
         counts = Counter(str(job.get("status")) for job in jobs)
         return {
             "updated_at": utc_iso(),
@@ -3560,8 +4312,30 @@ class LabStore:
             ],
         )
 
-    def leaderboard(self, *, include_synthetic: bool = False) -> list[dict[str, Any]]:
-        persisted = _payload_rows(self.database, "leaderboard_entries")
+    def leaderboard(
+        self,
+        *,
+        include_synthetic: bool = False,
+        strategy_hashes: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        selected_hashes = {
+            str(value)
+            for value in (strategy_hashes or ())
+            if str(value)
+        }
+        persisted = (
+            _payload_rows_by_identity(
+                self.database,
+                "leaderboard_entries",
+                key="strategy_dna_hash",
+                values=selected_hashes,
+            )
+            if selected_hashes
+            else _payload_rows(
+                self.database,
+                "leaderboard_entries",
+            )
+        )
         deduplicated: dict[str, dict[str, Any]] = {}
         for row in persisted:
             entry_id = str(row.get("entry_id") or row.get("external_id") or "")
@@ -3740,11 +4514,11 @@ class LabStore:
         from reporting.visualizations import VisualizationReporter
         from research.indicator_registry import indicator_coverage_report
 
-        scoped_jobs = [
-            row
-            for row in _payload_rows(self.database, "experiment_jobs")
-            if run_id is None or str(row.get("run_id")) == run_id
-        ]
+        scoped_jobs = (
+            self.jobs(run_id=run_id)
+            if run_id is not None
+            else self.jobs()
+        )
         experiment_hashes = {
             str(row.get("experiment_hash"))
             for row in scoped_jobs
@@ -3755,40 +4529,79 @@ class LabStore:
             for row in scoped_jobs
             if row.get("combination_id")
         }
-        leaderboard = [
-            row
-            for row in self.leaderboard()
-            if run_id is None
-            or str(row.get("combination_id")) in combination_ids
-        ]
-        events = _payload_rows(self.database, "lab_events")
-        if run_id is not None:
-            events = [
-                row for row in events if str(row.get("run_id")) == run_id
-            ]
+        strategy_hashes = {
+            str(row.get("strategy_dna_hash"))
+            for row in scoped_jobs
+            if row.get("strategy_dna_hash")
+        }
+        leaderboard = self.leaderboard(
+            strategy_hashes=(
+                strategy_hashes
+                if run_id is not None
+                else None
+            ),
+        )
+        events = (
+            _payload_rows_by_identity(
+                self.database,
+                "lab_events",
+                key="run_id",
+                values=(run_id,),
+            )
+            if run_id is not None
+            else _payload_rows(
+                self.database,
+                "lab_events",
+            )
+        )
         combinations = {
             str(row.get("combination_id")): row
-            for row in _payload_rows(self.database, "strategy_combinations")
+            for row in (
+                _payload_rows_by_identity(
+                    self.database,
+                    "strategy_combinations",
+                    key="combination_id",
+                    values=combination_ids,
+                )
+                if run_id is not None
+                else _payload_rows(
+                    self.database,
+                    "strategy_combinations",
+                )
+            )
         }
-        trials = _payload_rows(self.database, "experiment_trials")
-        folds = _payload_rows(self.database, "walk_forward_results")
-        gates = _payload_rows(self.database, "gate_results")
         if run_id is not None:
-            trials = [
-                row
-                for row in trials
-                if str(row.get("experiment_hash")) in experiment_hashes
-            ]
-            folds = [
-                row
-                for row in folds
-                if str(row.get("experiment_hash")) in experiment_hashes
-            ]
-            gates = [
-                row
-                for row in gates
-                if str(row.get("experiment_hash")) in experiment_hashes
-            ]
+            trials = _payload_rows_by_identity(
+                self.database,
+                "experiment_trials",
+                key="experiment_hash",
+                values=experiment_hashes,
+            )
+            folds = _payload_rows_by_identity(
+                self.database,
+                "walk_forward_results",
+                key="experiment_hash",
+                values=experiment_hashes,
+            )
+            gates = _payload_rows_by_identity(
+                self.database,
+                "gate_results",
+                key="experiment_hash",
+                values=experiment_hashes,
+            )
+        else:
+            trials = _payload_rows(
+                self.database,
+                "experiment_trials",
+            )
+            folds = _payload_rows(
+                self.database,
+                "walk_forward_results",
+            )
+            gates = _payload_rows(
+                self.database,
+                "gate_results",
+            )
         rank_rows = [
             {
                 "entry": row.get("strategy_dna_hash"),
@@ -4034,26 +4847,12 @@ def _synthetic_ohlcv(
     timeframe: str,
     seed: int,
 ) -> pd.DataFrame:
-    seconds = {
-        "5m": 300,
-        "15m": 900,
-        "30m": 1_800,
-        "1h": 3_600,
-        "2h": 7_200,
-        "4h": 14_400,
-        "6h": 21_600,
-        "8h": 28_800,
-        "12h": 43_200,
-        "1d": 86_400,
-        "1W": 604_800,
-        "1w": 604_800,
-        "1M": 2_592_000,
-    }[timeframe]
+    seconds = TIMEFRAME_SECONDS[normalize_timeframe(timeframe)]
     randomizer = np.random.default_rng(seed)
     index = pd.date_range(
         end=pd.Timestamp("2026-01-01", tz="UTC"),
         periods=rows,
-        freq=pd.Timedelta(seconds=seconds),
+            freq=pd.to_timedelta(seconds, unit="s"),
     )
     returns = randomizer.normal(0.00015, 0.012, rows)
     close = 100.0 * np.exp(np.cumsum(returns))
@@ -4094,9 +4893,40 @@ def fast_screen(
     trade_returns: list[float] = []
     gross_trade_returns: list[float] = []
     exit_reasons: Counter[str] = Counter()
+    condition_true_counts: Counter[str] = Counter()
     trade_entry_buckets: set[str] = set()
+    holding_bars: list[int] = []
+    holding_days: list[float] = []
+    per_market_funnels: dict[str, dict[str, Any]] = {}
+    aggregate_funnel: Counter[str] = Counter()
     trades = 0
     for market, frame in frames.items():
+        combination = getattr(strategy, "combination", None)
+        registry = getattr(strategy, "registry", {})
+        block_parameters = getattr(strategy, "block_parameters", {})
+        block_ids = tuple(getattr(combination, "block_ids", ()))
+        block_signals = {
+            block_id: registry[block_id].calculate(
+                frame,
+                block_parameters.get(block_id),
+            )
+            for block_id in block_ids
+        }
+        for block_id, block_signal in block_signals.items():
+            condition_true_counts[block_id] += int(block_signal.sum())
+        required_feature_mask = (
+            pd.concat(
+                [
+                    frame[list(registry[block_id].required_features)]
+                    .notna()
+                    .all(axis=1)
+                    for block_id in block_ids
+                ],
+                axis=1,
+            ).all(axis=1)
+            if block_ids
+            else pd.Series(True, index=frame.index)
+        )
         output = strategy.generate(frame)
         entry = output.entry.to_numpy(dtype=bool)
         exit_signal = (output.exit | output.avoid | output.reduce).to_numpy(dtype=bool)
@@ -4109,87 +4939,339 @@ def fast_screen(
         trailing_distances = output.trailing_distance.to_numpy(dtype=float)
         size_multipliers = output.size_multiplier.to_numpy(dtype=float)
         maximum_holding = output.maximum_holding_bars
-        holding = False
-        entry_price = 0.0
-        stop_price = 0.0
-        target_price = math.inf
-        trailing_distance = 0.0
-        trailing_stop: float | None = None
-        maximum_seen = -math.inf
-        bars_held = 0
-        size_multiplier = 1.0
-        entry_timestamp: pd.Timestamp | None = None
+        if len(frame) < 2:
+            continue
+        raw_entry_signals = int(entry.sum())
+        edge_triggered_signals = int(
+            (
+                pd.Series(entry, index=frame.index)
+                & ~pd.Series(entry, index=frame.index).shift(
+                    1,
+                    fill_value=False,
+                )
+            ).sum()
+        )
 
-        def close_trade(exit_price: float, reason: str) -> None:
-            nonlocal holding, trades
+        # Signals formed on bar t execute on the open of t+1.  Jump directly
+        # between eligible execution bars instead of interpreting every flat
+        # bar in Python.  Each live holding window remains fully inspected, so
+        # stop/target/trailing precedence is identical to the reference loop.
+        entry_bars = np.flatnonzero(entry[:-1]) + 1
+        signal_exit_bars = np.flatnonzero(exit_signal[:-1]) + 1
+        candidate_signal_bars = entry_bars - 1
+        valid_risk = (
+            np.isfinite(stop_distances[candidate_signal_bars])
+            & (stop_distances[candidate_signal_bars] > 0.0)
+            & np.isfinite(target_distances[candidate_signal_bars])
+            & (target_distances[candidate_signal_bars] > 0.0)
+        )
+        approved_entry_count = int(valid_risk.sum())
+        blocked_risk = int(len(entry_bars) - approved_entry_count)
+        blocked_existing_position = 0
+        market_trades = 0
+        market_trade_returns: list[float] = []
+        market_gross_trade_returns: list[float] = []
+        market_exit_reasons: Counter[str] = Counter()
+        market_holding_bars: list[int] = []
+        market_time_in_position_bars = 0
+        entry_cursor = 0
+        last_exit_bar = -1
+        while entry_cursor < len(entry_bars):
+            entry_cursor = max(
+                entry_cursor,
+                int(
+                    np.searchsorted(
+                        entry_bars,
+                        last_exit_bar,
+                        side="right",
+                    )
+                ),
+            )
+            if entry_cursor >= len(entry_bars):
+                break
+            entry_bar = int(entry_bars[entry_cursor])
+            entry_cursor += 1
+            stop_distance = float(stop_distances[entry_bar - 1])
+            target_distance = float(target_distances[entry_bar - 1])
+            if (
+                not math.isfinite(stop_distance)
+                or stop_distance <= 0
+                or not math.isfinite(target_distance)
+                or target_distance <= 0
+            ):
+                continue
+
+            entry_price = float(opens[entry_bar])
+            stop_price = entry_price - stop_distance
+            target_price = entry_price + target_distance
+            trailing_distance = max(
+                0.0,
+                float(trailing_distances[entry_bar - 1]),
+            )
+            size_multiplier = float(
+                np.clip(size_multipliers[entry_bar - 1], 0.0, 1.0)
+            )
+            terminal_bar = len(frame) - 1
+            holding_end = terminal_bar
+            maximum_holding_bar: int | None = None
+            if maximum_holding is not None:
+                requested_holding_bar = (
+                    entry_bar + int(maximum_holding) - 1
+                )
+                holding_end = min(terminal_bar, requested_holding_bar)
+                if requested_holding_bar <= terminal_bar:
+                    maximum_holding_bar = requested_holding_bar
+
+            segment_highs = highs[entry_bar : holding_end + 1]
+            segment_lows = lows[entry_bar : holding_end + 1]
+            prior_maximum = np.empty(len(segment_highs), dtype=float)
+            prior_maximum[0] = entry_price
+            if len(segment_highs) > 1:
+                prior_maximum[1:] = np.maximum(
+                    entry_price,
+                    np.maximum.accumulate(segment_highs[:-1]),
+                )
+            effective_stops = np.full(
+                len(segment_lows),
+                stop_price,
+                dtype=float,
+            )
+            if trailing_distance > 0.0:
+                effective_stops = np.maximum(
+                    effective_stops,
+                    prior_maximum - trailing_distance,
+                )
+
+            signal_position = int(
+                np.searchsorted(
+                    signal_exit_bars,
+                    entry_bar,
+                    side="left",
+                )
+            )
+            signal_bar = (
+                int(signal_exit_bars[signal_position])
+                if signal_position < len(signal_exit_bars)
+                and int(signal_exit_bars[signal_position]) <= holding_end
+                else None
+            )
+            stop_offsets = np.flatnonzero(segment_lows <= effective_stops)
+            target_offsets = np.flatnonzero(segment_highs >= target_price)
+            stop_bar = (
+                entry_bar + int(stop_offsets[0])
+                if len(stop_offsets)
+                else None
+            )
+            target_bar = (
+                entry_bar + int(target_offsets[0])
+                if len(target_offsets)
+                else None
+            )
+            candidates: list[tuple[int, int, str, float]] = []
+            if signal_bar is not None:
+                candidates.append(
+                    (
+                        signal_bar,
+                        0,
+                        "SIGNAL_EXIT_NEXT_OPEN",
+                        float(opens[signal_bar]),
+                    )
+                )
+            if stop_bar is not None:
+                candidates.append(
+                    (
+                        stop_bar,
+                        1,
+                        "STOP_OR_PRIOR_TRAILING_STOP",
+                        float(effective_stops[stop_bar - entry_bar]),
+                    )
+                )
+            if target_bar is not None:
+                candidates.append(
+                    (
+                        target_bar,
+                        2,
+                        "TARGET",
+                        target_price,
+                    )
+                )
+            if (
+                maximum_holding_bar is not None
+                and maximum_holding_bar <= terminal_bar
+            ):
+                candidates.append(
+                    (
+                        maximum_holding_bar,
+                        3,
+                        "MAXIMUM_HOLDING",
+                        float(closes[maximum_holding_bar]),
+                    )
+                )
+            if candidates:
+                exit_bar, _, reason, exit_price = min(candidates)
+            else:
+                exit_bar = terminal_bar
+                reason = "TERMINAL_LIQUIDATION"
+                exit_price = float(closes[terminal_bar])
+
+            blocked_start = int(
+                np.searchsorted(entry_bars, entry_bar, side="right")
+            )
+            blocked_end = int(
+                np.searchsorted(entry_bars, exit_bar, side="right")
+            )
+            blocked_existing_position += max(
+                0,
+                blocked_end - blocked_start,
+            )
+            held_bars = max(1, int(exit_bar - entry_bar + 1))
+            held_days = (
+                pd.Timestamp(frame.index[exit_bar])
+                - pd.Timestamp(frame.index[entry_bar])
+            ).total_seconds() / 86_400.0
+            holding_bars.append(held_bars)
+            holding_days.append(max(0.0, float(held_days)))
+            market_holding_bars.append(held_bars)
+            market_time_in_position_bars += held_bars
             gross_return = exit_price / entry_price - 1.0
-            gross_trade_returns.append(size_multiplier * gross_return)
-            trade_returns.append(
+            gross_sized_return = size_multiplier * gross_return
+            net_sized_return = (
                 size_multiplier * gross_return
                 - size_multiplier * round_trip_cost
             )
+            gross_trade_returns.append(gross_sized_return)
+            trade_returns.append(net_sized_return)
+            market_gross_trade_returns.append(gross_sized_return)
+            market_trade_returns.append(net_sized_return)
             exit_reasons[reason] += 1
-            if entry_timestamp is not None:
-                iso = entry_timestamp.isocalendar()
-                trade_entry_buckets.add(
-                    f"{market}:{int(iso.year):04d}-W{int(iso.week):02d}"
-                )
-            trades += 1
-            holding = False
-
-        for index in range(1, len(frame)):
-            if not holding and entry[index - 1]:
-                stop_distance = float(stop_distances[index - 1])
-                target_distance = float(target_distances[index - 1])
-                if (
-                    not math.isfinite(stop_distance)
-                    or stop_distance <= 0
-                    or not math.isfinite(target_distance)
-                    or target_distance <= 0
-                ):
-                    continue
-                holding = True
-                entry_timestamp = pd.Timestamp(frame.index[index])
-                entry_price = float(opens[index])
-                stop_price = entry_price - stop_distance
-                target_price = entry_price + target_distance
-                trailing_distance = max(
-                    0.0,
-                    float(trailing_distances[index - 1]),
-                )
-                trailing_stop = None
-                maximum_seen = entry_price
-                bars_held = 0
-                size_multiplier = float(np.clip(size_multipliers[index - 1], 0.0, 1.0))
-            if not holding:
-                continue
-            if exit_signal[index - 1]:
-                close_trade(float(opens[index]), "SIGNAL_EXIT_NEXT_OPEN")
-                continue
-            bars_held += 1
-            effective_stop = max(
-                stop_price,
-                trailing_stop if trailing_stop is not None else -math.inf,
+            market_exit_reasons[reason] += 1
+            iso = pd.Timestamp(frame.index[entry_bar]).isocalendar()
+            trade_entry_buckets.add(
+                f"{market}:{int(iso.year):04d}-W{int(iso.week):02d}"
             )
-            stop_hit = lows[index] <= effective_stop
-            target_hit = highs[index] >= target_price
-            if stop_hit:
-                # Conservative same-bar ordering: stop wins if both are touched.
-                close_trade(effective_stop, "STOP_OR_PRIOR_TRAILING_STOP")
-                continue
-            if target_hit:
-                close_trade(target_price, "TARGET")
-                continue
-            maximum_seen = max(maximum_seen, float(highs[index]))
-            if trailing_distance > 0:
-                trailing_stop = max(
-                    trailing_stop or -math.inf,
-                    maximum_seen - trailing_distance,
-                )
-            if maximum_holding is not None and bars_held >= maximum_holding:
-                close_trade(float(closes[index]), "MAXIMUM_HOLDING")
-        if holding:
-            close_trade(float(closes[-1]), "TERMINAL_LIQUIDATION")
+            trades += 1
+            market_trades += 1
+            last_exit_bar = exit_bar
+        market_values = np.asarray(market_trade_returns, dtype=float)
+        market_gross_values = np.asarray(
+            market_gross_trade_returns,
+            dtype=float,
+        )
+        market_gross_profit = float(
+            market_values[market_values > 0.0].sum()
+        )
+        market_gross_loss = float(
+            -market_values[market_values < 0.0].sum()
+        )
+        market_profit_factor = (
+            market_gross_profit / market_gross_loss
+            if market_gross_loss > 0.0
+            else math.inf
+            if market_gross_profit > 0.0
+            else 0.0
+        )
+        market_funnel = {
+            "market": market,
+            "raw_calendar_start": pd.Timestamp(frame.index[0]).isoformat(),
+            "raw_calendar_end": pd.Timestamp(frame.index[-1]).isoformat(),
+            "raw_calendar_days": float(
+                (
+                    pd.Timestamp(frame.index[-1])
+                    - pd.Timestamp(frame.index[0])
+                ).total_seconds()
+                / 86_400.0
+            ),
+            "raw_bar_count": int(len(frame)),
+            "closed_bar_count": int(len(frame)),
+            "post_quality_bar_count": int(len(frame)),
+            "post_warmup_bar_count": int(required_feature_mask.sum()),
+            "post_alignment_bar_count": int(len(frame)),
+            "tradable_bar_count": int(len(frame)),
+            "raw_entry_signal_count": raw_entry_signals,
+            "edge_trigger_count": edge_triggered_signals,
+            "deduplicated_signal_count": edge_triggered_signals,
+            "entry_candidate_count": int(len(entry_bars)),
+            "blocked_existing_position": int(blocked_existing_position),
+            "blocked_portfolio_position_limit": 0,
+            "blocked_cooldown": 0,
+            "blocked_regime": 0,
+            "blocked_missing_feature": int(
+                len(frame) - required_feature_mask.sum()
+            ),
+            "blocked_risk": blocked_risk,
+            "blocked_liquidity": 0,
+            "blocked_minimum_order": 0,
+            "blocked_correlation": 0,
+            "approved_entry_count": approved_entry_count,
+            "submitted_entry_count": market_trades,
+            "filled_entry_count": market_trades,
+            "filled_exit_count": market_trades,
+            "completed_round_trip_count": market_trades,
+            "gross_return": (
+                float(np.prod(1.0 + market_gross_values) - 1.0)
+                if len(market_gross_values)
+                else 0.0
+            ),
+            "net_return": (
+                float(np.prod(1.0 + market_values) - 1.0)
+                if len(market_values)
+                else 0.0
+            ),
+            "net_expectancy": (
+                float(market_values.mean())
+                if len(market_values)
+                else 0.0
+            ),
+            "profit_factor": float(market_profit_factor),
+            "winning_round_trips": int((market_values > 0.0).sum()),
+            "losing_round_trips": int((market_values < 0.0).sum()),
+            "open_at_end_count": int(
+                market_exit_reasons["TERMINAL_LIQUIDATION"] > 0
+            ),
+            "terminal_liquidation_count": int(
+                market_exit_reasons["TERMINAL_LIQUIDATION"]
+            ),
+            "average_holding_bars": (
+                float(np.mean(market_holding_bars))
+                if market_holding_bars
+                else 0.0
+            ),
+            "median_holding_bars": (
+                float(np.median(market_holding_bars))
+                if market_holding_bars
+                else 0.0
+            ),
+            "maximum_holding_bars": (
+                int(max(market_holding_bars))
+                if market_holding_bars
+                else 0
+            ),
+            "time_in_market": float(
+                market_time_in_position_bars / max(1, len(frame))
+            ),
+            "condition_true_counts": {
+                block_id: int(block_signal.sum())
+                for block_id, block_signal in block_signals.items()
+            },
+        }
+        per_market_funnels[market] = market_funnel
+        for key, value in market_funnel.items():
+            if (
+                isinstance(value, int | float)
+                and key
+                not in {
+                    "raw_calendar_days",
+                    "average_holding_bars",
+                    "median_holding_bars",
+                    "maximum_holding_bars",
+                    "time_in_market",
+                    "gross_return",
+                    "net_return",
+                    "net_expectancy",
+                    "profit_factor",
+                }
+            ):
+                aggregate_funnel[key] += value
     values = np.asarray(trade_returns, dtype=float)
     gross_values = np.asarray(gross_trade_returns, dtype=float)
     cumulative = float(np.prod(1.0 + values) - 1.0) if len(values) else 0.0
@@ -4200,7 +5282,57 @@ def fast_screen(
     )
     volatility = float(values.std(ddof=0)) if len(values) else 0.0
     mean = float(values.mean()) if len(values) else 0.0
+    gross_profit = float(values[values > 0.0].sum())
+    gross_loss = float(-values[values < 0.0].sum())
+    profit_factor = (
+        gross_profit / gross_loss
+        if gross_loss > 0.0
+        else math.inf
+        if gross_profit > 0.0
+        else 0.0
+    )
     score = mean / volatility * math.sqrt(len(values)) if volatility > 0 else mean
+    total_raw_signals = int(aggregate_funnel["raw_entry_signal_count"])
+    total_candidates = int(aggregate_funnel["entry_candidate_count"])
+    total_tradable_bars = int(aggregate_funnel["tradable_bar_count"])
+    signal_funnel = {
+        **dict(sorted(aggregate_funnel.items())),
+        "condition_true_counts": dict(sorted(condition_true_counts.items())),
+        "average_holding_bars": (
+            float(np.mean(holding_bars)) if holding_bars else 0.0
+        ),
+        "median_holding_bars": (
+            float(np.median(holding_bars)) if holding_bars else 0.0
+        ),
+        "p75_holding_bars": (
+            float(np.percentile(holding_bars, 75)) if holding_bars else 0.0
+        ),
+        "p90_holding_bars": (
+            float(np.percentile(holding_bars, 90)) if holding_bars else 0.0
+        ),
+        "maximum_holding_bars": int(max(holding_bars)) if holding_bars else 0,
+        "average_holding_days": (
+            float(np.mean(holding_days)) if holding_days else 0.0
+        ),
+        "median_holding_days": (
+            float(np.median(holding_days)) if holding_days else 0.0
+        ),
+        "maximum_holding_days": (
+            float(max(holding_days)) if holding_days else 0.0
+        ),
+        "opportunity_frequency": float(
+            total_raw_signals / max(1, total_tradable_bars)
+        ),
+        "signal_conversion_rate": float(
+            trades / max(1, total_raw_signals)
+        ),
+        "entry_conversion_rate": float(
+            trades / max(1, total_candidates)
+        ),
+        "exit_reason_distribution": dict(sorted(exit_reasons.items())),
+        "trade_definition": "COMPLETED_ROUND_TRIP",
+        "per_market": per_market_funnels,
+    }
     return {
         "source": "SCREENING_ONLY",
         "status": "COMPLETED",
@@ -4214,6 +5346,10 @@ def fast_screen(
         "gross_screening_return": gross_cumulative,
         "screening_return": cumulative,
         "cost_drag": gross_cumulative - cumulative,
+        "net_expectancy": mean,
+        "profit_factor": float(profit_factor),
+        "winning_round_trips": int((values > 0.0).sum()),
+        "losing_round_trips": int((values < 0.0).sum()),
         "round_trip_cost": float(round_trip_cost),
         "exit_reason_counts": dict(sorted(exit_reasons.items())),
         "terminal_liquidations": int(exit_reasons["TERMINAL_LIQUIDATION"]),
@@ -4222,6 +5358,7 @@ def fast_screen(
             sorted(trade_entry_buckets),
             length=64,
         ),
+        "signal_funnel": signal_funnel,
         "screening_score": float(score),
         "paper_candidate_permitted": False,
     }
@@ -4330,17 +5467,451 @@ ECONOMIC_HYPOTHESIS_TEMPLATES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Bounded lower-timeframe family used by the permanent practical autopilot.
+# Every chromosome contains one primary entry, at most one regime filter and at
+# most two confirmations/context filters.  The canonical exit profile supplies
+# the bounded ATR stop, target, trailing stop and maximum holding period.
+LOWER_TIMEFRAME_MTF_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "MTF_DONCHIAN_VOLUME_TREND": (
+        "htf_1d_regime_bullish",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "adx_trend_strength",
+    ),
+    "MTF_TREND_PULLBACK": (
+        "htf_1d_regime_bullish",
+        "rsi_recovery",
+        "ema20_above_ema50",
+        "ema20_reclaim",
+    ),
+    "RANGE_BOLLINGER_REVERSION": (
+        "choppiness_high",
+        "bollinger_lower_reversion",
+        "volume_zscore_positive",
+    ),
+    "MTF_VOLATILITY_EXPANSION": (
+        "donchian20_breakout",
+        "prior_squeeze_within_12",
+        "relative_volume_expansion",
+    ),
+    "MTF_LIQUIDITY_SWEEP_RECOVERY": (
+        "htf_1d_regime_bullish",
+        "bullish_liquidity_sweep",
+        "volume_zscore_positive",
+        "price_above_vwap",
+    ),
+    "MTF_BTC_RELATIVE_MOMENTUM": (
+        "htf_1d_regime_bullish",
+        "positive_return_20",
+        "btc_relative_momentum",
+        "btc_relative_persistence",
+    ),
+    "WEEKLY_4H_TREND_PULLBACK": (
+        "htf_1W_regime_bullish",
+        "rsi_recovery",
+        "ema20_above_ema50",
+        "relative_volume_expansion",
+    ),
+    "WEEKLY_4H_VOLUME_BREAKOUT": (
+        "htf_1W_regime_bullish",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "adx_trend_strength",
+    ),
+}
+
+# Normal EUR-spot swing hypotheses.  These use the same causal feature and
+# execution contracts as the rest of the lab: the 1d/4h blocks are aligned to
+# their last fully closed candle, 15m/1h supplies the entry, and microstructure
+# remains an execution-quality gate rather than a source of backtest alpha.
+# Bear-regime templates are explicitly long-only recovery trades; they never
+# imply a short, margin or derivatives position.
+NORMAL_SPOT_SWING_MTF_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "NORMAL_SWING_15M_TREND_RETEST": (
+        "htf_1d_regime_bullish",
+        "rsi_recovery",
+        "htf_4h_trend_bullish",
+        "ema20_reclaim",
+    ),
+    "NORMAL_SWING_15M_BREAKOUT_RETEST": (
+        "htf_1d_regime_bullish",
+        "donchian20_breakout",
+        "htf_4h_trend_bullish",
+        "relative_volume_expansion",
+    ),
+    "NORMAL_SWING_15M_LIQUIDITY_SWEEP": (
+        "htf_1d_regime_bullish",
+        "bullish_liquidity_sweep",
+        "htf_4h_trend_bullish",
+        "volume_zscore_positive",
+    ),
+    "NORMAL_SWING_15M_RANGE_REVERSION": (
+        "choppiness_high",
+        "bollinger_lower_reversion",
+        "bullish_pin_bar",
+        "volume_zscore_positive",
+    ),
+    "BEAR_SPOT_15M_LIQUIDITY_RECOVERY": (
+        "htf_1d_regime_bearish",
+        "bullish_liquidity_sweep",
+        "htf_4h_trend_bullish",
+        "volume_zscore_positive",
+    ),
+    "BEAR_SPOT_15M_FAILED_BREAKDOWN": (
+        "htf_1d_regime_bearish",
+        "failed_breakout_reclaim",
+        "htf_4h_trend_bullish",
+        "chaikin_money_flow_positive",
+    ),
+    "BEAR_SPOT_1H_OVERSOLD_RECLAIM": (
+        "htf_1d_regime_bearish",
+        "rsi_recovery",
+        "htf_4h_trend_bullish",
+        "price_above_vwap",
+    ),
+}
+
+# Broad, bounded classical catalog.  Every template is executable through the
+# canonical feature pipeline/backtester and contains one primary long entry,
+# no more than one regime block, no more than two confirmations, and an
+# explicit signal exit where the economic family needs one.  ATR stop, target,
+# trailing and time-exit policies remain canonical CombinatorialStrategy DNA.
+CLASSICAL_ECONOMIC_FAMILY_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "MA_TREND_PULLBACK": (
+        "htf_1d_regime_bullish",
+        "ema20_bullish_reclaim",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "DONCHIAN_20_TREND_BREAKOUT": (
+        "price_above_ema200",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "fractal_low_breakdown",
+    ),
+    "DONCHIAN_55_TREND_BREAKOUT": (
+        "price_above_ema200",
+        "donchian55_breakout",
+        "trend_efficiency_high",
+        "fractal_low_breakdown",
+    ),
+    "SUPERTREND_CONTINUATION": (
+        "htf_1d_regime_bullish",
+        "supertrend_bullish_flip",
+        "adx_trend_strength",
+        "bearish_bos",
+    ),
+    "ICHIMOKU_CONTINUATION": (
+        "ichimoku_bullish_reclaim",
+        "adx_trend_strength",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "ADX_VORTEX_TREND": (
+        "price_above_ema200",
+        "vortex_bullish_cross",
+        "adx_trend_strength",
+        "bearish_bos",
+    ),
+    "REGRESSION_TREND": (
+        "regression_slope_positive",
+        "macd_bullish_cross",
+        "regression_quality",
+        "negative_return_exit",
+    ),
+    "MULTI_HORIZON_TREND": (
+        "ema50_above_ema200",
+        "multi_horizon_momentum",
+        "relative_volume_expansion",
+        "negative_return_exit",
+    ),
+    "ABSOLUTE_MOMENTUM": (
+        "price_above_ema200",
+        "positive_return_20",
+    ),
+    "RELATIVE_MOMENTUM": (
+        "htf_1d_regime_bullish",
+        "btc_relative_momentum_entry",
+        "btc_relative_persistence",
+        "negative_return_exit",
+    ),
+    "VOLATILITY_ADJUSTED_MOMENTUM": (
+        "price_above_ema200",
+        "volatility_adjusted_momentum",
+        "rolling_volatility_low",
+        "negative_return_exit",
+    ),
+    "MOMENTUM_ACCELERATION": (
+        "htf_1d_regime_bullish",
+        "momentum_acceleration_positive",
+        "ema20_above_ema50",
+        "rsi_overbought_exit",
+    ),
+    "MOMENTUM_AFTER_CONSOLIDATION": (
+        "prior_squeeze_within_12",
+        "momentum_acceleration_positive",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "BOLLINGER_MEAN_REVERSION": (
+        "choppiness_high",
+        "bollinger_lower_reversion",
+        "bullish_pin_bar",
+        "rsi_overbought_exit",
+    ),
+    "KELTNER_MEAN_REVERSION": (
+        "hurst_mean_reverting_regime",
+        "keltner_lower_reclaim",
+        "bullish_pin_bar",
+        "rsi_overbought_exit",
+    ),
+    "VWAP_MEAN_REVERSION": (
+        "choppiness_high",
+        "vwap_bullish_reclaim",
+        "chaikin_money_flow_positive",
+        "rsi_overbought_exit",
+    ),
+    "ROBUST_Z_REVERSION": (
+        "hurst_mean_reverting_regime",
+        "robust_zscore_reclaim",
+        "relative_volume_expansion",
+        "rsi_overbought_exit",
+    ),
+    "BTC_RESIDUAL_REVERSION": (
+        "htf_1d_regime_bullish",
+        "btc_relative_reversal_reclaim",
+        "relative_volume_expansion",
+        "negative_return_exit",
+    ),
+    "BOLLINGER_KELTNER_SQUEEZE": (
+        "prior_squeeze_within_12",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "ATR_EXPANSION_BREAKOUT": (
+        "price_above_ema200",
+        "volatility_expansion_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "LOW_VOL_TREND_CONTINUATION": (
+        "atr_low_regime",
+        "macd_bullish_cross",
+        "ema20_above_ema50",
+        "negative_return_exit",
+    ),
+    "VOLATILITY_SHOCK_REVERSAL": (
+        "atr_high_regime",
+        "failed_breakout_reclaim",
+        "bullish_pin_bar",
+        "bearish_bos",
+    ),
+    "RVOL_BREAKOUT": (
+        "price_above_ema200",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "VOLUME_DRYUP_PULLBACK": (
+        "htf_1d_regime_bullish",
+        "ema20_bullish_reclaim",
+        "prior_volume_dryup",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "OBV_CONFIRMED_BREAKOUT": (
+        "price_above_ema200",
+        "donchian20_breakout",
+        "obv_breakout_confirmation",
+        "bearish_bos",
+    ),
+    "CMF_CONTINUATION": (
+        "htf_1d_regime_bullish",
+        "cmf_bullish_reclaim",
+        "trend_efficiency_high",
+        "bearish_bos",
+    ),
+    "MFI_RECLAIM": (
+        "htf_1d_regime_bullish",
+        "mfi_bullish_reclaim",
+        "ema20_above_ema50",
+        "rsi_overbought_exit",
+    ),
+    "VWAP_RECLAIM": (
+        "price_above_ema200",
+        "vwap_bullish_reclaim",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "ANCHORED_VWAP_PULLBACK": (
+        "htf_1d_regime_bullish",
+        "anchored_vwap_bullish_reclaim",
+        "chaikin_money_flow_positive",
+        "bearish_bos",
+    ),
+    "WILLIAMS_FRACTAL_BREAKOUT": (
+        "price_above_ema200",
+        "fractal_high_breakout",
+        "fractal_amplitude_filter",
+    ),
+    "FRACTAL_VOLUME_BREAKOUT": (
+        "htf_1d_regime_bullish",
+        "fractal_high_breakout",
+        "fractal_breakout_volume_confirmed",
+    ),
+    "FRACTAL_COMPRESSION_BREAKOUT": (
+        "fractal_density_low",
+        "fractal_high_breakout",
+        "relative_volume_expansion",
+    ),
+    "FRACTAL_CLUSTER_SUPPORT": (
+        "price_above_ema200",
+        "bullish_bos",
+        "fractal_5_low_confirmed",
+    ),
+    "MULTISCALE_FRACTAL_AGREEMENT": (
+        "fractal_mtf_bullish",
+        "fractal_high_breakout",
+        "fractal_amplitude_filter",
+    ),
+    "HURST_TREND": (
+        "hurst_trending_regime",
+        "donchian20_breakout",
+        "trend_efficiency_high",
+        "bearish_bos",
+    ),
+    "HURST_MEAN_REVERSION": (
+        "hurst_mean_reverting_regime",
+        "robust_zscore_reclaim",
+        "bullish_pin_bar",
+        "rsi_overbought_exit",
+    ),
+    "FRACTAL_DIMENSION_TREND": (
+        "fractal_dimension_trend_regime",
+        "donchian20_breakout",
+        "wavelet_trend_agreement",
+        "fractal_low_breakdown",
+    ),
+    "FRACTAL_DIMENSION_RANGE": (
+        "high_fractal_dimension_regime",
+        "bollinger_lower_reversion",
+        "bullish_pin_bar",
+        "rsi_overbought_exit",
+    ),
+    "WAVELET_TREND_AGREEMENT": (
+        "htf_1d_regime_bullish",
+        "positive_return_20",
+        "wavelet_trend_agreement",
+    ),
+    "LOW_ENTROPY_TREND": (
+        "low_entropy_trend_regime",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "BOS_CONTINUATION": (
+        "htf_1d_regime_bullish",
+        "bullish_bos",
+        "relative_volume_expansion",
+    ),
+    "CHOCH_REVERSAL": (
+        "high_fractal_dimension_regime",
+        "bullish_choch",
+        "bullish_pin_bar",
+    ),
+    "LIQUIDITY_SWEEP_RECLAIM": (
+        "htf_1d_regime_bullish",
+        "bullish_liquidity_sweep",
+        "relative_volume_expansion",
+    ),
+    "FAILED_BREAKOUT_REVERSAL": (
+        "choppiness_high",
+        "failed_breakout_reclaim",
+        "chaikin_money_flow_positive",
+        "bearish_bos",
+    ),
+    "HIGHER_LOW_CONTINUATION": (
+        "htf_1d_regime_bullish",
+        "higher_low_continuation",
+        "relative_volume_expansion",
+        "fractal_low_breakdown",
+    ),
+    "INSIDE_BAR_COMPRESSION": (
+        "price_above_ema200",
+        "inside_bar_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "PREVIOUS_DAY_BREAKOUT": (
+        "htf_1d_regime_bullish",
+        "previous_day_high_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "PREVIOUS_WEEK_BREAKOUT": (
+        "htf_1W_regime_bullish",
+        "previous_week_high_breakout",
+        "trend_efficiency_high",
+        "bearish_bos",
+    ),
+    "BREADTH_CONFIRMED_MOMENTUM": (
+        "breadth_above_ema50",
+        "positive_return_20",
+        "btc_relative_momentum",
+    ),
+    "BREADTH_CONFIRMED_BREAKOUT": (
+        "breadth_above_ema200",
+        "donchian20_breakout",
+        "relative_volume_expansion",
+        "bearish_bos",
+    ),
+    "CORRELATION_BREAKDOWN": (
+        "htf_1d_regime_bullish",
+        "btc_relative_momentum_entry",
+        "trend_efficiency_high",
+        "negative_return_exit",
+    ),
+}
+
+# These interfaces are intentionally visible but cannot enter the executable
+# pool until point-in-time source data exists.  No candle proxy is substituted.
+CLASSICAL_DISABLED_FAMILY_INTERFACES: dict[str, str] = {
+    "VALUE_AREA_BREAKOUT": "MISSING_HISTORICAL_TRADE_LEVEL_VOLUME_PROFILE",
+    "VAL_REJECTION": "MISSING_HISTORICAL_TRADE_LEVEL_VOLUME_PROFILE",
+    "LVN_CONTINUATION": "MISSING_HISTORICAL_TRADE_LEVEL_VOLUME_PROFILE",
+    "CVD_DIVERGENCE": "MISSING_POINT_IN_TIME_TRADE_DIRECTION_DATA",
+    "SPOT_LED_BREAKOUT": "MISSING_POINT_IN_TIME_SPOT_PERPETUAL_FLOW_DATA",
+    "ABSORPTION_REVERSAL": "MISSING_POINT_IN_TIME_TRADE_AND_DEPTH_DATA",
+    "ORDERBOOK_IMBALANCE": "MISSING_POINT_IN_TIME_L2_ORDERBOOK_HISTORY",
+    "MICROPRICE_CONTINUATION": "MISSING_POINT_IN_TIME_L2_ORDERBOOK_HISTORY",
+    "VPIN_RISK_BLOCKER": "MISSING_POINT_IN_TIME_TRADE_CLASSIFICATION",
+    "CROWDING_AVOIDANCE": "MISSING_POINT_IN_TIME_FUNDING_AND_OPEN_INTEREST",
+    "DELEVERAGING_RECOVERY": "MISSING_POINT_IN_TIME_LIQUIDATIONS_AND_OPEN_INTEREST",
+    "OI_CONFIRMED_TREND": "MISSING_POINT_IN_TIME_OPEN_INTEREST_HISTORY",
+    "BASIS_NORMALIZATION": "MISSING_POINT_IN_TIME_BASIS_HISTORY",
+    "LIQUIDATION_EXHAUSTION": "MISSING_POINT_IN_TIME_LIQUIDATION_HISTORY",
+    "LEADER_LAGGARD_CONTINUATION": "CROSS_ASSET_EVENT_ENGINE_NOT_YET_CANONICAL",
+    "DISPERSION_ROTATION": "CROSS_SECTIONAL_WEIGHT_ENGINE_REQUIRED",
+}
+
 
 def economic_hypothesis_family(combination: StrategyCombination) -> str:
     """Map arbitrary block DNA to its nearest declared economic hypothesis."""
 
     selected = set(combination.block_ids)
+    templates = {
+        **ECONOMIC_HYPOTHESIS_TEMPLATES,
+        **LOWER_TIMEFRAME_MTF_TEMPLATES,
+        **NORMAL_SPOT_SWING_MTF_TEMPLATES,
+        **CLASSICAL_ECONOMIC_FAMILY_TEMPLATES,
+    }
     scored = [
         (
             len(selected.intersection(template)) / max(1, len(set(template))),
             family,
         )
-        for family, template in ECONOMIC_HYPOTHESIS_TEMPLATES.items()
+        for family, template in templates.items()
     ]
     best_score, best_family = max(scored, default=(0.0, "UNCLASSIFIED"))
     if best_score > 0:
@@ -4438,11 +6009,17 @@ def diverse_screening_survivors(
 class LabRunner:
     """Resumable staged runner with a bounded asynchronous worker pool."""
 
-    def __init__(self, settings: Settings, *, store: LabStore | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        store: LabStore | None = None,
+        registry: Mapping[str, SignalBlock] | None = None,
+    ) -> None:
         self.settings = settings
         self.store = store or LabStore(settings)
         self.paths = self.store.paths
-        self.registry = signal_block_registry()
+        self.registry = dict(registry or signal_block_registry())
         self.generator = CombinationGenerator(self.registry)
         self.feature_definition_hash = stable_hash(feature_registry(), length=64)
         self.instance_id = f"lab-{stable_hash([socket.gethostname(), os.getpid(), utc_iso()])[:20]}"
@@ -4457,6 +6034,40 @@ class LabRunner:
             "selected": [],
             "excluded_for_data": [],
             "requested_size": 0,
+        }
+        self._run_queue_totals: dict[str, int] = {}
+
+    def _queue_snapshot(
+        self,
+        *,
+        run_id: str,
+        completed_jobs: int,
+        failed_jobs: int,
+    ) -> dict[str, Any]:
+        total = max(
+            int(self._run_queue_totals.get(run_id, 0)),
+            int(completed_jobs) + int(failed_jobs),
+        )
+        remaining = max(
+            0,
+            total - int(completed_jobs) - int(failed_jobs),
+        )
+        by_status = {
+            key: value
+            for key, value in {
+                "COMPLETED": int(completed_jobs),
+                "FAILED": int(failed_jobs),
+                "REMAINING": remaining,
+            }.items()
+            if value
+        }
+        return {
+            "updated_at": utc_iso(),
+            "total": total,
+            "by_status": by_status,
+            "remaining_work": remaining,
+            "run_id": run_id,
+            "accounting_source": "IN_MEMORY_ACTIVE_RUN",
         }
 
     def _acquire_lock(self) -> int:
@@ -4552,7 +6163,11 @@ class LabRunner:
             "heartbeat_at": utc_iso(),
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,
-            "queue": self.store.queue_status(run_id=run_id),
+            "queue": self._queue_snapshot(
+                run_id=run_id,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
+            ),
         }
         atomic_write_json(self.heartbeat_path, payload)
         atomic_write_json(self.queue_status_path, payload["queue"])
@@ -4608,11 +6223,27 @@ class LabRunner:
                 for timeframe, by_market in current["data_provenance"].items()
                 if isinstance(by_market, Mapping)
             }
+        cached_queue = (
+            read_json(self.queue_status_path)
+            if self.queue_status_path.is_file()
+            else None
+        )
+        current_run_id = (
+            str(current["run_id"])
+            if current.get("run_id")
+            else None
+        )
         return current | {
             "lock_present": self.lock_path.is_file(),
             "control": self._control_action().value,
-            "queue": self.store.queue_status(
-                run_id=(str(current["run_id"]) if current.get("run_id") else None)
+            "queue": (
+                cached_queue
+                if cached_queue
+                and str(cached_queue.get("run_id") or "")
+                == str(current_run_id or "")
+                else self.store.queue_status(
+                    run_id=current_run_id
+                )
             ),
             "heartbeat": (
                 read_json(self.heartbeat_path) if self.heartbeat_path.is_file() else None
@@ -4898,6 +6529,7 @@ class LabRunner:
                     if record.closed
                 ]
                 frame = pd.DataFrame(rows)
+                native_validation_error: str | None = None
                 try:
                     frame = validate_ohlcv(
                         frame,
@@ -4905,17 +6537,12 @@ class LabRunner:
                         closed_candles_only=True,
                     )
                 except DataValidationError as exc:
-                    prepared.append(
-                        {
-                            "market": market,
-                            "timeframe": timeframe,
-                            "status": "BLOCKED_DATA_UNAVAILABLE",
-                            "reason_code": type(exc).__name__,
-                            "provider_errors": errors,
-                            "synthetic_fallback": False,
-                        }
-                    )
-                    continue
+                    # A provider-native coarse interval can be incomplete even
+                    # when a deeper, real, closed-candle local series is
+                    # available. Keep the native failure visible, but still
+                    # allow the causal complete-bin resampling path below.
+                    native_validation_error = type(exc).__name__
+                    frame = pd.DataFrame()
                 derivation: dict[str, Any] | None = None
                 for source_timeframe in sorted(
                     (
@@ -4956,7 +6583,12 @@ class LabRunner:
                         )
                     except (DataValidationError, OSError, ValueError):
                         continue
-                    if len(derived) <= len(frame):
+                    # A deeper local source can provide materially more history,
+                    # but it must never make the operational edge of the dataset
+                    # older.  This previously allowed a long, stale 5m cache to
+                    # replace a shorter native 15m series that already contained
+                    # the latest fully closed Bitvavo candles.
+                    if not prefer_deeper_derived_frame(frame, derived):
                         continue
                     frame = derived
                     derivation = {
@@ -4970,6 +6602,21 @@ class LabRunner:
                         "complete_bins_only": True,
                     }
                     break
+                if frame.empty:
+                    prepared.append(
+                        {
+                            "market": market,
+                            "timeframe": timeframe,
+                            "status": "BLOCKED_DATA_UNAVAILABLE",
+                            "reason_code": (
+                                native_validation_error
+                                or "NO_VALID_NATIVE_OR_LOCAL_REAL_DATA"
+                            ),
+                            "provider_errors": errors,
+                            "synthetic_fallback": False,
+                        }
+                    )
+                    continue
                 path = self.settings.paths.processed_data_dir / f"{market}_{timeframe}.parquet"
                 saved, manifest = save_ohlcv(
                     frame,
@@ -5075,7 +6722,38 @@ class LabRunner:
             if block_id in combination.block_ids:
                 relevant.append((block_id, parameter_name, tuple(values)))
         if not relevant:
-            generated_sensitivity: list[tuple[str | None, dict[str, Any]]] = [(None, base)]
+            generated_sensitivity: list[
+                tuple[str | None, dict[str, Any]]
+            ] = [
+                (
+                    None,
+                    {
+                        **base,
+                        "__strategy__": {
+                            "exit__profile": (
+                                ExitProfile.FIXED_R.value
+                            ),
+                        },
+                    },
+                )
+            ]
+            for profile in ExitProfile:
+                if profile is ExitProfile.FIXED_R:
+                    continue
+                generated_sensitivity.append(
+                    (
+                        "CLI_OVERRIDE",
+                        {
+                            **{
+                                selected_block: dict(parameters)
+                                for selected_block, parameters in base.items()
+                            },
+                            "__strategy__": {
+                                "exit__profile": profile.value,
+                            },
+                        },
+                    )
+                )
             for block_id in combination.block_ids:
                 for spec in self.registry[block_id].parameter_specs:
                     non_default = next(
@@ -5095,6 +6773,13 @@ class LabRunner:
                             {
                                 selected_block: self.registry[selected_block].parameters(parameters)
                                 for selected_block, parameters in selected.items()
+                            }
+                            | {
+                                "__strategy__": {
+                                    "exit__profile": (
+                                        ExitProfile.FIXED_R.value
+                                    ),
+                                }
                             },
                         )
                     )
@@ -5112,6 +6797,11 @@ class LabRunner:
                 {
                     block_id: self.registry[block_id].parameters(parameters)
                     for block_id, parameters in selected.items()
+                }
+                | {
+                    "__strategy__": {
+                        "exit__profile": ExitProfile.FIXED_R.value,
+                    }
                 }
             )
         unique = {parameter_hash(parameters): parameters for parameters in generated}
@@ -5155,11 +6845,11 @@ class LabRunner:
                 )
                 if start_at is not None:
                     benchmark = benchmark.loc[
-                        benchmark.index >= pd.Timestamp(start_at).tz_convert("UTC")
+                        benchmark.index >= _utc_boundary(start_at)
                     ]
                 if end_at is not None:
                     benchmark = benchmark.loc[
-                        benchmark.index <= pd.Timestamp(end_at).tz_convert("UTC")
+                        benchmark.index <= _utc_boundary(end_at)
                     ]
                 benchmark = benchmark.copy()
                 benchmark.attrs.update(
@@ -5210,9 +6900,9 @@ class LabRunner:
                         f"INSUFFICIENT_REAL_DATA:{market}:{timeframe}:{len(raw)}<{rows}"
                     )
                 if start_at is not None:
-                    raw = raw.loc[raw.index >= pd.Timestamp(start_at).tz_convert("UTC")]
+                    raw = raw.loc[raw.index >= _utc_boundary(start_at)]
                 if end_at is not None:
-                    raw = raw.loc[raw.index <= pd.Timestamp(end_at).tz_convert("UTC")]
+                    raw = raw.loc[raw.index <= _utc_boundary(end_at)]
                 if rows is not None:
                     raw = raw.iloc[-rows:].copy()
                 else:
@@ -5245,9 +6935,32 @@ class LabRunner:
                     "common_period_requested": (start_at is not None or end_at is not None),
                 }
             provider_provenance = dict(item_provenance)
+            context_start = raw.index[0]
+            context_end = raw.index[-1]
+            market_benchmark = benchmark
+            if market_benchmark is not None:
+                market_benchmark = market_benchmark.loc[
+                    (market_benchmark.index >= context_start)
+                    & (market_benchmark.index <= context_end)
+                ].copy()
+                market_benchmark.attrs.update(
+                    market="BTC-EUR",
+                    timeframe=timeframe,
+                )
+            market_macro_context = macro_context
+            if market_macro_context is not None:
+                market_macro_context = market_macro_context.loc[
+                    (market_macro_context.index >= context_start)
+                    & (market_macro_context.index <= context_end)
+                ].copy()
+                market_macro_context.attrs.update(
+                    canonical_macro_context=True,
+                    point_in_time_aligned=True,
+                    provenance_engine="MacroContextEngine",
+                )
             higher_timeframes: dict[str, pd.DataFrame] = {}
             if data_mode == "real":
-                for higher_timeframe in ("4h", "1d"):
+                for higher_timeframe in SUPPORTED_TIMEFRAMES:
                     if TIMEFRAME_SECONDS[higher_timeframe] <= TIMEFRAME_SECONDS[timeframe]:
                         continue
                     higher_path = self._data_path(market, higher_timeframe)
@@ -5260,7 +6973,12 @@ class LabRunner:
                         closed_candles_only=True,
                     )
                     if end_at is not None:
-                        higher = higher.loc[higher.index <= pd.Timestamp(end_at).tz_convert("UTC")]
+                        higher = higher.loc[
+                            higher.index <= _utc_boundary(end_at)
+                        ]
+                    higher = higher.loc[
+                        higher.index <= context_end
+                    ]
                     higher = higher.copy()
                     higher.attrs.update(
                         market=market,
@@ -5270,15 +6988,15 @@ class LabRunner:
             features = FeaturePipeline().build(
                 raw,
                 market=market,
-                benchmark=benchmark,
-                macro_context=macro_context,
+                benchmark=market_benchmark,
+                macro_context=market_macro_context,
                 higher_timeframes=higher_timeframes,
             )
             item_provenance["benchmark_context"] = {
-                "status": "ATTACHED" if benchmark is not None else "MISSING",
+                "status": "ATTACHED" if market_benchmark is not None else "MISSING",
                 "market": "BTC-EUR",
                 "timeframe": timeframe,
-                "rows": len(benchmark) if benchmark is not None else 0,
+                "rows": len(market_benchmark) if market_benchmark is not None else 0,
             }
             item_provenance["higher_timeframe_context"] = {
                 selected: {
@@ -5289,16 +7007,19 @@ class LabRunner:
                 }
                 for selected, frame in higher_timeframes.items()
             }
-            if macro_context is not None:
+            if market_macro_context is not None:
                 item_provenance["macro_context"] = {
                     "status": "ATTACHED",
                     "path": str(macro_path),
                     "sha256": sha256_file(macro_path),
-                    "rows": len(macro_context),
-                    "overlap_rows": int(macro_context.index.intersection(raw.index).size),
+                    "rows": len(market_macro_context),
+                    "overlap_rows": int(
+                        market_macro_context.index.intersection(raw.index).size
+                    ),
                     "usable_rows": int(
-                        macro_context.reindex(raw.index)
+                        market_macro_context.reindex(raw.index)
                         .get("macro_context_usable", pd.Series(False, index=raw.index))
+                        .astype("boolean")
                         .fillna(False)
                         .sum()
                     ),
@@ -5356,6 +7077,66 @@ class LabRunner:
                 length=64,
             )
             provenance[market] = item_provenance
+
+        # Causal cross-sectional breadth is derived only after every member
+        # frame has been built.  Each value uses the same fully closed bar
+        # across the point-in-time selected universe; execution remains at the
+        # next open.  Missing warm-up values are excluded from the denominator
+        # instead of being treated as bearish observations.
+        for period in (20, 50, 200):
+            states = pd.concat(
+                {
+                    market: (frame["close"] > frame[f"ema_{period}"]).where(
+                        frame[f"ema_{period}"].notna()
+                    )
+                    for market, frame in frames.items()
+                },
+                axis=1,
+            )
+            breadth = states.astype(float).mean(axis=1, skipna=True)
+            column = f"breadth_fraction_above_mean_{period}d"
+            for frame in frames.values():
+                frame[column] = breadth.reindex(frame.index)
+
+        # Breadth changes the feature output identity, so recompute every
+        # per-market feature hash and the combined campaign hash.
+        for market, frame in frames.items():
+            feature_output_hash = _frame_content_hash(frame)
+            item_provenance = provenance[market]
+            context_hash = str(item_provenance["context_hash"])
+            feature_hash = stable_hash(
+                {
+                    "definition_hash": self.feature_definition_hash,
+                    "output_hash": feature_output_hash,
+                    "context_hash": context_hash,
+                    "cross_sectional_breadth": {
+                        "members": list(markets),
+                        "closed_bars_only": True,
+                        "execution": "NEXT_OPEN",
+                    },
+                },
+                length=64,
+            )
+            item_provenance["feature_output_hash"] = feature_output_hash
+            item_provenance["feature_hash"] = feature_hash
+            frame.attrs["data_provenance"] = {
+                **dict(frame.attrs.get("data_provenance") or {}),
+                "feature_output_hash": feature_output_hash,
+                "feature_hash": feature_hash,
+                "cross_sectional_breadth": {
+                    "members": list(markets),
+                    "closed_bars_only": True,
+                    "execution": "NEXT_OPEN",
+                },
+            }
+            hashes[market] = stable_hash(
+                {
+                    "normalized_slice_hash": hashes[market],
+                    "feature_hash": feature_hash,
+                    "context_hash": context_hash,
+                },
+                length=64,
+            )
         return frames, stable_hash(hashes), provenance
 
     def _result_payload(
@@ -5373,6 +7154,9 @@ class LabRunner:
             "source": source,
             "combination_id": combination.combination_id,
             "strategy_dna_hash": combination.strategy_dna_hash,
+            "strategy_variant_dna_hash": job.get(
+                "strategy_variant_dna_hash"
+            ),
             "block_ids": list(combination.block_ids),
             "families": list(combination.families),
             "roles": list(combination.roles),
@@ -5423,6 +7207,7 @@ class LabRunner:
         executor: ProcessPoolExecutor,
         allow_review_required_research_only: bool = False,
         maximum_survivors: int = 12,
+        minimum_screening_trades: int = FAST_SCREEN_MINIMUM_TRADES,
     ) -> tuple[int, int, list[dict[str, Any]]]:
         screened: list[
             tuple[
@@ -5432,9 +7217,19 @@ class LabRunner:
                 StrategyCombination,
             ]
         ] = []
+        baseline_experiment_hashes = {
+            str(payload.get("experiment_hash"))
+            for payload in baseline_payloads
+            if payload.get("experiment_hash")
+        }
         existing_exact = {
             str(row.get("experiment_hash"))
-            for row in _payload_rows(self.store.database, "exact_backtest_results")
+            for row in _payload_rows_by_identity(
+                self.store.database,
+                "exact_backtest_results",
+                key="experiment_hash",
+                values=baseline_experiment_hashes,
+            )
         }
         for payload in baseline_payloads:
             if payload.get("result_type") == "PARAMETER_SENSITIVITY":
@@ -5449,7 +7244,7 @@ class LabRunner:
                 continue
             rank_score = screening_survivor_score(
                 result,
-                minimum_trades=FAST_SCREEN_MINIMUM_TRADES,
+                minimum_trades=minimum_screening_trades,
             )
             if rank_score is None:
                 continue
@@ -5539,6 +7334,10 @@ class LabRunner:
                             block_id: dict(parameters)
                             for block_id, parameters in payload["parameters"].items()
                         },
+                        {
+                            block_id: self.registry[block_id]
+                            for block_id in combination.block_ids
+                        },
                     ),
                     timeout=self.settings.lab.combination_timeout_seconds,
                 )
@@ -5622,6 +7421,10 @@ class LabRunner:
                             for block_id, parameters in running["parameters"].items()
                         },
                         round_trip_cost,
+                        {
+                            block_id: self.registry[block_id]
+                            for block_id in combination.block_ids
+                        },
                     ),
                     timeout=self.settings.lab.combination_timeout_seconds,
                 )
@@ -5645,6 +7448,9 @@ class LabRunner:
                     "stage": stage,
                     "combination_id": combination.combination_id,
                     "strategy_dna_hash": combination.strategy_dna_hash,
+                    "strategy_variant_dna_hash": running.get(
+                        "strategy_variant_dna_hash"
+                    ),
                     "block_ids": list(combination.block_ids),
                     "families": list(combination.families),
                     "economic_hypothesis_family": economic_hypothesis_family(
@@ -5678,6 +7484,12 @@ class LabRunner:
                         "net_return": float(screening["screening_return"]),
                         "cost_drag": float(screening["cost_drag"]),
                         "sharpe": float(screening["screening_score"]),
+                        "profit_factor": screening.get(
+                            "profit_factor"
+                        ),
+                        "net_expectancy_return_per_round_trip": (
+                            screening.get("net_expectancy")
+                        ),
                     },
                     "integrity": {
                         "no_lookahead": bool(not screening["future_data_used_for_signals"]),
@@ -5745,18 +7557,37 @@ class LabRunner:
         maximum_candidates: int,
         maximum_trials: int | None = None,
         allow_review_required_research_only: bool = False,
+        minimum_exact_trades: int | None = None,
+        heartbeat_completed_jobs: int = 0,
     ) -> tuple[int, int, int, int]:
         """Run canonical optimization and robustness stages for exact survivors."""
+        exact_experiment_hashes = {
+            str(payload.get("experiment_hash"))
+            for payload in exact_payloads
+            if payload.get("experiment_hash")
+        }
         already_validated = {
             str(row.get("experiment_hash"))
-            for row in _payload_rows(self.store.database, "gate_results")
+            for row in _payload_rows_by_identity(
+                self.store.database,
+                "gate_results",
+                key="experiment_hash",
+                values=exact_experiment_hashes,
+            )
         }
+        required_exact_trades = (
+            self.settings.research.minimum_trades
+            if minimum_exact_trades is None
+            else int(minimum_exact_trades)
+        )
+        if required_exact_trades < 1:
+            raise ValueError("minimum exact trades must be positive")
         exact_survivors = [
             payload
             for payload in exact_payloads
             if (
                 int((payload.get("metrics") or {}).get("trade_count") or 0)
-                >= self.settings.research.minimum_trades
+                >= required_exact_trades
                 and float((payload.get("metrics") or {}).get("net_expectancy_r") or -math.inf)
                 > self.settings.research.minimum_net_expectancy_r
                 and float((payload.get("metrics") or {}).get("profit_factor") or 0.0)
@@ -5767,7 +7598,7 @@ class LabRunner:
             exact_survivors,
             key=lambda payload: robust_score(
                 dict(payload.get("metrics") or {}),
-                minimum_trades=self.settings.research.minimum_trades,
+                minimum_trades=required_exact_trades,
             ),
             reverse=True,
         )
@@ -5810,26 +7641,64 @@ class LabRunner:
                 checkpoint=queued.get("last_checkpoint"),
             )
             checkpoint_path = self.paths.checkpoints / f"{experiment_hash}.optimization.jsonl"
+            optimizer_executor = ProcessPoolExecutor(max_workers=1)
+            optimizer_force_stopped = False
             try:
                 loop = asyncio.get_running_loop()
-                research_result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        executor,
-                        _canonical_research_worker,
-                        self.settings,
-                        dict(frames),
-                        combination,
-                        {
-                            block_id: dict(parameters)
-                            for block_id, parameters in payload["parameters"].items()
-                        },
-                        checkpoint_path,
-                        search_method,
-                        search_trials,
-                        allow_review_required_research_only,
-                    ),
-                    timeout=self.settings.lab.trial_timeout_seconds * max(1, search_trials),
+                optimizer_future = loop.run_in_executor(
+                    optimizer_executor,
+                    _canonical_research_worker,
+                    self.settings,
+                    dict(frames),
+                    combination,
+                    {
+                        block_id: dict(parameters)
+                        for block_id, parameters in payload["parameters"].items()
+                    },
+                    checkpoint_path,
+                    search_method,
+                    search_trials,
+                    allow_review_required_research_only,
+                    {
+                        block_id: self.registry[block_id]
+                        for block_id in combination.block_ids
+                    },
                 )
+                timeout_seconds = self.settings.lab.trial_timeout_seconds * max(
+                    1,
+                    search_trials,
+                )
+                deadline = loop.time() + timeout_seconds
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0.0:
+                        optimizer_future.cancel()
+                        optimizer_force_stopped = True
+                        _terminate_process_pool(optimizer_executor)
+                        raise TimeoutError(
+                            f"optimizer exceeded hard timeout of {timeout_seconds} seconds"
+                        )
+                    done, _ = await asyncio.wait(
+                        {optimizer_future},
+                        timeout=min(30.0, remaining),
+                    )
+                    if optimizer_future in done:
+                        research_result = optimizer_future.result()
+                        break
+                    self.write_worker_status(
+                        run_id=str(running["run_id"]),
+                        phase="OPTIMIZATION_AND_VALIDATION",
+                        workers=1,
+                        active=1,
+                        completed=heartbeat_completed_jobs,
+                        failed=0,
+                    )
+                    self.heartbeat(
+                        run_id=str(running["run_id"]),
+                        status="OPTIMIZATION_AND_VALIDATION",
+                        completed_jobs=heartbeat_completed_jobs,
+                        failed_jobs=0,
+                    )
                 outcome = research_result.outcome
                 for trial in outcome.optimization.trials:
                     self.store.save_result(
@@ -5936,6 +7805,49 @@ class LabRunner:
                     result=monte_carlo,
                     status="COMPLETED",
                 )
+                normal_daily_returns = _daily_equity_returns(outcome.normal_result)
+                stressed_daily_returns = _daily_equity_returns(outcome.stressed_result)
+                common_daily_index = normal_daily_returns.index.intersection(
+                    stressed_daily_returns.index
+                )
+                stochastic = validate_strategy_return_paths(
+                    normal_daily_returns.reindex(common_daily_index).to_numpy(dtype=float),
+                    stressed_daily_returns.reindex(common_daily_index).to_numpy(dtype=float),
+                    policy=policy_from_research_settings(
+                        self.settings.research,
+                        seed=(
+                            self.settings.lab.deterministic_seed
+                            + int(experiment_hash[:8], 16)
+                        ),
+                        expected_block_length=10,
+                    ),
+                )
+                self.store.save_result(
+                    "monte_carlo_results",
+                    job=validation_running,
+                    result={
+                        "simulation_id": "stochastic-validation-v1",
+                        "source": "STATIONARY_BOOTSTRAP_AND_DIRICHLET",
+                        "stochastic_validation": stochastic,
+                    },
+                    status="COMPLETED",
+                )
+                from reporting.strategy_evidence_charts import (
+                    generate_strategy_evidence_bundle,
+                )
+
+                benchmark = frames.get("BTC-EUR")
+                if benchmark is None:
+                    benchmark = next(iter(frames.values()))
+                evidence_bundle = generate_strategy_evidence_bundle(
+                    self.paths.charts / "strategy_evidence",
+                    strategy_dna=str(payload["strategy_dna_hash"]),
+                    timeframe=timeframe,
+                    normal_result=outcome.normal_result,
+                    stressed_result=outcome.stressed_result,
+                    stochastic=stochastic,
+                    benchmark=benchmark,
+                )
                 gate = outcome.gate
                 gate_payload = {
                     "gate_id": f"gate-{experiment_hash[:24]}",
@@ -5996,6 +7908,8 @@ class LabRunner:
                         "outcome": outcome,
                         "final_job": final_job,
                         "daily_returns": daily_returns,
+                        "stochastic_validation": stochastic,
+                        "evidence_bundle": evidence_bundle,
                     }
                 )
             except Exception as exc:
@@ -6019,6 +7933,9 @@ class LabRunner:
                         "retry_eligible": False,
                     },
                 )
+            finally:
+                if not optimizer_force_stopped:
+                    optimizer_executor.shutdown(wait=True, cancel_futures=True)
         if batch_candidates:
             return_matrix = pd.concat(
                 {str(item["experiment_hash"]): item["daily_returns"] for item in batch_candidates},
@@ -6055,6 +7972,8 @@ class LabRunner:
                 payload = item["payload"]
                 outcome = item["outcome"]
                 final_job = item["final_job"]
+                stochastic = item["stochastic_validation"]
+                evidence_bundle = item["evidence_bundle"]
                 batch_dsr = batch_result.deflated_sharpe_probabilities.get(
                     experiment_hash,
                     0.0,
@@ -6150,6 +8069,17 @@ class LabRunner:
                         "paper_candidate": False,
                         "live_ready": False,
                         "last_checkpoint": updated_job.get("last_checkpoint"),
+                        "stationary_bootstrap_monte_carlo_passed": bool(
+                            stochastic["normal"]["monte_carlo"]["passed"]
+                            and stochastic["stressed"]["monte_carlo"]["passed"]
+                        ),
+                        "dirichlet_stress_passed": bool(
+                            stochastic["normal"]["dirichlet"]["passed"]
+                            and stochastic["stressed"]["dirichlet"]["passed"]
+                        ),
+                        "stochastic_validation_policy_hash": stochastic["policy_hash"],
+                        "strategy_chart": evidence_bundle["chart"],
+                        "regime_attribution": evidence_bundle["regime_attribution"],
                     }
                 )
                 self.store.save_leaderboard_entry(previous)
@@ -6277,7 +8207,10 @@ class LabRunner:
             lifecycle = LifecycleStatus.DEGRADED
         entry_id = stable_hash(
             [
-                payload["strategy_dna_hash"],
+                payload.get(
+                    "strategy_variant_dna_hash",
+                    payload["strategy_dna_hash"],
+                ),
                 payload["parameter_hash"],
                 payload["universe_snapshot_id"],
                 payload["timeframes_tested"],
@@ -6288,6 +8221,9 @@ class LabRunner:
             "rank": previous.get("rank") if previous else None,
             "combination_id": payload["combination_id"],
             "strategy_dna_hash": payload["strategy_dna_hash"],
+            "strategy_variant_dna_hash": payload.get(
+                "strategy_variant_dna_hash"
+            ),
             "block_names": payload["block_ids"],
             "block_families": payload["families"],
             "block_roles": payload["roles"],
@@ -6296,7 +8232,19 @@ class LabRunner:
             "parameters": payload["parameters"],
             "parameter_hash": payload["parameter_hash"],
             "entry_profile": {"logic_mode": payload["logic_mode"]},
-            "exit_profile": {"type": "canonical_defaults"},
+            "exit_profile": {
+                "type": str(
+                    (
+                        payload.get("parameters", {}).get(
+                            "__strategy__", {}
+                        )
+                        or {}
+                    ).get(
+                        "exit__profile",
+                        ExitProfile.FIXED_R.value,
+                    )
+                )
+            },
             "risk_profile": {"type": "settings"},
             "universe_snapshot_id": payload["universe_snapshot_id"],
             "assets_tested": payload["assets_tested"],
@@ -6384,9 +8332,25 @@ class LabRunner:
         block_ids: Sequence[str] | None = None,
         parameter_overrides: Mapping[str, Sequence[Any]] | None = None,
         combination_templates: Mapping[str, Sequence[str]] | None = None,
+        markets_override: Sequence[str] | None = None,
+        minimum_screening_trades: int = FAST_SCREEN_MINIMUM_TRADES,
+        maximum_screening_survivors: int = 12,
+        minimum_optimization_trades: int | None = None,
+        minimum_full_history_rows: int | None = None,
     ) -> dict[str, Any]:
         if rows < 250:
             raise ValueError("lab runs require at least 250 rows")
+        full_history_minimum = (
+            self.settings.lab.deep_minimum_history_rows
+            if minimum_full_history_rows is None
+            else int(minimum_full_history_rows)
+        )
+        if full_history_minimum < 250:
+            raise ValueError("full-history lab runs require at least 250 rows")
+        if minimum_screening_trades < 1:
+            raise ValueError("minimum screening trades must be positive")
+        if maximum_screening_survivors < 1:
+            raise ValueError("maximum screening survivors must be positive")
         if data_mode == "synthetic" and history_mode not in {"smoke", "bounded"}:
             raise ValueError("synthetic lab runs cannot use full-history modes")
         worker_limit = min(
@@ -6395,6 +8359,7 @@ class LabRunner:
             self.settings.lab.cpu_limit or workers,
         )
         run_id = f"labrun-{stable_hash([utc_iso(), profile, os.getpid()])[:20]}"
+        self._run_queue_totals[run_id] = 0
         recovered = self.store.recover_stale_jobs() if resume else 0
         superseded = self.store.supersede_incomplete_jobs(active_run_id=run_id) if resume else 0
         self.store.persist_blocks(self.registry.values())
@@ -6463,19 +8428,67 @@ class LabRunner:
             for combination in combinations
             if combination.eligibility_status is not CombinationState.GENERATED
         ]
-        markets = self._markets(
-            universe_size,
-            universe_scope=universe_scope,
-            include_review_required_research_only=(include_review_required_research_only),
-            required_timeframes=timeframes if data_mode == "real" else None,
-            minimum_rows=(
-                rows
-                if data_mode == "real" and history_mode in {"smoke", "bounded"}
-                else self.settings.lab.deep_minimum_history_rows
-                if data_mode == "real"
-                else 0
-            ),
+        requested_timeframes = tuple(
+            dict.fromkeys(str(value) for value in timeframes)
         )
+        active_timeframes = tuple(
+            timeframe
+            for timeframe in requested_timeframes
+            if any(
+                timeframe
+                in combination.common_supported_timeframes
+                for combination in valid
+            )
+        )
+        unsupported_timeframes = tuple(
+            timeframe
+            for timeframe in requested_timeframes
+            if timeframe not in active_timeframes
+        )
+        if not active_timeframes:
+            raise DataValidationError(
+                "NO_COMMON_SUPPORTED_TIMEFRAME_FOR_VALID_COMBINATIONS"
+            )
+        timeframes = active_timeframes
+        if markets_override:
+            requested_markets = list(
+                dict.fromkeys(str(market) for market in markets_override)
+            )
+            markets, review_only_markets = validate_explicit_research_markets(
+                self.settings,
+                requested_markets,
+                include_review_required_research_only=(
+                    include_review_required_research_only
+                ),
+            )
+            self.last_market_selection = {
+                "snapshot_id": None,
+                "selected": markets,
+                "excluded_for_data": [],
+                "requested_size": len(markets),
+                "selection_basis": "EXPLICIT_OPERATOR_MARKET_OVERRIDE",
+                "review_required_research_only": review_only_markets,
+                "promotion_eligible": [
+                    market for market in markets if market not in review_only_markets
+                ],
+            }
+        else:
+            markets = self._markets(
+                universe_size,
+                universe_scope=universe_scope,
+                include_review_required_research_only=(
+                    include_review_required_research_only
+                ),
+                required_timeframes=timeframes if data_mode == "real" else None,
+                minimum_rows=(
+                    rows
+                    if data_mode == "real"
+                    and history_mode in {"smoke", "bounded"}
+                    else full_history_minimum
+                    if data_mode == "real"
+                    else 0
+                ),
+            )
         snapshot = UniverseManager(
             self.settings,
             database=self.store.database,
@@ -6518,18 +8531,24 @@ class LabRunner:
             completed=0,
             failed=0,
         )
-        for timeframe in timeframes:
+        self.heartbeat(
+            run_id=run_id,
+            status="PREPARING_AND_HASHING_DATA",
+            completed_jobs=0,
+            failed_jobs=0,
+        )
+        for timeframe_index, timeframe in enumerate(timeframes, start=1):
             selected_rows: int | None = rows
             slice_start: pd.Timestamp | None = None
             slice_end: pd.Timestamp | None = None
             if data_mode == "real" and history_mode == "common_full_history":
                 indices = {
-                    market: pd.DatetimeIndex(
-                        pd.read_parquet(
-                            self._data_path(market, timeframe),
-                            columns=["close"],
-                        ).index
-                    )
+                    market: load_ohlcv(
+                        self._data_path(market, timeframe),
+                        market=market,
+                        timeframe=timeframe,
+                        closed_candles_only=True,
+                    ).index
                     for market in markets
                 }
                 slice_start = max(index.min() for index in indices.values())
@@ -6541,7 +8560,7 @@ class LabRunner:
                     for market, index in indices.items()
                 }
                 minimum_common_rows = min(available_rows.values())
-                if minimum_common_rows < self.settings.lab.deep_minimum_history_rows:
+                if minimum_common_rows < full_history_minimum:
                     raise DataValidationError(
                         f"INSUFFICIENT_COMMON_FULL_HISTORY:{timeframe}:{minimum_common_rows}"
                     )
@@ -6562,7 +8581,7 @@ class LabRunner:
                     )
                     for market in markets
                 }
-                if min(available_rows.values()) < self.settings.lab.deep_minimum_history_rows:
+                if min(available_rows.values()) < full_history_minimum:
                     raise DataValidationError(
                         f"INSUFFICIENT_ASSET_MAX_HISTORY:{timeframe}:{available_rows}"
                     )
@@ -6603,6 +8622,26 @@ class LabRunner:
                 raise MemoryError(
                     "estimated process-worker frame memory exceeds LAB_MEMORY_LIMIT_MB"
                 )
+            self.write_worker_status(
+                run_id=run_id,
+                phase=(
+                    f"PREPARED_{timeframe.upper()}_"
+                    f"{timeframe_index}_OF_{len(timeframes)}"
+                ),
+                workers=worker_limit,
+                active=0,
+                completed=timeframe_index,
+                failed=0,
+            )
+            self.heartbeat(
+                run_id=run_id,
+                status=(
+                    f"PREPARED_{timeframe.upper()}_"
+                    f"{timeframe_index}_OF_{len(timeframes)}"
+                ),
+                completed_jobs=0,
+                failed_jobs=0,
+            )
         plan_manifest = {
             "run_id": run_id,
             "manifest_kind": "IMMUTABLE_CAMPAIGN_PLAN",
@@ -6625,6 +8664,7 @@ class LabRunner:
                 if combination_templates
                 else None
             ),
+            "parameter_overrides": _canonical_value(parameter_overrides or {}),
             "costs": self.settings.costs.model_dump(mode="json"),
             "research_gates": self.settings.research.model_dump(mode="json"),
             "live_orders": 0,
@@ -6632,12 +8672,21 @@ class LabRunner:
         plan_path = self.paths.manifests / f"{run_id}.plan.json"
         atomic_write_json(plan_path, plan_manifest)
         plan_hash = sha256_file(plan_path)
+        current_strategy_hashes = {
+            combination.strategy_dna_hash
+            for combination in valid
+        }
         for timeframe in timeframes:
             frames = frames_by_timeframe[timeframe]
             data_hash = data_hashes_by_timeframe[timeframe]
             data_provenance = raw_provenance_by_timeframe[timeframe]
             tasks = []
             for combination in valid:
+                if (
+                    timeframe
+                    not in combination.common_supported_timeframes
+                ):
+                    continue
                 for sensitivity_parameter, parameters in self._parameter_sets(
                     combination,
                     parameter_overrides,
@@ -6682,22 +8731,49 @@ class LabRunner:
                 failed=failed,
             )
             timeframe_finished = 0
-            for task in asyncio.as_completed(tasks):
-                job, payload = await task
-                timeframe_finished += 1
-                if payload is None:
-                    failed += int(
-                        job.get("status")
-                        in {
-                            CombinationState.ERROR_RETRYABLE.value,
-                            CombinationState.ERROR_FINAL.value,
-                        }
+            self._run_queue_totals[run_id] += len(tasks)
+            pending_tasks = {
+                asyncio.create_task(task)
+                for task in tasks
+            }
+            while pending_tasks:
+                finished_tasks, pending_tasks = await asyncio.wait(
+                    pending_tasks,
+                    timeout=30.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not finished_tasks:
+                    self.heartbeat(
+                        run_id=run_id,
+                        status=f"SCREENING:{timeframe}",
+                        completed_jobs=completed,
+                        failed_jobs=failed,
                     )
-                else:
-                    completed += 1
-                    if job.get("result_type") == "PARAMETER_SENSITIVITY":
-                        sensitivity_completed += 1
-                    baseline_payloads.append(payload)
+                    self.write_worker_status(
+                        run_id=run_id,
+                        phase=f"SCREENING:{timeframe}",
+                        workers=worker_limit,
+                        active=min(worker_limit, len(pending_tasks)),
+                        completed=completed,
+                        failed=failed,
+                    )
+                    continue
+                for finished_task in finished_tasks:
+                    job, payload = await finished_task
+                    timeframe_finished += 1
+                    if payload is None:
+                        failed += int(
+                            job.get("status")
+                            in {
+                                CombinationState.ERROR_RETRYABLE.value,
+                                CombinationState.ERROR_FINAL.value,
+                            }
+                        )
+                    else:
+                        completed += 1
+                        if job.get("result_type") == "PARAMETER_SENSITIVITY":
+                            sensitivity_completed += 1
+                        baseline_payloads.append(payload)
                 self.heartbeat(
                     run_id=run_id,
                     status="RUNNING",
@@ -6719,9 +8795,11 @@ class LabRunner:
         combination_index = {combination.combination_id: combination for combination in valid}
         persisted_baselines = [
             payload
-            for payload in _payload_rows(
+            for payload in _payload_rows_by_identity(
                 self.store.database,
                 "experiment_trials",
+                key="strategy_dna_hash",
+                values=current_strategy_hashes,
             )
             if payload.get("combination_id") in combination_index
             and _matches_research_slice(
@@ -6744,7 +8822,7 @@ class LabRunner:
         }
         current_job_by_experiment = {
             str(job.get("experiment_hash")): job
-            for job in self.store.jobs()
+            for job in self.store.jobs(run_id=run_id)
             if str(job.get("run_id")) == run_id
             and job.get("experiment_hash")
         }
@@ -6775,11 +8853,14 @@ class LabRunner:
             frames_by_timeframe=frames_by_timeframe,
             executor=executor,
             allow_review_required_research_only=(include_review_required_research_only),
+            minimum_screening_trades=minimum_screening_trades,
+            maximum_survivors=maximum_screening_survivors,
         )
         optimized_candidates = 0
         walk_forward_candidates = 0
         research_passes = 0
         paper_candidates = 0
+        exact_candidates: dict[str, Mapping[str, Any]] = {}
         if profile.casefold() != "quick":
             self.write_worker_status(
                 run_id=run_id,
@@ -6791,9 +8872,11 @@ class LabRunner:
             )
             persisted_exact = [
                 payload
-                for payload in _payload_rows(
+                for payload in _payload_rows_by_identity(
                     self.store.database,
                     "exact_backtest_results",
+                    key="strategy_dna_hash",
+                    values=current_strategy_hashes,
                 )
                 if payload.get("combination_id") in combination_index
                 and _matches_research_slice(
@@ -6840,12 +8923,24 @@ class LabRunner:
                 maximum_candidates=3 if profile.casefold() == "standard" else 5,
                 maximum_trials=max_trials,
                 allow_review_required_research_only=(include_review_required_research_only),
+                minimum_exact_trades=minimum_optimization_trades,
+                heartbeat_completed_jobs=completed,
             )
         executor.shutdown(wait=True, cancel_futures=True)
         # A crash can happen after the atomic baseline write but before the
         # leaderboard write. Rebuild missing entries idempotently on every run.
-        known_entries = {row["entry_id"]: row for row in self.store.leaderboard()}
-        for payload in _payload_rows(self.store.database, "baseline_results"):
+        known_entries = {
+            row["entry_id"]: row
+            for row in self.store.leaderboard(
+                strategy_hashes=current_strategy_hashes,
+            )
+        }
+        for payload in _payload_rows_by_identity(
+            self.store.database,
+            "baseline_results",
+            key="strategy_dna_hash",
+            values=current_strategy_hashes,
+        ):
             if not isinstance(payload.get("metrics"), dict):
                 continue
             if payload.get("source") not in {"BASELINE_REAL", "SYNTHETIC_SMOKE"}:
@@ -6856,8 +8951,187 @@ class LabRunner:
             self.store.save_leaderboard_entry(entry)
             known_entries[entry["entry_id"]] = entry
         exports = self.store.export_leaderboards()
-        queue = self.store.queue_status(run_id=run_id)
+        queue = self._queue_snapshot(
+            run_id=run_id,
+            completed_jobs=completed,
+            failed_jobs=failed,
+        )
+        atomic_write_json(
+            self.queue_status_path,
+            queue,
+        )
         duration = time.perf_counter() - started
+        practical_exact_positive = []
+        review_only_markets = list(
+            (self.last_market_selection or {}).get(
+                "review_required_research_only",
+                [],
+            )
+        )
+        for payload in exact_candidates.values():
+            metrics = dict(payload.get("metrics") or {})
+            integrity = dict(payload.get("integrity") or {})
+            if not (
+                float(metrics.get("net_return") or 0.0) > 0.0
+                and float(metrics.get("profit_factor") or 0.0) > 1.0
+                and float(metrics.get("net_expectancy_r") or 0.0) > 0.0
+                and bool(integrity.get("no_lookahead"))
+                and bool(integrity.get("no_repainting"))
+                and bool(integrity.get("next_open_execution"))
+                and bool(integrity.get("long_only_spot"))
+            ):
+                continue
+            data_period = dict(payload.get("data_period") or {})
+            try:
+                history_days = int(
+                    (
+                        pd.Timestamp(data_period["end"])
+                        - pd.Timestamp(data_period["start"])
+                    ).total_seconds()
+                    // 86_400
+                )
+            except (KeyError, TypeError, ValueError):
+                history_days = 0
+            sample_promotion_ready = (
+                int(metrics.get("trade_count") or 0)
+                >= self.settings.research.minimum_trades
+                and history_days
+                >= self.settings.research.minimum_history_days
+            )
+            practical_exact_positive.append(
+                {
+                    "experiment_hash": payload.get("experiment_hash"),
+                    "strategy_dna_hash": payload.get("strategy_dna_hash"),
+                    "combination_id": payload.get("combination_id"),
+                    "economic_hypothesis_family": (
+                        payload.get("economic_hypothesis_family")
+                        or economic_hypothesis_family(
+                            combination_index[str(payload["combination_id"])]
+                        )
+                    ),
+                    "block_ids": list(payload.get("block_ids") or []),
+                    "timeframe": str((payload.get("timeframes_tested") or [""])[0]),
+                    "markets": list(payload.get("assets_tested") or []),
+                    "data_period": data_period,
+                    "history_days": history_days,
+                    "minimum_promotion_trades": (
+                        self.settings.research.minimum_trades
+                    ),
+                    "minimum_promotion_history_days": (
+                        self.settings.research.minimum_history_days
+                    ),
+                    "sample_promotion_ready": sample_promotion_ready,
+                    "metrics": {
+                        key: metrics.get(key)
+                        for key in (
+                            "net_return",
+                            "cagr",
+                            "profit_factor",
+                            "net_expectancy_r",
+                            "sharpe",
+                            "maximum_drawdown",
+                            "trade_count",
+                            "monte_carlo_p95_drawdown",
+                        )
+                    },
+                    "lifecycle": "BACKTEST_POSITIVE",
+                    "paper_eligibility": (
+                        "RESEARCH_ONLY_REVIEW_REQUIRED_MARKET"
+                        if review_only_markets
+                        else (
+                            "PAPER_ELIGIBLE_AFTER_FROZEN_EXECUTION_ADAPTER"
+                            if sample_promotion_ready
+                            else (
+                                "RESEARCH_ONLY_INSUFFICIENT_SAMPLE_OR_HISTORY"
+                            )
+                        )
+                    ),
+                    "review_required_research_only": review_only_markets,
+                    "promotion_eligible_markets": list(
+                        (self.last_market_selection or {}).get(
+                            "promotion_eligible",
+                            [],
+                        )
+                    ),
+                    "academic_tests": "CAPITAL_SCALING_WARNINGS",
+                }
+            )
+        practical_exact_positive.sort(
+            key=lambda row: (
+                float((row["metrics"] or {}).get("profit_factor") or 0.0),
+                float((row["metrics"] or {}).get("net_return") or 0.0),
+            ),
+            reverse=True,
+        )
+        exact_candidate_audit = []
+        for payload in exact_candidates.values():
+            metrics = dict(payload.get("metrics") or {})
+            integrity = dict(payload.get("integrity") or {})
+            exact_candidate_audit.append(
+                {
+                    "experiment_hash": payload.get("experiment_hash"),
+                    "strategy_dna_hash": payload.get("strategy_dna_hash"),
+                    "combination_id": payload.get("combination_id"),
+                    "economic_hypothesis_family": (
+                        payload.get("economic_hypothesis_family")
+                        or economic_hypothesis_family(
+                            combination_index[str(payload["combination_id"])]
+                        )
+                    ),
+                    "block_ids": list(payload.get("block_ids") or []),
+                    "timeframe": str(
+                        (payload.get("timeframes_tested") or [""])[0]
+                    ),
+                    "markets": list(payload.get("assets_tested") or []),
+                    "metrics": {
+                        key: metrics.get(key)
+                        for key in (
+                            "net_return",
+                            "cagr",
+                            "profit_factor",
+                            "net_expectancy_r",
+                            "net_expectancy_eur",
+                            "sharpe",
+                            "sortino",
+                            "calmar",
+                            "maximum_drawdown",
+                            "trade_count",
+                            "effective_sample_size",
+                            "transaction_costs_eur",
+                            "turnover",
+                            "monte_carlo_p95_drawdown",
+                            "probability_of_loss",
+                        )
+                    },
+                    "economic_positive": (
+                        float(metrics.get("net_return") or 0.0) > 0.0
+                        and float(metrics.get("profit_factor") or 0.0) > 1.0
+                        and float(metrics.get("net_expectancy_r") or 0.0) > 0.0
+                    ),
+                    "causality": {
+                        key: integrity.get(key)
+                        for key in (
+                            "no_lookahead",
+                            "no_repainting",
+                            "next_open_execution",
+                            "long_only_spot",
+                            "closed_candle_integrity",
+                            "provider_data_integrity",
+                        )
+                    },
+                    "paper_candidate_permitted": bool(
+                        payload.get("paper_candidate_permitted", False)
+                    ),
+                }
+            )
+        exact_candidate_audit.sort(
+            key=lambda row: (
+                bool(row["economic_positive"]),
+                float((row["metrics"] or {}).get("profit_factor") or 0.0),
+                float((row["metrics"] or {}).get("net_return") or 0.0),
+            ),
+            reverse=True,
+        )
         formal_status = (
             "PARTIAL"
             if failed
@@ -6904,6 +9178,10 @@ class LabRunner:
             "actual_universe": len(markets),
             "universe_data_selection": self.last_market_selection,
             "timeframes": list(timeframes),
+            "requested_timeframes": list(requested_timeframes),
+            "unsupported_timeframes_skipped": list(
+                unsupported_timeframes
+            ),
             "baseline_backtests": 0,
             "new_baseline_backtests": 0,
             "fast_screen_trials": completed,
@@ -6911,6 +9189,9 @@ class LabRunner:
             "sensitivity_trials": sensitivity_completed,
             "screening_trials": screening_trials,
             "exact_backtests": exact_backtests,
+            "exact_candidate_audit": exact_candidate_audit,
+            "backtest_positive_candidates": len(practical_exact_positive),
+            "backtest_positive": practical_exact_positive,
             "optimized_candidates": optimized_candidates,
             "walk_forward_candidates": walk_forward_candidates,
             "research_passes": research_passes,
@@ -6930,6 +9211,7 @@ class LabRunner:
             "live_orders": 0,
             "completed_at": utc_iso(),
         }
+        result = _finite_json(result)
         atomic_write_json(
             self.paths.manifests / f"{run_id}.json",
             result,
@@ -7318,6 +9600,10 @@ __all__ = [
     "LabControl",
     "LabRunner",
     "LabStore",
+    "CLASSICAL_DISABLED_FAMILY_INTERFACES",
+    "CLASSICAL_ECONOMIC_FAMILY_TEMPLATES",
+    "LOWER_TIMEFRAME_MTF_TEMPLATES",
+    "NORMAL_SPOT_SWING_MTF_TEMPLATES",
     "LifecycleStatus",
     "LogicMode",
     "ParameterKind",

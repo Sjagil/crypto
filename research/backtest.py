@@ -14,6 +14,7 @@ import pandas as pd
 
 from config.settings import Settings
 from core.contracts import EligibilityStatus, Trade
+from core.economics import CanonicalCostModel
 from data.market_data import OHLCV_COLUMNS, timeframe_delta, validate_ohlcv
 from research.strategies import Strategy
 from research.trading_math import (
@@ -60,6 +61,15 @@ class CostModel:
 
     def sell_price(self, raw_price: float) -> float:
         return raw_price * (1.0 - self.sell_impact)
+
+    @classmethod
+    def from_canonical(
+        cls,
+        costs: CanonicalCostModel,
+        *,
+        multiplier: float = 1.0,
+    ) -> "CostModel":
+        return cls(**costs.exact_backtest_inputs(multiplier=multiplier))
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,7 @@ class BacktestConfig:
         stressed: bool = False,
         allow_review_required_research_only: bool = False,
     ) -> "BacktestConfig":
+        canonical_costs = CanonicalCostModel.from_settings(settings)
         return cls(
             initial_cash_eur=initial_cash_eur,
             risk_per_trade=settings.risk.risk_per_trade,
@@ -128,10 +139,8 @@ class BacktestConfig:
             maximum_portfolio_exposure=settings.risk.maximum_portfolio_exposure,
             reserve_cash_fraction=settings.risk.reserve_cash_fraction,
             maximum_trades_per_day=settings.risk.maximum_trades_per_day,
-            costs=CostModel(
-                fee_fraction=settings.costs.default_fee,
-                slippage_bps=settings.costs.slippage_bps,
-                spread_bps=settings.costs.spread_bps,
+            costs=CostModel.from_canonical(
+                canonical_costs,
                 multiplier=(
                     settings.costs.stressed_cost_multiplier if stressed else 1.0
                 ),

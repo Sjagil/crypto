@@ -26,8 +26,12 @@ from research.volatility_contraction import _performance_metrics
 from utils.common import stable_hash
 
 RESIDUAL_REVERSAL_ENGINE_VERSION = "1.0.0"
+ADAPTIVE_RESIDUAL_REVERSAL_ENGINE_VERSION = "1.0.0"
 RESIDUAL_REVERSAL_FAMILY = (
     "BTC_REGIME_BETA_RESIDUAL_MEAN_REVERSION"
+)
+ADAPTIVE_RESIDUAL_REVERSAL_FAMILY = (
+    "BTC_REGIME_ADAPTIVE_PERCENTILE_RESIDUAL_MEAN_REVERSION"
 )
 DAILY_PERIODS_PER_YEAR = 365.25
 
@@ -80,6 +84,95 @@ class ResidualReversalParameters:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AdaptiveResidualReversalParameters:
+    """Intraday challenger DNA; never mutates the frozen daily RR family."""
+
+    timeframe: str
+    beta_lookback: int
+    residual_horizon: int
+    zscore_lookback: int
+    percentile_lookback: int
+    entry_percentile: float = 0.05
+    exit_percentile: float = 0.40
+    btc_ema_period: int = 1200
+    maximum_holding_days: int = 60
+    maximum_positions: int = 2
+    position_weight: float = 0.20
+
+    def __post_init__(self) -> None:
+        if self.timeframe not in {"1h", "4h"}:
+            raise ValueError("adaptive residual timeframe must be 1h or 4h")
+        if min(
+            self.beta_lookback,
+            self.residual_horizon,
+            self.zscore_lookback,
+            self.percentile_lookback,
+            self.btc_ema_period,
+            self.maximum_holding_days,
+        ) < 1:
+            raise ValueError("adaptive residual lookbacks must be positive")
+        if not 0.0 < self.entry_percentile < self.exit_percentile < 1.0:
+            raise ValueError("adaptive residual percentiles must be ordered in (0, 1)")
+        if self.maximum_positions != 2:
+            raise ValueError("adaptive residual v1 maximum positions is fixed at two")
+        if self.position_weight != 0.20:
+            raise ValueError("adaptive residual v1 position weight is fixed at 20%")
+
+    @property
+    def entry_zscore(self) -> float:
+        """Compatibility threshold for the stateful target engine."""
+
+        return self.entry_percentile
+
+    @property
+    def exit_zscore(self) -> float:
+        """Compatibility threshold for the stateful target engine."""
+
+        return self.exit_percentile
+
+    @property
+    def periods_per_year(self) -> float:
+        return DAILY_PERIODS_PER_YEAR * (24.0 if self.timeframe == "1h" else 6.0)
+
+    @property
+    def dna_hash(self) -> str:
+        return stable_hash(
+            {
+                "family": ADAPTIVE_RESIDUAL_REVERSAL_FAMILY,
+                "engine_version": ADAPTIVE_RESIDUAL_REVERSAL_ENGINE_VERSION,
+                "parameters": asdict(self),
+            },
+            length=64,
+        )
+
+
+def adaptive_residual_reversal_parameter_set(
+) -> tuple[AdaptiveResidualReversalParameters, ...]:
+    """Return two economically fixed intraday challengers."""
+
+    return (
+        AdaptiveResidualReversalParameters(
+            timeframe="4h",
+            beta_lookback=360,
+            residual_horizon=30,
+            zscore_lookback=540,
+            percentile_lookback=180,
+            btc_ema_period=1200,
+            maximum_holding_days=60,
+        ),
+        AdaptiveResidualReversalParameters(
+            timeframe="1h",
+            beta_lookback=1440,
+            residual_horizon=120,
+            zscore_lookback=2160,
+            percentile_lookback=720,
+            btc_ema_period=4800,
+            maximum_holding_days=240,
+        ),
+    )
+
+
 def residual_reversal_parameter_set(
 ) -> tuple[ResidualReversalParameters, ...]:
     """Return the exact eight preregistered v1 strategy DNA rows."""
@@ -103,7 +196,7 @@ def residual_reversal_parameter_set(
 
 @dataclass(frozen=True)
 class ResidualReversalResult:
-    parameters: ResidualReversalParameters
+    parameters: ResidualReversalParameters | AdaptiveResidualReversalParameters
     portfolio_policy: RotationPortfolioPolicy
     metrics: dict[str, Any]
     integrity: dict[str, Any]
@@ -115,13 +208,33 @@ class ResidualReversalResult:
     signal_diagnostics: dict[str, Any]
 
     def summary(self) -> dict[str, Any]:
+        adaptive = isinstance(
+            self.parameters,
+            AdaptiveResidualReversalParameters,
+        )
         return {
-            "strategy_family": RESIDUAL_REVERSAL_FAMILY,
+            "strategy_family": (
+                ADAPTIVE_RESIDUAL_REVERSAL_FAMILY
+                if adaptive
+                else RESIDUAL_REVERSAL_FAMILY
+            ),
             "strategy_dna_hash": self.parameters.dna_hash,
             "result_type": "EXACT_BACKTEST",
-            "engine_version": RESIDUAL_REVERSAL_ENGINE_VERSION,
-            "timeframe": "1d",
-            "periods_per_year": DAILY_PERIODS_PER_YEAR,
+            "engine_version": (
+                ADAPTIVE_RESIDUAL_REVERSAL_ENGINE_VERSION
+                if adaptive
+                else RESIDUAL_REVERSAL_ENGINE_VERSION
+            ),
+            "timeframe": (
+                self.parameters.timeframe
+                if adaptive
+                else "1d"
+            ),
+            "periods_per_year": (
+                self.parameters.periods_per_year
+                if adaptive
+                else DAILY_PERIODS_PER_YEAR
+            ),
             "parameters": asdict(self.parameters),
             "portfolio_policy": asdict(self.portfolio_policy),
             "portfolio_policy_hash": self.portfolio_policy.policy_hash,
@@ -186,7 +299,7 @@ def _residual_zscores(
     closes: pd.DataFrame,
     *,
     benchmark: str,
-    parameters: ResidualReversalParameters,
+    parameters: ResidualReversalParameters | AdaptiveResidualReversalParameters,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build strictly backward-estimated beta residuals and z-scores."""
 
@@ -226,6 +339,38 @@ def _residual_zscores(
     return betas, zscore.replace([np.inf, -np.inf], np.nan)
 
 
+def _strictly_prior_percentile_scores(
+    zscore: pd.DataFrame,
+    *,
+    lookback: int,
+    entry_percentile: float,
+    exit_percentile: float,
+) -> pd.DataFrame:
+    """Encode causal entry/hold/exit regions from strictly prior quantiles."""
+
+    prior = zscore.shift(1)
+    entry_threshold = prior.rolling(
+        lookback,
+        min_periods=lookback,
+    ).quantile(entry_percentile)
+    exit_threshold = prior.rolling(
+        lookback,
+        min_periods=lookback,
+    ).quantile(exit_percentile)
+    known = zscore.notna() & entry_threshold.notna() & exit_threshold.notna()
+    score = pd.DataFrame(np.nan, index=zscore.index, columns=zscore.columns)
+    score = score.mask(known & (zscore > exit_threshold), 1.0)
+    score = score.mask(
+        known & (zscore <= exit_threshold),
+        max(entry_percentile + 1e-9, exit_percentile - 1e-9),
+    )
+    score = score.mask(
+        known & (zscore <= entry_threshold),
+        entry_percentile,
+    )
+    return score
+
+
 def _stateful_targets(
     *,
     closes: pd.DataFrame,
@@ -233,7 +378,7 @@ def _stateful_targets(
     valid: pd.DataFrame,
     btc_regime: pd.Series,
     benchmark: str,
-    parameters: ResidualReversalParameters,
+    parameters: ResidualReversalParameters | AdaptiveResidualReversalParameters,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create close-time targets with deterministic holding-state exits."""
 
@@ -324,7 +469,7 @@ def _stateful_targets(
 
 def backtest_residual_reversal(
     frames: Mapping[str, pd.DataFrame],
-    parameters: ResidualReversalParameters,
+    parameters: ResidualReversalParameters | AdaptiveResidualReversalParameters,
     *,
     fee_rate: float,
     slippage_bps: float,
@@ -351,17 +496,39 @@ def backtest_residual_reversal(
     warmup = max(
         parameters.beta_lookback
         + parameters.residual_horizon
-        + parameters.zscore_lookback,
+        + parameters.zscore_lookback
+        + (
+            parameters.percentile_lookback
+            if isinstance(
+                parameters,
+                AdaptiveResidualReversalParameters,
+            )
+            else 0
+        ),
         parameters.btc_ema_period,
         portfolio_policy.minimum_history_observations,
     )
     if len(closes) <= warmup + 3:
-        raise ValueError("insufficient history for residual reversal")
+        raise ValueError(
+            "insufficient history for residual reversal:"
+            f"observations={len(closes)}:warmup={warmup}"
+        )
 
     betas, zscore = _residual_zscores(
         closes,
         benchmark=benchmark,
         parameters=parameters,
+    )
+    adaptive = isinstance(parameters, AdaptiveResidualReversalParameters)
+    decision_score = (
+        _strictly_prior_percentile_scores(
+            zscore,
+            lookback=parameters.percentile_lookback,
+            entry_percentile=parameters.entry_percentile,
+            exit_percentile=parameters.exit_percentile,
+        )
+        if adaptive
+        else zscore
     )
     btc_ema = closes[benchmark].ewm(
         span=parameters.btc_ema_period,
@@ -374,12 +541,12 @@ def backtest_residual_reversal(
         (history >= portfolio_policy.minimum_history_observations)
         & closes.notna()
         & betas.notna()
-        & zscore.notna()
+        & decision_score.notna()
     )
     valid[benchmark] = False
     desired, signal_events = _stateful_targets(
         closes=closes,
-        zscore=zscore,
+        zscore=decision_score,
         valid=valid,
         btc_regime=btc_regime,
         benchmark=benchmark,
@@ -485,7 +652,17 @@ def backtest_residual_reversal(
             "btc_regime_positive",
         ],
     )
-    metrics = _performance_metrics(equity, executed, decisions)
+    periods_per_year = (
+        parameters.periods_per_year
+        if adaptive
+        else DAILY_PERIODS_PER_YEAR
+    )
+    metrics = _performance_metrics(
+        equity,
+        executed,
+        decisions,
+        periods_per_year=periods_per_year,
+    )
     exposure = executed.sum(axis=1)
     integrity = {
         "allowed_markets_only": set(executed.columns)
@@ -508,6 +685,7 @@ def backtest_residual_reversal(
         ),
         "strictly_prior_beta_estimation": True,
         "strictly_prior_zscore_baseline": True,
+        "strictly_prior_percentile_distribution": True,
         "benchmark_never_traded": bool(
             (executed[benchmark].abs() <= 1e-12).all()
         ),
@@ -549,6 +727,16 @@ def backtest_residual_reversal(
         "residual_horizon": parameters.residual_horizon,
         "zscore_lookback": parameters.zscore_lookback,
         "entry_zscore": parameters.entry_zscore,
+        "adaptive_percentile_mode": adaptive,
+        "entry_percentile": (
+            parameters.entry_percentile if adaptive else None
+        ),
+        "exit_percentile": (
+            parameters.exit_percentile if adaptive else None
+        ),
+        "percentile_lookback": (
+            parameters.percentile_lookback if adaptive else None
+        ),
     }
     return ResidualReversalResult(
         parameters=parameters,
@@ -625,11 +813,15 @@ def residual_reversal_period_metrics(
 
 
 __all__ = [
+    "ADAPTIVE_RESIDUAL_REVERSAL_ENGINE_VERSION",
+    "ADAPTIVE_RESIDUAL_REVERSAL_FAMILY",
+    "AdaptiveResidualReversalParameters",
     "DAILY_PERIODS_PER_YEAR",
     "RESIDUAL_REVERSAL_ENGINE_VERSION",
     "RESIDUAL_REVERSAL_FAMILY",
     "ResidualReversalParameters",
     "ResidualReversalResult",
+    "adaptive_residual_reversal_parameter_set",
     "backtest_residual_reversal",
     "residual_reversal_parameter_set",
     "residual_reversal_period_metrics",

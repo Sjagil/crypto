@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from config.settings import Settings
+from config.settings import EligibilityRecord, EligibilityStatus, Settings
 from research.features import FeaturePipeline
 
 
@@ -49,3 +49,30 @@ def isolated_settings(tmp_path) -> Settings:
         env_file=tmp_path / "does-not-exist.env",
         create_directories=False,
     )
+
+
+@pytest.fixture
+def restrictive_settings(isolated_settings: Settings) -> Settings:
+    """Explicit fail-closed policy for tests that exercise review semantics."""
+
+    markets = {
+        market: EligibilityRecord(
+            market=market,
+            status=EligibilityStatus.ALLOWED,
+            reason="TEST_ALLOWLIST",
+        )
+        for market in ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+    }
+    markets["ICP-EUR"] = EligibilityRecord(
+        market="ICP-EUR",
+        status=EligibilityStatus.REVIEW_REQUIRED,
+        reason="TEST_REVIEW_REQUIRED",
+    )
+    shariah = isolated_settings.shariah.model_copy(
+        update={
+            "markets": markets,
+            "operator_reviewed_all_eur_spot": False,
+            "operator_review_reason": None,
+        }
+    )
+    return isolated_settings.model_copy(update={"shariah": shariah})

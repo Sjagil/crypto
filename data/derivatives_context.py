@@ -42,6 +42,9 @@ class OptionsContract(BaseModel):
     open_interest: float = Field(ge=0)
     gamma: float = Field(ge=0)
     contract_multiplier: float = Field(gt=0)
+    gamma_source: str = "DERIVED_FROM_DERIBIT_MARK_IV"
+    flow_direction_score: float | None = Field(default=None, ge=-1, le=1)
+    flow_confidence: float | None = Field(default=None, ge=0, le=1)
     observed_at: datetime
     available_at: datetime
     stale: bool = False
@@ -161,6 +164,10 @@ class CryptoGEXAnalyzer:
         "gross_convention": "gamma * open_interest * contract_multiplier * spot^2 * 0.01",
         "signed_heuristic": "calls positive; puts negative",
         "dealer_positioning_known": False,
+        "flow_adjusted_convention": (
+            "gross_gex * observed_flow_direction_score * flow_confidence; "
+            "only emitted when both inputs are observed"
+        ),
         "warning": (
             "Open interest does not reveal dealer direction; signed GEX is a "
             "research heuristic, not observed dealer gamma."
@@ -203,13 +210,30 @@ class CryptoGEXAnalyzer:
             frame["gross_gex"],
             -frame["gross_gex"],
         )
+        flow_score = pd.to_numeric(
+            frame.get("flow_direction_score"), errors="coerce"
+        )
+        flow_confidence = pd.to_numeric(
+            frame.get("flow_confidence"), errors="coerce"
+        )
+        frame["flow_adjusted_gex"] = (
+            frame["gross_gex"] * flow_score * flow_confidence
+        )
+        frame["expiry"] = pd.to_datetime(frame["expiry"], utc=True)
+        frame["hours_to_expiry"] = (
+            frame["expiry"] - pd.Timestamp(observed_now)
+        ).dt.total_seconds() / 3_600.0
         by_strike = (
-            frame.groupby("strike", as_index=False)[["gross_gex", "signed_gex"]]
+            frame.groupby("strike", as_index=False)[
+                ["gross_gex", "signed_gex", "flow_adjusted_gex"]
+            ]
             .sum()
             .sort_values("strike")
         )
         by_expiry = (
-            frame.groupby("expiry", as_index=False)[["gross_gex", "signed_gex"]]
+            frame.groupby("expiry", as_index=False)[
+                ["gross_gex", "signed_gex", "flow_adjusted_gex"]
+            ]
             .sum()
             .sort_values("expiry")
         )
@@ -217,6 +241,15 @@ class CryptoGEXAnalyzer:
         puts = float(frame.loc[frame["option_type"].eq("put"), "gross_gex"].sum())
         gross = calls + puts
         net = calls - puts
+        flow_observed = bool(
+            frame["flow_adjusted_gex"].notna().all()
+            and len(frame)
+        )
+        flow_adjusted = (
+            float(frame["flow_adjusted_gex"].sum())
+            if flow_observed
+            else None
+        )
         dominant = by_strike.loc[by_strike["gross_gex"].idxmax()]
         nearest_expiry = pd.to_datetime(frame["expiry"], utc=True).min()
         nearest = float(
@@ -226,6 +259,33 @@ class CryptoGEXAnalyzer:
             ].sum()
         )
         spot = float(frame["spot_or_index_price"].iloc[-1])
+        calls_above = frame.loc[
+            frame["option_type"].eq("call") & frame["strike"].ge(spot)
+        ]
+        puts_below = frame.loc[
+            frame["option_type"].eq("put") & frame["strike"].le(spot)
+        ]
+
+        def wall(selected: pd.DataFrame) -> float | None:
+            if selected.empty:
+                return None
+            grouped = selected.groupby("strike")["gross_gex"].sum()
+            return float(grouped.idxmax())
+
+        near_spot = frame.loc[
+            frame["strike"].between(spot * 0.98, spot * 1.02)
+        ]
+
+        def horizon_gex(minimum_hours: float, maximum_hours: float) -> dict[str, float]:
+            selected = frame.loc[
+                frame["hours_to_expiry"].gt(minimum_hours)
+                & frame["hours_to_expiry"].le(maximum_hours)
+            ]
+            return {
+                "absolute_gex": float(selected["gross_gex"].sum()),
+                "convention_signed_gex": float(selected["signed_gex"].sum()),
+                "contract_count": int(len(selected)),
+            }
         signs = np.sign(by_strike["signed_gex"].to_numpy())
         flip_indices = np.where(np.diff(signs) != 0)[0]
         flip = None
@@ -244,17 +304,32 @@ class CryptoGEXAnalyzer:
                 )
         return {
             "status": "PARTIAL" if bool(frame["stale"].any()) else "PASSED",
+            "absolute_gex": gross,
+            "convention_signed_gex": net,
             "call_gex_proxy": calls,
             "put_gex_proxy": puts,
             "gross_gex_proxy": gross,
             "net_gex_proxy": net,
+            "flow_adjusted_gex": flow_adjusted,
+            "flow_adjusted_status": (
+                "AVAILABLE" if flow_observed else "UNAVAILABLE_MISSING_OPTION_FLOW"
+            ),
             "gex_by_strike": by_strike.to_dict(orient="records"),
             "gex_by_expiry": by_expiry.assign(
                 expiry=lambda value: value["expiry"].astype(str)
             ).to_dict(orient="records"),
             "nearest_expiry_concentration": nearest / gross if gross else 0.0,
             "dominant_gamma_strike": float(dominant["strike"]),
+            "max_gamma_strike": float(dominant["strike"]),
+            "call_wall": wall(calls_above),
+            "put_wall": wall(puts_below),
             "gamma_concentration": float(dominant["gross_gex"]) / gross if gross else 0.0,
+            "gex_concentration_within_2pct": (
+                float(near_spot["gross_gex"].sum()) / gross if gross else 0.0
+            ),
+            "zero_day_gex": horizon_gex(0.0, 24.0),
+            "weekly_gex": horizon_gex(0.0, 24.0 * 7.0),
+            "monthly_gex": horizon_gex(24.0 * 7.0, 24.0 * 45.0),
             "gamma_flip_proxy": flip,
             "spot_distance_from_dominant_gamma": (
                 spot / float(dominant["strike"]) - 1

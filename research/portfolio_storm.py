@@ -21,6 +21,7 @@ from research.optimization import (
     probability_of_backtest_overfitting,
 )
 from utils.common import stable_hash
+from utils.pandas_time import sunday_week_end_labels
 
 STORM_ENGINE_VERSION = "1.0.0"
 STORM_TRIAL_COUNT = 5_000
@@ -416,7 +417,9 @@ def _weekly_return_matrix(
         daily_returns,
         index=pd.DatetimeIndex(timestamps),
     )
-    weekly = (1.0 + frame).resample("W-SUN").prod() - 1.0
+    weekly = (1.0 + frame).groupby(
+        sunday_week_end_labels(frame.index)
+    ).prod() - 1.0
     weekly = weekly.replace([np.inf, -np.inf], np.nan).dropna(how="any")
     if len(weekly) < 8:
         raise ValueError("multiple testing requires at least eight weekly observations")

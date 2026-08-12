@@ -48,6 +48,36 @@ class CanaryPolicy:
             spot_only=execution.spot_only,
         )
 
+    @classmethod
+    def from_cap_limits(
+        cls,
+        settings: Settings,
+        *,
+        maximum_order_eur: Decimal,
+        maximum_total_eur: Decimal,
+        maximum_open_positions: int,
+        capital_level: int,
+        enabled: bool,
+    ) -> "CanaryPolicy":
+        """Build an evidence- and operator-authorized runtime policy.
+
+        The canonical settings remain the immutable Level-1 baseline. Higher
+        values can reach this constructor only after practical-governance
+        evidence, a separate capital-level approval and canonical preflight.
+        """
+
+        return cls(
+            policy_id=f"BITVAVO_SPOT_CANARY_CAPITAL_LEVEL_{capital_level}",
+            enabled=enabled,
+            maximum_order_eur=maximum_order_eur,
+            maximum_total_eur=maximum_total_eur,
+            maximum_open_positions=maximum_open_positions,
+            leverage=Decimal("1"),
+            shorts_allowed=False,
+            autoscale=False,
+            spot_only=settings.execution.spot_only,
+        )
+
     def validate(self) -> None:
         if self.maximum_order_eur <= ZERO:
             raise ValueError("canary maximum order must be positive")
@@ -55,8 +85,8 @@ class CanaryPolicy:
             raise ValueError("canary maximum total must be positive")
         if self.maximum_order_eur > self.maximum_total_eur:
             raise ValueError("canary order cap exceeds total cap")
-        if self.maximum_open_positions != 1:
-            raise ValueError("canary must allow exactly one position")
+        if not 1 <= self.maximum_open_positions <= 3:
+            raise ValueError("canary must allow between one and three positions")
         if self.leverage != Decimal("1"):
             raise ValueError("canary leverage must equal one")
         if self.shorts_allowed or self.autoscale or not self.spot_only:

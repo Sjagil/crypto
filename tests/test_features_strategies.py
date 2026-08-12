@@ -12,6 +12,7 @@ from core.contracts import (
 from research.features import (
     FeaturePipeline,
     confirmed_fractals,
+    higher_timeframe_regime_features,
     multi_timeframe_fractal_alignment,
     volume_features,
 )
@@ -83,9 +84,79 @@ def test_higher_timeframe_state_waits_for_source_candle_close(
     )
 
 
+def test_higher_timeframe_trend_waits_for_source_candle_close(
+    ohlcv: pd.DataFrame,
+) -> None:
+    higher = ohlcv.iloc[:80].copy()
+    higher.index = pd.date_range(
+        "2023-01-01",
+        periods=len(higher),
+        freq="1D",
+        tz="UTC",
+    )
+    higher.attrs["timeframe"] = "1d"
+    base_index = pd.date_range(
+        "2023-03-20",
+        periods=72,
+        freq="4h",
+        tz="UTC",
+    )
+    aligned = higher_timeframe_regime_features(
+        base_index,
+        {"1d": higher},
+        base_timeframe="4h",
+    )
+    source = aligned["htf_1d_source_timestamp"].dropna()
+    assert not source.empty
+    assert all(
+        pd.Timestamp(source_timestamp).to_pydatetime() + timedelta(days=1)
+        <= pd.Timestamp(decision_timestamp).to_pydatetime()
+        + timedelta(hours=4)
+        for decision_timestamp, source_timestamp in source.items()
+    )
+    assert "htf_1d_trend_bullish" in aligned
+
+
+def test_month_context_waits_for_calendar_month_close(
+    ohlcv: pd.DataFrame,
+) -> None:
+    higher = ohlcv.iloc[:9].copy()
+    higher.index = pd.date_range(
+        "2025-01-01",
+        periods=len(higher),
+        freq="MS",
+        tz="UTC",
+    )
+    higher.attrs["timeframe"] = "1mo"
+    base_index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-01-31T22:00:00Z"),
+            pd.Timestamp("2025-02-01T00:00:00Z"),
+        ]
+    )
+    aligned = multi_timeframe_fractal_alignment(
+        base_index,
+        {"1mo": higher},
+        base_timeframe="1h",
+    )
+    assert pd.isna(
+        aligned.loc[
+            base_index[0],
+            "fractal_source_timestamp_1mo",
+        ]
+    )
+    assert (
+        aligned.loc[
+            base_index[1],
+            "fractal_source_timestamp_1mo",
+        ]
+        == higher.index[0]
+    )
+
+
 def test_every_registered_strategy_is_long_only(features: pd.DataFrame) -> None:
     registry = strategy_registry()
-    assert len(registry) == 14
+    assert len(registry) == 15
     for strategy in registry.values():
         assert strategy.metadata.long_only
         output = strategy.generate(features)

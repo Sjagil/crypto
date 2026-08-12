@@ -491,9 +491,39 @@ def _build_portfolio_forward_evidence(
         benchmark_market="BTC-EUR",
         portfolio_policy=result.portfolio_policy,
     )
-    decisions = result.decisions[
-        result.decisions["reason"] != "TERMINAL_LIQUIDATION"
-    ].copy()
+    raw_decisions = result.decisions
+    if raw_decisions.empty:
+        # A valid frozen strategy can have no turnover events in the observed
+        # window.  Preserve an empty, typed event stream instead of treating
+        # the absence of DataFrame columns as a schema failure.
+        decisions = pd.DataFrame(
+            columns=(
+                "decision_at",
+                "executed_at",
+                "reason",
+                "turnover",
+                "target_weights",
+            )
+        )
+    else:
+        required_decision_columns = {
+            "decision_at",
+            "executed_at",
+            "reason",
+            "turnover",
+            "target_weights",
+        }
+        missing_decision_columns = required_decision_columns - set(
+            raw_decisions.columns
+        )
+        if missing_decision_columns:
+            raise ValueError(
+                "portfolio decisions missing required columns: "
+                f"{sorted(missing_decision_columns)}"
+            )
+        decisions = raw_decisions[
+            raw_decisions["reason"] != "TERMINAL_LIQUIDATION"
+        ].copy()
     decisions["executed_at"] = pd.to_datetime(
         decisions["executed_at"],
         utc=True,

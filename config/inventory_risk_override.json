@@ -1,0 +1,10 @@
+{
+  "active": true,
+  "allow_inventory_increase": false,
+  "approval_reference": "operator_tao_concentration_accepted_20260804",
+  "asset": "TAO",
+  "maximum_additional_managed_exposure_eur": "75",
+  "maximum_quantity": "0.68008471",
+  "reason": "Existing operator-owned TAO inventory is grandfathered under the approved Level-2 managed-capital envelope. New TAO accumulation remains blocked.",
+  "schema_version": "inventory_risk_override_v1"
+}

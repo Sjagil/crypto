@@ -111,6 +111,37 @@ def test_rotation_selects_relative_winner_and_records_terminal_liquidation() -> 
     assert result.executed_weights.iloc[-1].sum() == pytest.approx(0.0)
 
 
+def test_rotation_accepts_canonical_timestamp_column_layout() -> None:
+    frames = {
+        market: frame.reset_index(names="timestamp")
+        for market, frame in _rotation_frames().items()
+    }
+    result = backtest_rotation(
+        frames,
+        _parameters(),
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+    )
+    assert isinstance(result.equity_curve.index, pd.DatetimeIndex)
+    assert result.integrity["decision_at_close_execution_next_open"]
+
+
+def test_rotation_rejects_non_temporal_frame_without_timestamp_column() -> None:
+    frames = {
+        market: frame.reset_index(drop=True)
+        for market, frame in _rotation_frames().items()
+    }
+    with pytest.raises(TypeError, match="DatetimeIndex or timestamp column"):
+        backtest_rotation(
+            frames,
+            _parameters(),
+            fee_rate=0.0025,
+            slippage_bps=8.0,
+            spread_bps=5.0,
+        )
+
+
 def test_rotation_future_close_cannot_change_prior_decisions_or_equity() -> None:
     frames = _rotation_frames()
     baseline = backtest_rotation(
@@ -214,7 +245,7 @@ def test_rotation_asset_joins_only_after_its_own_causal_warmup() -> None:
         slippage_bps=8.0,
         spread_bps=5.0,
     )
-    cutoff = late.index[0] + pd.Timedelta(days=19)
+    cutoff = late.index[0] + pd.Timedelta(19, unit="D")
     pd.testing.assert_series_equal(
         baseline.equity_curve.loc[:cutoff],
         expanded.equity_curve.loc[:cutoff],

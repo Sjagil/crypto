@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import hashlib
 import json
 import logging
 import os
@@ -15,9 +16,12 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from config.settings import (
     SUPPORTED_TIMEFRAMES,
@@ -26,6 +30,7 @@ from config.settings import (
     normalize_timeframe,
 )
 from core.contracts import (
+    DataValidationError,
     HistoryProfile,
     NormalizedDataRecord,
     ProviderStatus,
@@ -33,9 +38,12 @@ from core.contracts import (
 )
 from utils.common import (
     atomic_write_json,
+    read_json,
+    sha256_file,
     sha256_text,
     stable_hash,
     stable_json,
+    utc_iso,
     utc_now,
 )
 
@@ -56,6 +64,20 @@ DEFILLAMA_STABLECOINS_REST = "https://stablecoins.llama.fi"
 DEFILLAMA_REST = "https://api.llama.fi"
 DERIBIT_REST = "https://www.deribit.com/api/v2/public"
 LOGGER = logging.getLogger("crypto.data_loader")
+BITVAVO_TIMEZONE = ZoneInfo("Europe/Amsterdam")
+
+
+def _bitvavo_week_boundary_ms(value_ms: int) -> int:
+    """Floor to Bitvavo's Monday 00:00 Europe/Amsterdam request boundary."""
+    instant = datetime.fromtimestamp(max(0, value_ms) / 1_000, tz=UTC)
+    local = instant.astimezone(BITVAVO_TIMEZONE)
+    monday = (local - timedelta(days=local.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return int(monday.astimezone(UTC).timestamp() * 1_000)
 
 CAPABILITY_RETRIEVED_AT = "2026-07-24"
 PROVIDER_NATIVE_TIMEFRAMES: dict[str, tuple[str, ...]] = {
@@ -72,14 +94,40 @@ PROVIDER_NATIVE_TIMEFRAMES: dict[str, tuple[str, ...]] = {
         "12h",
         "1d",
         "1W",
-        "1M",
+        "1mo",
     ),
     "kraken": ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1W"),
-    "mexc": ("1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "1W", "1M"),
+    "mexc": ("1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "1W", "1mo"),
 }
 RESAMPLE_SOURCE: dict[str, dict[str, str]] = {
-    "kraken": {"2h": "1h", "6h": "1h", "8h": "1h", "12h": "1h", "1M": "1d"},
-    "mexc": {"2h": "1h", "6h": "1h", "12h": "1h"},
+    "bitvavo": {
+        "3m": "1m",
+        "3h": "1h",
+        "2d": "1d",
+        "3d": "1d",
+        "1mo": "1d",
+    },
+    "kraken": {
+        "3m": "1m",
+        "2h": "1h",
+        "3h": "1h",
+        "6h": "1h",
+        "8h": "1h",
+        "12h": "1h",
+        "2d": "1d",
+        "3d": "1d",
+        "1mo": "1d",
+    },
+    "mexc": {
+        "3m": "1m",
+        "2h": "1h",
+        "3h": "1h",
+        "6h": "1h",
+        "12h": "1h",
+        "2d": "1d",
+        "3d": "1d",
+        "1mo": "1d",
+    },
 }
 
 HISTORY_TARGETS: dict[HistoryProfile, dict[str, timedelta | None]] = {
@@ -89,18 +137,22 @@ HISTORY_TARGETS: dict[HistoryProfile, dict[str, timedelta | None]] = {
     },
     HistoryProfile.STANDARD: {
         "1m": timedelta(days=180),
+        "3m": timedelta(days=180),
         "5m": timedelta(days=365),
         "15m": timedelta(days=365 * 2),
         "30m": timedelta(days=365 * 2),
         "1h": timedelta(days=365 * 3),
         "2h": timedelta(days=365 * 4),
+        "3h": timedelta(days=365 * 4),
         "4h": timedelta(days=365 * 4),
         "6h": timedelta(days=365 * 4),
         "8h": timedelta(days=365 * 4),
         "12h": timedelta(days=365 * 4),
         "1d": None,
+        "2d": None,
+        "3d": None,
         "1W": None,
-        "1M": None,
+        "1mo": None,
     },
     HistoryProfile.DEEP: {timeframe: None for timeframe in SUPPORTED_TIMEFRAMES},
     HistoryProfile.MAXIMUM: {timeframe: None for timeframe in SUPPORTED_TIMEFRAMES},
@@ -248,16 +300,40 @@ class BitvavoAdapter(ProviderAdapter):
         rows: list[Any] = []
         seen: set[int] = set()
         interval_ms = TIMEFRAME_SECONDS[timeframe] * 1_000
+        provider_interval = (
+            "1M"
+            if timeframe == "1mo"
+            else timeframe
+        )
         start_ms = int(start.timestamp() * 1_000) // interval_ms * interval_ms
         end_ms = int(end.timestamp() * 1_000)
-        cursor_end = end_ms // interval_ms * interval_ms
+        # Fetch closed candles only.  Advancing an in-progress weekly cursor
+        # to its theoretical interval end can put `end` several days in the
+        # future, which Bitvavo rejects with HTTP 400.  The same rule also
+        # prevents an incomplete candle from entering lower-timeframe data.
+        observed_ms = int(observed.timestamp() * 1_000)
+        if timeframe == "1W":
+            # Bitvavo validates weekly request boundaries at Monday 00:00 in
+            # Europe/Amsterdam (Sunday 22:00 UTC during summer time), while its
+            # returned candle timestamp is normalized to Monday UTC.
+            start_ms = _bitvavo_week_boundary_ms(start_ms)
+            selected_end_ms = min(end_ms, observed_ms)
+            cursor_boundary = _bitvavo_week_boundary_ms(selected_end_ms)
+            cursor_end = cursor_boundary - interval_ms
+        else:
+            cursor_end = min(end_ms, observed_ms) // interval_ms * interval_ms
+        if cursor_end + interval_ms > observed_ms:
+            cursor_end -= interval_ms
         while cursor_end >= start_ms:
-            query_end = cursor_end if cursor_end > start_ms else start_ms + interval_ms - 1
+            # Bitvavo requires `start` to align with a candle open and `end`
+            # to align exactly with an interval end.  The previous `- 1 ms`
+            # boundary was rejected for single-candle resume windows.
+            query_end = cursor_end + interval_ms
             page = await self.request(
                 "GET",
                 f"{BITVAVO_REST}/{symbol}/candles",
                 {
-                    "interval": timeframe,
+                    "interval": provider_interval,
                     "start": start_ms,
                     "end": query_end,
                     "limit": 1_440,
@@ -578,6 +654,7 @@ class MexcAdapter(ProviderAdapter):
         while cursor < end_ms:
             mexc_interval = {
                 "1h": "60m",
+                "1mo": "1M",
             }.get(timeframe, timeframe)
             page = await self.request(
                 "GET",
@@ -1435,7 +1512,20 @@ class DataLoader:
                     source_timeframe=timeframe,
                 )
             self._persist_raw_batch(new)
-            self._database_upsert("candles", new)
+            # The canonical Parquet files retain the complete history. Keep
+            # the relational projection bounded on resume: projecting a
+            # multi-year 1m cache as one list can consume tens of gigabytes
+            # without adding new evidence. Newly fetched rows are always
+            # projected in full; an unchanged cache contributes a recent tail
+            # so restored databases regain operationally relevant candles.
+            projection = (
+                self._deduplicate(new)
+                if new
+                else result[
+                    -self.settings.market_data.maximum_database_batch_size :
+                ]
+            )
+            self._database_upsert("candles", projection)
             self._update_watermark(
                 provider=name,
                 market=normalize_market(market),
@@ -1554,6 +1644,1587 @@ class DataLoader:
         }
 
     @staticmethod
+    def _parquet_time_summary(path: Path) -> dict[str, Any]:
+        """Read row counts and temporal bounds without materializing all rows."""
+
+        parquet = pq.ParquetFile(path)
+        if parquet.metadata.num_rows <= 0:
+            return {
+                "rows": 0,
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+            }
+        first = parquet.read_row_group(
+            0,
+            columns=["timestamp"],
+        ).column("timestamp")
+        last = parquet.read_row_group(
+            parquet.metadata.num_row_groups - 1,
+            columns=["timestamp"],
+        ).column("timestamp")
+        first_values = pd.to_datetime(
+            first.to_pylist(),
+            utc=True,
+            errors="raise",
+        )
+        last_values = pd.to_datetime(
+            last.to_pylist(),
+            utc=True,
+            errors="raise",
+        )
+        return {
+            "rows": int(parquet.metadata.num_rows),
+            "earliest_timestamp": first_values.min().to_pydatetime(),
+            "latest_timestamp": last_values.max().to_pydatetime(),
+        }
+
+    @staticmethod
+    def _merge_parquet_segments(
+        segments: Iterable[Path],
+        target: Path,
+    ) -> Path:
+        """Atomically concatenate sorted, non-overlapping Parquet segments."""
+
+        selected = [
+            path
+            for path in segments
+            if path.is_file()
+            and DataLoader._parquet_time_summary(path)[
+                "rows"
+            ]
+            > 0
+        ]
+        if not selected:
+            raise ValueError("at least one Parquet segment is required")
+        selected.sort(
+            key=lambda path: (
+                DataLoader._parquet_time_summary(path)[
+                    "earliest_timestamp"
+                ]
+                or datetime.max.replace(tzinfo=UTC)
+            )
+        )
+        schemas = [
+            pq.ParquetFile(path).schema_arrow
+            for path in selected
+        ]
+        schema = pa.unify_schemas(schemas)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet"
+        )
+        writer = pq.ParquetWriter(
+            temporary,
+            schema,
+            compression="snappy",
+        )
+        try:
+            for path in selected:
+                source = pq.ParquetFile(path)
+                for index in range(source.metadata.num_row_groups):
+                    table = source.read_row_group(index)
+                    if table.schema != schema:
+                        table = table.cast(schema, safe=False)
+                    writer.write_table(table)
+        finally:
+            writer.close()
+        os.replace(temporary, target)
+        return target
+
+    @staticmethod
+    def _copy_native_cache_to_normalized(
+        source: Path,
+        target: Path,
+        *,
+        provider: str,
+        market: str,
+        timeframe: str,
+    ) -> Path:
+        """Project a provider cache to normalized storage one row group at a time."""
+
+        parquet = pq.ParquetFile(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet"
+        )
+        writer: pq.ParquetWriter | None = None
+        try:
+            for index in range(parquet.metadata.num_row_groups):
+                table = parquet.read_row_group(index)
+                size = table.num_rows
+                table = table.append_column(
+                    "source_provider",
+                    pa.array([provider] * size),
+                )
+                table = table.append_column(
+                    "source_timeframe",
+                    pa.array([timeframe] * size),
+                )
+                table = table.append_column(
+                    "quote_currency",
+                    pa.array([market.split("-")[-1]] * size),
+                )
+                table = table.append_column(
+                    "source_classification",
+                    pa.array(["PROVIDER_NATIVE"] * size),
+                )
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temporary,
+                        table.schema,
+                        compression="snappy",
+                    )
+                writer.write_table(table)
+        finally:
+            if writer is not None:
+                writer.close()
+        if writer is None:
+            raise ValueError("native cache contains no row groups")
+        os.replace(temporary, target)
+        return target
+
+    async def _sync_native_ohlcv_compact(
+        self,
+        *,
+        provider: str,
+        market: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        run_id: str | None,
+        resume: bool,
+        progress_callback: (
+            Callable[[Mapping[str, Any]], None] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        """Resume a complete native series in bounded provider and Parquet batches."""
+
+        name = provider.casefold()
+        canonical_market = normalize_market(market)
+        target = normalize_timeframe(timeframe)
+        if target not in PROVIDER_NATIVE_TIMEFRAMES[name]:
+            raise ValueError(
+                f"{target} is not native for {name}"
+            )
+        run = run_id or str(uuid.uuid4())
+        cache_base = self._cache_path(
+            name,
+            canonical_market,
+            target,
+            "ohlcv",
+        )
+        cache_path = cache_base.with_suffix(".parquet")
+        csv_path = cache_base.with_suffix(".csv")
+        if resume and not cache_path.is_file() and csv_path.is_file():
+            legacy = pd.read_csv(csv_path)
+            self._atomic_parquet(legacy, cache_path)
+        interval = timedelta(seconds=TIMEFRAME_SECONDS[target])
+        close_cutoff = end - timedelta(
+            seconds=self.settings.market_data.candle_close_grace_for(
+                target
+            )
+        )
+        last_closed_open_seconds = (
+            int((close_cutoff - interval).timestamp())
+            // TIMEFRAME_SECONDS[target]
+            * TIMEFRAME_SECONDS[target]
+        )
+        fetch_end = datetime.fromtimestamp(
+            last_closed_open_seconds,
+            tz=UTC,
+        )
+        existing_summary = (
+            self._parquet_time_summary(cache_path)
+            if resume and cache_path.is_file()
+            else {
+                "rows": 0,
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+            }
+        )
+        missing_ranges: list[tuple[datetime, datetime]] = []
+        earliest = existing_summary["earliest_timestamp"]
+        latest = existing_summary["latest_timestamp"]
+        if fetch_end < start:
+            missing_ranges = []
+        elif not existing_summary["rows"]:
+            missing_ranges.append((start, fetch_end))
+        else:
+            if start < earliest:
+                missing_ranges.append(
+                    (
+                        start,
+                        min(fetch_end, earliest - interval),
+                    )
+                )
+            if fetch_end >= latest + interval:
+                missing_ranges.append(
+                    (
+                        max(start, latest + interval),
+                        fetch_end,
+                    )
+                )
+
+        staging = cache_path.parent / (
+            f".{cache_path.stem}.compact_parts"
+        )
+        staging.mkdir(parents=True, exist_ok=True)
+        staged_parts: list[Path] = []
+        rows_per_window = max(
+            10_000,
+            self.settings.market_data.maximum_database_batch_size
+            * 4,
+        )
+        downloaded_rows = 0
+        completed_ranges: list[tuple[datetime, datetime]] = []
+        total_windows = sum(
+            max(
+                0,
+                int(
+                    (range_end - range_start)
+                    / interval
+                )
+                + 1,
+            )
+            for range_start, range_end in missing_ranges
+        )
+        total_windows = (
+            (total_windows + rows_per_window - 1)
+            // rows_per_window
+        )
+        completed_windows = 0
+
+        def notify(subphase: str, **details: Any) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "provider": name,
+                    "market": canonical_market,
+                    "timeframe": target,
+                    "source_timeframe": target,
+                    "subphase": subphase,
+                    "completed_windows": completed_windows,
+                    "total_windows": total_windows,
+                    "downloaded_rows": downloaded_rows,
+                    **details,
+                }
+            )
+
+        notify(
+            "NATIVE_HISTORY_DISCOVERY",
+            cached_rows=int(existing_summary["rows"]),
+        )
+        for range_start, range_end in missing_ranges:
+            cursor = range_start
+            while cursor <= range_end:
+                window_end = min(
+                    range_end,
+                    cursor
+                    + interval * (rows_per_window - 1),
+                )
+                part = staging / (
+                    f"{int(cursor.timestamp())}_"
+                    f"{int(window_end.timestamp())}.parquet"
+                )
+                marker = part.with_suffix(".done.json")
+                marker_payload = (
+                    read_json(marker)
+                    if marker.is_file()
+                    else {}
+                )
+                marker_rows = int(
+                    marker_payload.get("rows") or 0
+                )
+                marker_reusable = marker.is_file() and (
+                    marker_rows == 0
+                    or cache_path.is_file()
+                    or part.is_file()
+                )
+                if part.is_file() or marker_reusable:
+                    if part.is_file():
+                        staged_parts.append(part)
+                    if not marker.is_file():
+                        atomic_write_json(
+                            marker,
+                            {
+                                "provider": name,
+                                "market": canonical_market,
+                                "timeframe": target,
+                                "start": cursor,
+                                "end": window_end,
+                                "rows": (
+                                    pq.ParquetFile(
+                                        part
+                                    ).metadata.num_rows
+                                ),
+                                "status": (
+                                    "FETCHED_AND_STAGED"
+                                ),
+                            },
+                        )
+                    completed_ranges.append((cursor, window_end))
+                    completed_windows += 1
+                    notify("NATIVE_WINDOW_RESUMED")
+                    cursor = window_end + interval
+                    continue
+
+                async def fetch_window(
+                    selected_start: datetime = cursor,
+                    selected_end: datetime = window_end,
+                ) -> list[NormalizedDataRecord]:
+                    return await self.adapters[name].ohlcv(
+                        canonical_market,
+                        target,
+                        selected_start,
+                        selected_end,
+                        run,
+                    )
+
+                fetched = await self._tracked(
+                    name,
+                    fetch_window,
+                )
+                bounded = self._deduplicate(
+                    record.model_copy(
+                        update={
+                            "closed": (
+                                record.timestamp + interval
+                                <= close_cutoff
+                            )
+                        }
+                    )
+                    for record in fetched
+                    if cursor
+                    <= record.timestamp
+                    <= window_end
+                )
+                if bounded:
+                    self._persist_dataset(
+                        part.with_suffix(""),
+                        bounded,
+                    )
+                    self._persist_raw_batch(bounded)
+                    self._database_upsert("candles", bounded)
+                    staged_parts.append(part)
+                    downloaded_rows += len(bounded)
+                atomic_write_json(
+                    marker,
+                    {
+                        "provider": name,
+                        "market": canonical_market,
+                        "timeframe": target,
+                        "start": cursor,
+                        "end": window_end,
+                        "rows": len(bounded),
+                        "status": (
+                            "FETCHED_AND_STAGED"
+                            if bounded
+                            else "CONFIRMED_EMPTY"
+                        ),
+                    },
+                )
+                completed_ranges.append((cursor, window_end))
+                completed_windows += 1
+                notify(
+                    "NATIVE_WINDOW_FETCHED",
+                    latest_window_start=cursor,
+                    latest_window_end=window_end,
+                    latest_window_rows=len(bounded),
+                )
+                cursor = window_end + interval
+
+        if staged_parts:
+            notify(
+                "MERGING_NATIVE_SEGMENTS",
+                segment_count=len(staged_parts),
+            )
+            segments = [
+                *(
+                    [cache_path]
+                    if cache_path.is_file()
+                    else []
+                ),
+                *staged_parts,
+            ]
+            self._merge_parquet_segments(
+                segments,
+                cache_path,
+            )
+        final_cache_summary = (
+            self._parquet_time_summary(cache_path)
+            if cache_path.is_file()
+            else {
+                "rows": 0,
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+            }
+        )
+        if not final_cache_summary["rows"]:
+            return {
+                "provider": name,
+                "market": canonical_market,
+                "timeframe": target,
+                "source_classification": "PROVIDER_NATIVE",
+                "source_timeframe": target,
+                "rows": 0,
+                "received_rows": 0,
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+                "status": ProviderStatus.PARTIAL.value,
+                "reason_code": "EMPTY_PROVIDER_RESPONSE",
+                "resource_batching_only": True,
+            }
+        normalized_path = (
+            self.settings.paths.processed_data_dir
+            / name
+            / canonical_market
+            / f"{target}.parquet"
+        )
+        if staged_parts or not normalized_path.is_file():
+            notify("COPYING_NATIVE_NORMALIZED")
+            self._copy_native_cache_to_normalized(
+                cache_path,
+                normalized_path,
+                provider=name,
+                market=canonical_market,
+                timeframe=target,
+            )
+        summary = final_cache_summary
+        notify(
+            "NATIVE_HISTORY_COMPLETE",
+            cached_rows=int(summary["rows"]),
+        )
+        for part in staged_parts:
+            part.unlink(missing_ok=True)
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        return {
+            "provider": name,
+            "market": canonical_market,
+            "timeframe": target,
+            "source_classification": "PROVIDER_NATIVE",
+            "source_timeframe": target,
+            "rows": summary["rows"],
+            "received_rows": summary["rows"],
+            "downloaded_rows": downloaded_rows,
+            "earliest_timestamp": summary["earliest_timestamp"],
+            "latest_timestamp": summary["latest_timestamp"],
+            "status": (
+                ProviderStatus.READY.value
+                if summary["rows"]
+                else ProviderStatus.PARTIAL.value
+            ),
+            "reason_code": (
+                "COMPACT_NATIVE_HISTORY_READY"
+                if summary["rows"]
+                else "EMPTY_PROVIDER_RESPONSE"
+            ),
+            "completed_page_ranges": [
+                [left.isoformat(), right.isoformat()]
+                for left, right in completed_ranges
+            ],
+            "resource_batching_only": True,
+        }
+
+    def _resample_cached_ohlcv_compact(
+        self,
+        *,
+        provider: str,
+        market: str,
+        source_timeframe: str,
+        target_timeframe: str,
+        progress_callback: (
+            Callable[[Mapping[str, Any]], None] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        """Resample a large native cache in bounded Arrow batches."""
+
+        name = provider.casefold()
+        canonical_market = normalize_market(market)
+        source = normalize_timeframe(source_timeframe)
+        target = normalize_timeframe(target_timeframe)
+        source_path = self._cache_path(
+            name,
+            canonical_market,
+            source,
+            "ohlcv",
+        ).with_suffix(".parquet")
+        if not source_path.is_file():
+            return {
+                "provider": name,
+                "market": canonical_market,
+                "timeframe": target,
+                "source_classification": (
+                    "RESAMPLED_FROM_NATIVE"
+                ),
+                "source_timeframe": source,
+                "rows": 0,
+                "received_rows": 0,
+                "status": ProviderStatus.PARTIAL.value,
+                "reason_code": "SOURCE_CACHE_NOT_AVAILABLE",
+                "resource_batching_only": True,
+            }
+        output = (
+            self.settings.paths.processed_data_dir
+            / name
+            / canonical_market
+            / f"{target}.parquet"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            output.is_file()
+            and output.stat().st_mtime_ns
+            >= source_path.stat().st_mtime_ns
+        ):
+            summary = self._parquet_time_summary(output)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "provider": name,
+                        "market": canonical_market,
+                        "timeframe": target,
+                        "source_timeframe": source,
+                        "subphase": "RESAMPLE_UP_TO_DATE",
+                        "processed_source_rows": 0,
+                        "total_source_rows": int(
+                            pq.ParquetFile(
+                                source_path
+                            ).metadata.num_rows
+                        ),
+                        "batch_index": 0,
+                        "batch_count": 0,
+                        "emitted_rows": int(summary["rows"]),
+                    }
+                )
+            return {
+                "provider": name,
+                "market": canonical_market,
+                "timeframe": target,
+                "source_classification": (
+                    "RESAMPLED_FROM_NATIVE"
+                ),
+                "source_timeframe": source,
+                "rows": int(summary["rows"]),
+                "received_rows": int(summary["rows"]),
+                "earliest_timestamp": summary[
+                    "earliest_timestamp"
+                ],
+                "latest_timestamp": summary[
+                    "latest_timestamp"
+                ],
+                "status": ProviderStatus.READY.value,
+                "reason_code": "COMPACT_RESAMPLE_UP_TO_DATE",
+                "incomplete_buckets_excluded": None,
+                "resource_batching_only": True,
+            }
+        temporary = output.with_name(
+            f".{output.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet"
+        )
+        parquet = pq.ParquetFile(source_path)
+        total_source_rows = int(parquet.metadata.num_rows)
+        batch_size = 100_000
+        batch_count = max(
+            1,
+            (total_source_rows + batch_size - 1)
+            // batch_size,
+        )
+        processed_source_rows = 0
+        processed_batches = 0
+        carry = pd.DataFrame()
+        writer: pq.ParquetWriter | None = None
+        emitted_rows = 0
+        incomplete_buckets = 0
+        earliest_output: datetime | None = None
+        latest_output: datetime | None = None
+        now = utc_now()
+
+        def notify(subphase: str) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "provider": name,
+                    "market": canonical_market,
+                    "timeframe": target,
+                    "source_timeframe": source,
+                    "subphase": subphase,
+                    "processed_source_rows": (
+                        processed_source_rows
+                    ),
+                    "total_source_rows": total_source_rows,
+                    "batch_index": processed_batches,
+                    "batch_count": batch_count,
+                    "emitted_rows": emitted_rows,
+                    "incomplete_buckets_excluded": (
+                        incomplete_buckets
+                    ),
+                }
+            )
+
+        def bucket_bounds(
+            timestamps: pd.Series,
+        ) -> pd.Series:
+            if target == "1mo":
+                return (
+                    timestamps.dt.tz_convert("UTC")
+                    .dt.tz_localize(None)
+                    .dt.to_period("M")
+                    .dt.start_time
+                    .dt.tz_localize("UTC")
+                )
+            seconds = TIMEFRAME_SECONDS[target]
+            nanoseconds = seconds * 1_000_000_000
+            numeric = timestamps.astype("int64")
+            return pd.to_datetime(
+                (numeric // nanoseconds) * nanoseconds,
+                utc=True,
+            )
+
+        def emit_groups(
+            frame: pd.DataFrame,
+            *,
+            final: bool,
+        ) -> pd.DataFrame:
+            nonlocal writer
+            nonlocal emitted_rows
+            nonlocal incomplete_buckets
+            nonlocal earliest_output
+            nonlocal latest_output
+            if frame.empty:
+                return frame
+            frame = frame.sort_values("timestamp")
+            frame["bucket"] = bucket_bounds(frame["timestamp"])
+            buckets = list(frame["bucket"].drop_duplicates())
+            retained = pd.DataFrame()
+            if not final and buckets:
+                retained = frame.loc[
+                    frame["bucket"] == buckets[-1]
+                ].drop(columns=["bucket"])
+                buckets = buckets[:-1]
+            if not buckets:
+                return retained
+            working = frame.loc[
+                frame["bucket"].isin(buckets)
+            ].copy()
+            if working.empty:
+                return retained
+            source_seconds = TIMEFRAME_SECONDS[source]
+            grouped = working.groupby(
+                "bucket",
+                sort=True,
+                observed=True,
+            )
+            aggregates = grouped.agg(
+                source_symbol=("source_symbol", "first"),
+                first_timestamp=("timestamp", "first"),
+                last_timestamp=("timestamp", "last"),
+                unique_timestamp_count=(
+                    "timestamp",
+                    "nunique",
+                ),
+                observed_at=("observed_at", "max"),
+                retrieval_run_id=(
+                    "retrieval_run_id",
+                    "last",
+                ),
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                volume=("volume", "sum"),
+                source_row_count=("timestamp", "size"),
+            ).reset_index()
+            hash_lists = grouped["raw_hash"].agg(list)
+            aggregates["lineage_hash"] = (
+                aggregates["bucket"]
+                .map(hash_lists)
+                .map(
+                    lambda hashes: stable_hash(
+                        [str(value) for value in hashes],
+                        length=64,
+                    )
+                )
+            )
+            if target == "1mo":
+                target_end = (
+                    aggregates["bucket"]
+                    + pd.offsets.MonthBegin(1)
+                )
+                expected = (
+                    (
+                        target_end
+                        - aggregates["bucket"]
+                    )
+                    .dt.total_seconds()
+                    .div(source_seconds)
+                    .round()
+                    .clip(lower=1)
+                    .astype("int64")
+                )
+            else:
+                target_end = (
+                    aggregates["bucket"]
+                    + pd.to_timedelta(
+                        TIMEFRAME_SECONDS[target],
+                        unit="s",
+                    )
+                )
+                expected = pd.Series(
+                    max(
+                        1,
+                        round(
+                            TIMEFRAME_SECONDS[target]
+                            / source_seconds
+                        ),
+                    ),
+                    index=aggregates.index,
+                    dtype="int64",
+                )
+            aggregates["target_end"] = target_end
+            aggregates["expected_source_rows"] = expected
+            complete = (
+                (aggregates["target_end"] <= now)
+                & (
+                    aggregates["unique_timestamp_count"]
+                    == aggregates["expected_source_rows"]
+                )
+                & (
+                    aggregates["first_timestamp"]
+                    == aggregates["bucket"]
+                )
+                & (
+                    aggregates["last_timestamp"]
+                    + pd.to_timedelta(
+                        source_seconds,
+                        unit="s",
+                    )
+                    == aggregates["target_end"]
+                )
+            )
+            incomplete_buckets += int((~complete).sum())
+            aggregates = aggregates.loc[complete]
+            rows: list[dict[str, Any]] = []
+            for row in aggregates.itertuples(index=False):
+                lineage_hash = str(row.lineage_hash)
+                values = {
+                    "open": float(row.open),
+                    "high": float(row.high),
+                    "low": float(row.low),
+                    "close": float(row.close),
+                    "volume": float(row.volume),
+                    "source_timeframe": source,
+                    "resampling_rule": (
+                        "MS"
+                        if target == "1mo"
+                        else f"{TIMEFRAME_SECONDS[target]}s"
+                    ),
+                    "lineage_hash": lineage_hash,
+                    "source_row_count": int(
+                        row.source_row_count
+                    ),
+                    "expected_source_rows": int(
+                        row.expected_source_rows
+                    ),
+                    "missing_source_rows": 0,
+                    "gap_flag": False,
+                    "source_classification": (
+                        "RESAMPLED_FROM_NATIVE"
+                    ),
+                }
+                rows.append(
+                    {
+                        "provider": name,
+                        "source_symbol": str(row.source_symbol),
+                        "canonical_market": canonical_market,
+                        "timestamp": row.bucket.to_pydatetime(),
+                        "observed_at": row.observed_at,
+                        "available_at": row.target_end.to_pydatetime(),
+                        "data_kind": "ohlcv_resampled",
+                        "timeframe": target,
+                        "closed": True,
+                        "retrieval_run_id": str(
+                            row.retrieval_run_id
+                        ),
+                        "raw_hash": lineage_hash,
+                        "values": values,
+                        "source_provider": name,
+                        "source_timeframe": source,
+                        "quote_currency": (
+                            canonical_market.split("-")[-1]
+                        ),
+                        "source_classification": (
+                            "RESAMPLED_FROM_NATIVE"
+                        ),
+                    }
+                )
+            if rows:
+                table = pa.Table.from_pandas(
+                    pd.DataFrame(rows),
+                    preserve_index=False,
+                )
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temporary,
+                        table.schema,
+                        compression="snappy",
+                    )
+                elif table.schema != writer.schema:
+                    table = table.cast(
+                        writer.schema,
+                        safe=False,
+                    )
+                writer.write_table(table)
+                emitted_rows += len(rows)
+                left = rows[0]["timestamp"]
+                right = rows[-1]["timestamp"]
+                earliest_output = (
+                    left
+                    if earliest_output is None
+                    else min(earliest_output, left)
+                )
+                latest_output = (
+                    right
+                    if latest_output is None
+                    else max(latest_output, right)
+                )
+            return retained
+
+        columns = [
+            "source_symbol",
+            "timestamp",
+            "observed_at",
+            "retrieval_run_id",
+            "raw_hash",
+            "values",
+            "closed",
+        ]
+        try:
+            for batch in parquet.iter_batches(
+                batch_size=batch_size,
+                columns=columns,
+            ):
+                processed_batches += 1
+                processed_source_rows += len(batch)
+                stored = batch.to_pandas()
+                stored = stored.loc[
+                    stored["closed"].fillna(False).astype(bool)
+                ]
+                if stored.empty:
+                    continue
+                values = pd.json_normalize(
+                    stored["values"].map(
+                        lambda item: (
+                            item
+                            if isinstance(item, dict)
+                            else {}
+                        )
+                    )
+                )
+                compact = pd.DataFrame(
+                    {
+                        "source_symbol": stored[
+                            "source_symbol"
+                        ].astype(str).to_numpy(),
+                        "timestamp": pd.to_datetime(
+                            stored["timestamp"],
+                            utc=True,
+                            errors="raise",
+                        ).to_numpy(),
+                        "observed_at": pd.to_datetime(
+                            stored["observed_at"],
+                            utc=True,
+                            errors="raise",
+                        ).to_numpy(),
+                        "retrieval_run_id": stored[
+                            "retrieval_run_id"
+                        ].astype(str).to_numpy(),
+                        "raw_hash": stored[
+                            "raw_hash"
+                        ].astype(str).to_numpy(),
+                        "open": pd.to_numeric(
+                            values["open"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "high": pd.to_numeric(
+                            values["high"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "low": pd.to_numeric(
+                            values["low"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "close": pd.to_numeric(
+                            values["close"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "volume": pd.to_numeric(
+                            values.get(
+                                "volume",
+                                pd.Series(
+                                    0.0,
+                                    index=values.index,
+                                ),
+                            ),
+                            errors="coerce",
+                        )
+                        .fillna(0.0)
+                        .to_numpy(),
+                    }
+                ).dropna(
+                    subset=[
+                        "timestamp",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                    ]
+                )
+                carry = emit_groups(
+                    pd.concat(
+                        [carry, compact],
+                        ignore_index=True,
+                    ),
+                    final=False,
+                )
+                notify("RESAMPLING_ARROW_BATCHES")
+            emit_groups(carry, final=True)
+            notify("RESAMPLE_COMPLETE")
+        finally:
+            if writer is not None:
+                writer.close()
+        if writer is None:
+            temporary.unlink(missing_ok=True)
+        else:
+            os.replace(temporary, output)
+        return {
+            "provider": name,
+            "market": canonical_market,
+            "timeframe": target,
+            "source_classification": (
+                "RESAMPLED_FROM_NATIVE"
+            ),
+            "source_timeframe": source,
+            "rows": emitted_rows,
+            "received_rows": emitted_rows,
+            "earliest_timestamp": earliest_output,
+            "latest_timestamp": latest_output,
+            "status": (
+                ProviderStatus.READY.value
+                if emitted_rows
+                else ProviderStatus.PARTIAL.value
+            ),
+            "reason_code": (
+                "COMPACT_RESAMPLE_READY"
+                if emitted_rows
+                else "NO_COMPLETE_TARGET_BUCKETS"
+            ),
+            "incomplete_buckets_excluded": incomplete_buckets,
+            "resource_batching_only": True,
+        }
+
+    async def sync_canonical_ohlcv_compact(
+        self,
+        *,
+        provider: str,
+        market: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        run_id: str | None = None,
+        resume: bool = True,
+        progress_callback: (
+            Callable[[Mapping[str, Any]], None] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        """Memory-bounded canonical sync used by maximum-history campaigns."""
+
+        name = provider.casefold()
+        target = normalize_timeframe(timeframe)
+        # Providers expose a native `1M`, but their start/end boundary
+        # semantics differ and cannot be represented by the fixed seconds
+        # used for intraday pagination.  Build canonical `1mo` from complete
+        # 1d candles instead; this is causal and calendar aligned.
+        native = (
+            target in PROVIDER_NATIVE_TIMEFRAMES[name]
+            and target != "1mo"
+        )
+        source = (
+            target
+            if native
+            else RESAMPLE_SOURCE.get(name, {}).get(target)
+        )
+        if source is None:
+            return {
+                "provider": name,
+                "market": normalize_market(market),
+                "timeframe": target,
+                "source_classification": "UNAVAILABLE",
+                "rows": 0,
+                "received_rows": 0,
+                "status": ProviderStatus.PARTIAL.value,
+                "reason_code": (
+                    "NO_VALID_NATIVE_OR_RESAMPLE_SOURCE"
+                ),
+                "resource_batching_only": True,
+            }
+        source_summary = await self._sync_native_ohlcv_compact(
+            provider=name,
+            market=market,
+            timeframe=source,
+            start=start,
+            end=end,
+            run_id=run_id,
+            resume=resume,
+            progress_callback=progress_callback,
+        )
+        if native or not source_summary.get("rows"):
+            return source_summary
+        return self._resample_cached_ohlcv_compact(
+            provider=name,
+            market=market,
+            source_timeframe=source,
+            target_timeframe=target,
+            progress_callback=progress_callback,
+        )
+
+    def materialize_provider_ohlcv_compact(
+        self,
+        source: Path,
+        target: Path,
+        *,
+        provider: str,
+        market: str,
+        timeframe: str,
+        maximum_staleness: timedelta,
+        progress_callback: (
+            Callable[[Mapping[str, Any]], None] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        """Flatten a provider Parquet file without loading it in full.
+
+        The canonical research file keeps only timestamp and OHLCV columns.
+        Validation, gap accounting, provider lineage and the manifest are
+        accumulated across Arrow batches, so maximum-history materialization
+        remains bounded by ``batch_size``.
+        """
+
+        from data.market_data import (
+            DataManifest,
+            DataQualityReport,
+            candle_close_timestamp,
+            timeframe_delta,
+        )
+
+        canonical_market = normalize_market(market)
+        normalized_timeframe = normalize_timeframe(timeframe)
+        interval = timeframe_delta(normalized_timeframe)
+        interval_seconds = int(interval.total_seconds())
+        parquet = pq.ParquetFile(source)
+        total_source_rows = int(parquet.metadata.num_rows)
+        batch_size = 100_000
+        batch_count = max(
+            1,
+            (total_source_rows + batch_size - 1)
+            // batch_size,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.parquet"
+        )
+        writer: pq.ParquetWriter | None = None
+        row_count = 0
+        processed_rows = 0
+        processed_batches = 0
+        first_timestamp: pd.Timestamp | None = None
+        last_timestamp: pd.Timestamp | None = None
+        previous_timestamp: pd.Timestamp | None = None
+        largest_gap_bars = 0
+        duplicate_count = 0
+        invalid_count = 0
+        source_classification = "PROVIDER_NATIVE"
+        provider_hasher = hashlib.sha256()
+
+        def notify(subphase: str) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "provider": provider,
+                    "market": canonical_market,
+                    "timeframe": normalized_timeframe,
+                    "subphase": subphase,
+                    "processed_source_rows": processed_rows,
+                    "total_source_rows": total_source_rows,
+                    "batch_index": processed_batches,
+                    "batch_count": batch_count,
+                    "emitted_rows": row_count,
+                }
+            )
+
+        columns = [
+            "timestamp",
+            "raw_hash",
+            "values",
+            "closed",
+            "source_classification",
+        ]
+        available_columns = set(parquet.schema_arrow.names)
+        selected_columns = [
+            column
+            for column in columns
+            if column in available_columns
+        ]
+        required = {"timestamp", "values"}
+        if not required.issubset(selected_columns):
+            raise DataValidationError(
+                "provider Parquet lacks timestamp or values"
+            )
+        try:
+            for batch in parquet.iter_batches(
+                batch_size=batch_size,
+                columns=selected_columns,
+            ):
+                processed_batches += 1
+                processed_rows += len(batch)
+                stored = batch.to_pandas()
+                if "closed" in stored:
+                    stored = stored.loc[
+                        stored["closed"]
+                        .fillna(False)
+                        .astype(bool)
+                    ]
+                if stored.empty:
+                    notify("MATERIALIZING_ARROW_BATCHES")
+                    continue
+                values = pd.json_normalize(
+                    stored["values"].map(
+                        lambda value: (
+                            value
+                            if isinstance(value, dict)
+                            else {}
+                        )
+                    )
+                )
+                missing = [
+                    column
+                    for column in (
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                    )
+                    if column not in values
+                ]
+                if missing:
+                    raise DataValidationError(
+                        f"provider values lack OHLC columns: {missing}"
+                    )
+                frame = pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(
+                            stored["timestamp"],
+                            utc=True,
+                            errors="raise",
+                        ).to_numpy(),
+                        "open": pd.to_numeric(
+                            values["open"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "high": pd.to_numeric(
+                            values["high"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "low": pd.to_numeric(
+                            values["low"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "close": pd.to_numeric(
+                            values["close"],
+                            errors="coerce",
+                        ).to_numpy(),
+                        "volume": pd.to_numeric(
+                            values.get(
+                                "volume",
+                                pd.Series(
+                                    0.0,
+                                    index=values.index,
+                                ),
+                            ),
+                            errors="coerce",
+                        )
+                        .fillna(0.0)
+                        .to_numpy(),
+                    }
+                )
+                numeric = frame[
+                    ["open", "high", "low", "close", "volume"]
+                ]
+                finite = numeric.notna().all(axis=1)
+                valid = (
+                    finite
+                    & (frame[["open", "high", "low", "close"]] > 0)
+                    .all(axis=1)
+                    & (frame["volume"] >= 0)
+                    & (
+                        frame["high"]
+                        >= frame[
+                            ["open", "close", "low"]
+                        ].max(axis=1)
+                    )
+                    & (
+                        frame["low"]
+                        <= frame[
+                            ["open", "close", "high"]
+                        ].min(axis=1)
+                    )
+                )
+                if not bool(valid.all()):
+                    invalid_count += int((~valid).sum())
+                    raise DataValidationError(
+                        "provider OHLCV contains invalid rows"
+                    )
+                frame = frame.sort_values("timestamp")
+                timestamps = pd.DatetimeIndex(
+                    frame["timestamp"]
+                )
+                duplicate_count += int(
+                    timestamps.duplicated(keep=False).sum()
+                )
+                if duplicate_count:
+                    raise DataValidationError(
+                        "provider OHLCV contains duplicate timestamps"
+                    )
+                batch_first = pd.Timestamp(timestamps[0])
+                batch_last = pd.Timestamp(timestamps[-1])
+                if (
+                    previous_timestamp is not None
+                    and batch_first <= previous_timestamp
+                ):
+                    raise DataValidationError(
+                        "provider OHLCV is not globally increasing"
+                    )
+                if normalized_timeframe == "1mo":
+                    month_ordinals = (
+                        timestamps.year * 12
+                        + timestamps.month
+                    )
+                    if previous_timestamp is not None:
+                        previous_ordinal = (
+                            previous_timestamp.year * 12
+                            + previous_timestamp.month
+                        )
+                        largest_gap_bars = max(
+                            largest_gap_bars,
+                            max(
+                                0,
+                                int(month_ordinals[0])
+                                - int(previous_ordinal)
+                                - 1,
+                            ),
+                        )
+                    if len(month_ordinals) > 1:
+                        largest_gap_bars = max(
+                            largest_gap_bars,
+                            max(
+                                0,
+                                int(
+                                    pd.Series(
+                                        month_ordinals
+                                    ).diff().max()
+                                )
+                                - 1,
+                            ),
+                        )
+                else:
+                    combined_deltas = (
+                        timestamps.to_series().diff()
+                    )
+                    if previous_timestamp is not None:
+                        boundary_delta = (
+                            batch_first - previous_timestamp
+                        )
+                        largest_gap_bars = max(
+                            largest_gap_bars,
+                            max(
+                                0,
+                                int(
+                                    boundary_delta.total_seconds()
+                                    // interval_seconds
+                                )
+                                - 1,
+                            ),
+                        )
+                    if len(combined_deltas) > 1:
+                        largest_delta = (
+                            combined_deltas.dropna().max()
+                        )
+                        largest_gap_bars = max(
+                            largest_gap_bars,
+                            max(
+                                0,
+                                int(
+                                    largest_delta.total_seconds()
+                                    // interval_seconds
+                                )
+                                - 1,
+                            ),
+                        )
+                first_timestamp = (
+                    batch_first
+                    if first_timestamp is None
+                    else first_timestamp
+                )
+                last_timestamp = batch_last
+                previous_timestamp = batch_last
+                if "raw_hash" in stored:
+                    for raw_hash in stored["raw_hash"].astype(
+                        str
+                    ):
+                        encoded = raw_hash.encode("utf-8")
+                        provider_hasher.update(
+                            len(encoded).to_bytes(
+                                4,
+                                "big",
+                            )
+                        )
+                        provider_hasher.update(encoded)
+                if (
+                    "source_classification" in stored
+                    and stored[
+                        "source_classification"
+                    ].notna().any()
+                ):
+                    source_classification = str(
+                        stored[
+                            "source_classification"
+                        ].dropna().iloc[-1]
+                    )
+                table = pa.Table.from_pandas(
+                    frame,
+                    preserve_index=False,
+                )
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temporary,
+                        table.schema,
+                        compression="snappy",
+                    )
+                elif table.schema != writer.schema:
+                    table = table.cast(
+                        writer.schema,
+                        safe=False,
+                    )
+                writer.write_table(table)
+                row_count += len(frame)
+                notify("MATERIALIZING_ARROW_BATCHES")
+        finally:
+            if writer is not None:
+                writer.close()
+        if (
+            writer is None
+            or first_timestamp is None
+            or last_timestamp is None
+        ):
+            temporary.unlink(missing_ok=True)
+            raise DataValidationError(
+                "provider OHLCV contains no closed rows"
+            )
+        now = utc_now()
+        if (
+            candle_close_timestamp(
+                last_timestamp,
+                normalized_timeframe,
+            ).to_pydatetime()
+            > now
+        ):
+            temporary.unlink(missing_ok=True)
+            raise DataValidationError(
+                "provider OHLCV contains an open candle"
+            )
+        os.replace(temporary, target)
+        expected_rows = (
+            (
+                last_timestamp.year
+                - first_timestamp.year
+            )
+            * 12
+            + last_timestamp.month
+            - first_timestamp.month
+            + 1
+            if normalized_timeframe == "1mo"
+            else int(
+                (
+                    last_timestamp
+                    - first_timestamp
+                ).total_seconds()
+                // interval_seconds
+            )
+            + 1
+        )
+        missing_rows = max(0, expected_rows - row_count)
+        missing_fraction = (
+            missing_rows / expected_rows
+            if expected_rows
+            else 0.0
+        )
+        age_seconds = max(
+            0.0,
+            (
+                now
+                - candle_close_timestamp(
+                    last_timestamp,
+                    normalized_timeframe,
+                ).to_pydatetime()
+            ).total_seconds(),
+        )
+        stale = (
+            age_seconds
+            > maximum_staleness.total_seconds()
+        )
+        reasons: list[str] = []
+        if stale:
+            reasons.append("STALE_DATA")
+        if missing_fraction > 0.05:
+            reasons.append("EXCESSIVE_MISSING_BARS")
+        quality = DataQualityReport(
+            market=canonical_market,
+            timeframe=normalized_timeframe,
+            rows=row_count,
+            start=first_timestamp.to_pydatetime(),
+            end=last_timestamp.to_pydatetime(),
+            expected_rows=expected_rows,
+            missing_rows=missing_rows,
+            missing_fraction=missing_fraction,
+            largest_gap_bars=largest_gap_bars,
+            duplicate_timestamps=duplicate_count,
+            stale=stale,
+            age_seconds=age_seconds,
+            valid=not reasons,
+            reasons=tuple(reasons),
+        )
+        first = first_timestamp.to_pydatetime()
+        last = last_timestamp.to_pydatetime()
+        calendar_days = max(
+            0.0,
+            (last - first).total_seconds() / 86_400,
+        )
+        exact_required_start = (
+            pd.Timestamp(last) - pd.DateOffset(years=7)
+        ).to_pydatetime()
+        seven_year_eligible = bool(
+            first <= exact_required_start
+            and quality.valid
+        )
+        base_asset, quote_asset = canonical_market.split(
+            "-",
+            1,
+        )
+        data_hash = sha256_file(target)
+        created_at = utc_now()
+        manifest = DataManifest(
+            market=canonical_market,
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+            exchange=provider.upper(),
+            provider=provider,
+            timeframe=normalized_timeframe,
+            rows=row_count,
+            start=first,
+            end=last,
+            requested_start=first,
+            requested_end=now,
+            actual_first_timestamp=first,
+            actual_last_timestamp=last,
+            raw_calendar_days=calendar_days,
+            usable_calendar_days=calendar_days,
+            raw_bar_count=row_count,
+            usable_bar_count=row_count,
+            expected_bar_count=expected_rows,
+            missing_bar_count=missing_rows,
+            missing_bar_ratio=missing_fraction,
+            duplicate_count=duplicate_count,
+            invalid_bar_count=invalid_count,
+            stale_bar_count=0,
+            largest_gap=(
+                (
+                    f"{largest_gap_bars + 1} months"
+                    if normalized_timeframe == "1mo"
+                    else str(
+                        interval
+                        * (largest_gap_bars + 1)
+                    )
+                )
+                if largest_gap_bars
+                else None
+            ),
+            listing_date_if_known=first,
+            source_segments=(
+                {
+                    "provider": provider,
+                    "exchange": provider.upper(),
+                    "market_identity": canonical_market,
+                    "start": utc_iso(first),
+                    "end": utc_iso(last),
+                    "classification": source_classification,
+                },
+            ),
+            dataset_hash=data_hash,
+            generated_at=created_at,
+            seven_year_eligible=seven_year_eligible,
+            history_coverage_ratio=(
+                calendar_days / (7 * 365.2425)
+            ),
+            rejection_reason=(
+                None
+                if seven_year_eligible
+                else (
+                    "DATA_QUALITY_FAILED"
+                    if not quality.valid
+                    else "INSUFFICIENT_MARKET_HISTORY"
+                )
+            ),
+            columns=(
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ),
+            data_file=target.name,
+            sha256=data_hash,
+            created_at=created_at,
+            quality=quality,
+        )
+        manifest_path = target.with_suffix(
+            f"{target.suffix}.manifest.json"
+        )
+        atomic_write_json(
+            manifest_path,
+            manifest.model_dump(mode="json"),
+        )
+        notify("CANONICAL_MATERIALIZATION_COMPLETE")
+        return {
+            "provider": provider,
+            "market": canonical_market,
+            "timeframe": normalized_timeframe,
+            "rows": row_count,
+            "path": target,
+            "manifest": manifest_path,
+            "sha256": data_hash,
+            "provider_hash": provider_hasher.hexdigest(),
+            "source_classification": source_classification,
+            "status": ProviderStatus.READY.value,
+            "reason_code": (
+                "CANONICAL_FILE_MATERIALIZED_COMPACT"
+            ),
+            "resource_batching_only": True,
+        }
+
+    @staticmethod
     def resample_candles(
         records: Iterable[NormalizedDataRecord],
         *,
@@ -1599,7 +3270,7 @@ class DataLoader:
         )
         rule = {
             "1W": "W-MON",
-            "1M": "MS",
+            "1mo": "MS",
         }.get(target, f"{TIMEFRAME_SECONDS[target]}s")
         grouped = frame.resample(
             rule,
@@ -1616,7 +3287,7 @@ class DataLoader:
                 continue
             target_end = (
                 timestamp + pd.offsets.MonthBegin(1)
-                if target == "1M"
+                if target == "1mo"
                 else timestamp + pd.to_timedelta(TIMEFRAME_SECONDS[target], unit="s")
             )
             if target_end.to_pydatetime().astimezone(UTC) > now:
@@ -1632,6 +3303,14 @@ class DataLoader:
                 ),
             )
             gap_count = max(0, expected - len(group))
+            if gap_count:
+                # A time bucket can be historically closed while still being
+                # incomplete because the fetched source slice starts/ends
+                # inside that bucket or contains a provider gap. Never turn
+                # such a fragment into a tradable OHLCV candle. The missing
+                # target interval remains visible through watermark gap
+                # reconciliation and can be retried from native source data.
+                continue
             lineage_hash = stable_hash(group["raw_hash"].tolist(), length=64)
             values = {
                 "open": float(group["open"].iloc[0]),
@@ -1743,9 +3422,16 @@ class DataLoader:
                 "estimated_calls": provider_calls,
                 "credential_configured": self._credential_configured(provider),
             }
+        # All three durable history projections are Parquet-compressed. The
+        # previous 240-byte "raw" assumption described an uncompressed JSON
+        # row and blocked maximum history even when measured immutable raw
+        # Parquet used roughly 83 bytes/candle. Keep a conservative 128-byte
+        # allowance plus separate cache/normalized projections and context.
         compressed = rows * 72
-        raw = rows * 240
+        raw = rows * 128
         normalized = rows * 96
+        context = int(rows * 24)
+        total_storage = compressed + raw + normalized + context
         free = shutil.disk_usage(self.settings.paths.data_dir).free
         return {
             "status": "ESTIMATE",
@@ -1758,7 +3444,12 @@ class DataLoader:
             "estimated_compressed_storage_bytes": compressed,
             "estimated_raw_storage_bytes": raw,
             "estimated_normalized_storage_bytes": normalized,
-            "estimated_context_storage_bytes": int(rows * 24),
+            "estimated_context_storage_bytes": context,
+            "estimated_total_storage_bytes": total_storage,
+            "storage_estimate_basis": (
+                "PARQUET_COMPRESSED_CACHE_72_RAW_128_"
+                "NORMALIZED_96_CONTEXT_24_BYTES_PER_ROW"
+            ),
             "estimated_duration_seconds": round(calls * 0.12, 1),
             "estimated_api_credits": {
                 "coinmarketcap": "PLAN_DEPENDENT",
@@ -1767,9 +3458,9 @@ class DataLoader:
             },
             "free_disk_bytes": free,
             "storage_allowed": (
-                compressed + raw + normalized
+                total_storage
                 <= self.settings.market_data.maximum_storage_gb * 1024**3
-                and free - (compressed + raw + normalized)
+                and free - total_storage
                 >= self.settings.market_data.minimum_free_disk_gb * 1024**3
             ),
             "requires_confirmation": (
@@ -1961,6 +3652,7 @@ class DataLoader:
                 None,
             ),
         )
+        retrieval_run_id = str(uuid.uuid4())
         records = [
             NormalizedDataRecord(
                 provider="fred",
@@ -1970,7 +3662,7 @@ class DataLoader:
                 observed_at=observed,
                 available_at=_iso(value),
                 data_kind="macro_vintage",
-                retrieval_run_id=str(uuid.uuid4()),
+                retrieval_run_id=retrieval_run_id,
                 raw_hash=_raw_hash({"series": series, "vintage_date": value}),
                 raw_payload={"series": series, "vintage_date": value},
                 values={
@@ -2083,9 +3775,62 @@ class DataLoader:
             summary_frame["raw_hash"] = stable_hash(
                 contract_frame.to_dict(orient="records"), length=64
             )
+            summary_target = (
+                self.settings.paths.context_data_dir
+                / f"gex_{underlying.upper()}.parquet"
+            )
+            history = pd.DataFrame()
+            if summary_target.is_file():
+                history = pd.read_parquet(summary_target)
+                if "available_at" in history:
+                    history["available_at"] = pd.to_datetime(
+                        history["available_at"], utc=True, errors="coerce"
+                    )
+            current_at = pd.Timestamp(summary_frame["available_at"].iloc[0])
+            for label, hours in (("1h", 1), ("4h", 4), ("24h", 24)):
+                prior = history.loc[
+                    history.get("available_at", pd.Series(dtype="datetime64[ns, UTC]")).le(
+                        current_at - pd.Timedelta(hours=hours)
+                    )
+                ] if not history.empty and "available_at" in history else pd.DataFrame()
+                for source, prefix in (
+                    ("absolute_gex", "absolute_gex"),
+                    ("convention_signed_gex", "signed_gex"),
+                ):
+                    current_value = float(summary_frame[source].iloc[0])
+                    previous_value = (
+                        float(prior.iloc[-1][source])
+                        if not prior.empty
+                        and source in prior
+                        and pd.notna(prior.iloc[-1][source])
+                        else None
+                    )
+                    summary_frame[f"{prefix}_change_{label}"] = (
+                        current_value / previous_value - 1.0
+                        if previous_value not in {None, 0.0}
+                        else None
+                    )
+            if not history.empty:
+                summary_frame = pd.concat(
+                    [history, summary_frame], ignore_index=True, sort=False
+                )
+            summary_frame = (
+                # Identical option books observed at different times are still
+                # distinct point-in-time observations.  Deduplicating only on
+                # the payload hash moved the sole surviving ``available_at``
+                # forward on every refresh and made the previously available
+                # GEX state disappear from causal scans.
+                summary_frame.drop_duplicates(
+                    ["available_at", "raw_hash"],
+                    keep="last",
+                )
+                .sort_values("available_at")
+                .tail(24 * 90)
+                .reset_index(drop=True)
+            )
             self._atomic_parquet(
                 summary_frame,
-                self.settings.paths.context_data_dir / f"gex_{underlying.upper()}.parquet",
+                summary_target,
             )
             if self.database is not None:
                 self.database.upsert_records(
@@ -2369,13 +4114,16 @@ class DataLoader:
         outputs: list[Path] = []
         for (provider, kind, market, timeframe, run_id), rows in groups.items():
             batch_hash = stable_hash([item.raw_hash for item in rows], length=64)
+            # Immutable raw payloads are content-addressed. Including the
+            # retrieval UUID in this filename created another physical file
+            # whenever an unchanged macro response was polled again.
             target = (
                 self.settings.paths.raw_data_dir
                 / provider
                 / kind
                 / market
                 / timeframe
-                / f"{run_id[:12]}_{batch_hash[:24]}.parquet"
+                / f"{batch_hash[:24]}.parquet"
             )
             if not target.is_file():
                 frame = pd.DataFrame(
@@ -2439,7 +4187,7 @@ class DataLoader:
         external_id = stable_hash([provider, market, timeframe, data_kind], length=64)
         ordered_timestamps = sorted({item.timestamp for item in selected})
         missing_ranges: list[list[str]] = []
-        if timeframe != "1M":
+        if timeframe != "1mo":
             interval = timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
             for previous, current in zip(
                 ordered_timestamps,
@@ -2483,11 +4231,22 @@ class DataLoader:
         self.database.upsert_records("data_watermarks", [record])
 
     def _database_upsert(self, table: str, records: Iterable[NormalizedDataRecord]) -> None:
-        if self.database is not None:
-            self.database.upsert_records(
-                table,
-                [item.model_dump(mode="json", exclude={"raw_payload"}) for item in records],
+        if self.database is None:
+            return
+        batch_size = self.settings.market_data.maximum_database_batch_size
+        batch: list[dict[str, Any]] = []
+        for item in records:
+            batch.append(
+                item.model_dump(
+                    mode="json",
+                    exclude={"raw_payload"},
+                )
             )
+            if len(batch) >= batch_size:
+                self.database.upsert_records(table, batch)
+                batch = []
+        if batch:
+            self.database.upsert_records(table, batch)
 
     @staticmethod
     def _records_from_frame(frame: pd.DataFrame) -> list[NormalizedDataRecord]:
@@ -2880,6 +4639,7 @@ class DataLoader:
         )
         data = raw.get("data", {})
         quote = data.get("quote", {}).get("EUR", {})
+        response_credit_count = raw.get("status", {}).get("credit_count")
         values = {
             "total_market_cap": quote.get("total_market_cap"),
             "total_volume_24h": quote.get("total_volume_24h"),
@@ -2896,6 +4656,7 @@ class DataLoader:
             "stablecoin_dominance": data.get("stablecoin_dominance"),
             "active_cryptocurrencies": data.get("active_cryptocurrencies"),
             "source_quality": "SAMPLED_CONTEXT_NOT_EXECUTION_DATA",
+            "response_credit_count": response_credit_count,
         }
         return [
             NormalizedDataRecord(
@@ -2974,6 +4735,7 @@ class DataLoader:
             ),
         )
         records: list[NormalizedDataRecord] = []
+        response_credit_count = raw.get("status", {}).get("credit_count")
         for row in raw.get("data", []):
             quote = row.get("quote", {}).get(convert, {})
             provider_timestamp = _iso(
@@ -2992,6 +4754,12 @@ class DataLoader:
                 "name": row.get("name"),
                 "slug": row.get("slug"),
                 "market_cap": quote.get("market_cap"),
+                "price": quote.get("price"),
+                "percent_change_1h": quote.get("percent_change_1h"),
+                "percent_change_24h": quote.get("percent_change_24h"),
+                "percent_change_7d": quote.get("percent_change_7d"),
+                "market_cap_dominance": quote.get("market_cap_dominance"),
+                "fully_diluted_market_cap": quote.get("fully_diluted_market_cap"),
                 "circulating_supply": row.get("circulating_supply"),
                 "total_supply": row.get("total_supply"),
                 "maximum_supply": row.get("max_supply"),
@@ -3000,6 +4768,7 @@ class DataLoader:
                 "tags": row.get("tags") or [],
                 "platform": row.get("platform"),
                 "is_active": row.get("is_active"),
+                "response_credit_count": response_credit_count,
             }
             records.append(
                 NormalizedDataRecord(
@@ -3066,10 +4835,19 @@ class ContinuousDataService:
                 False,
                 process_id,
             )
-            if handle:
+            if not handle:
+                # Access denied means the process exists but cannot be queried.
+                return ctypes.get_last_error() == 5
+            try:
+                exit_code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(  # type: ignore[attr-defined]
+                    handle,
+                    ctypes.byref(exit_code),
+                ):
+                    return False
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
                 ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
-                return True
-            return ctypes.get_last_error() == 5
         try:
             os.kill(process_id, 0)
         except OSError:
@@ -3232,11 +5010,23 @@ class ContinuousDataService:
                     operation(),
                     name=f"data-service-operation-{uuid.uuid4().hex[:8]}",
                 )
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_while_active(task),
+                    name=(
+                        "data-service-heartbeat-"
+                        f"{uuid.uuid4().hex[:8]}"
+                    ),
+                )
                 self._active_tasks.add(task)
                 try:
                     await task
                 finally:
                     self._active_tasks.discard(task)
+                    heartbeat_task.cancel()
+                    await asyncio.gather(
+                        heartbeat_task,
+                        return_exceptions=True,
+                    )
                 self.current_cycle += 1
                 self.last_completed_operation = "OPERATIONAL_CYCLE"
                 self._heartbeat(reason_code="INCREMENTAL_CYCLE_COMPLETE")
@@ -3278,6 +5068,22 @@ class ContinuousDataService:
                 await asyncio.gather(*self._active_tasks, return_exceptions=True)
             self._active_tasks.clear()
             self._release_lock()
+
+    async def _heartbeat_while_active(
+        self,
+        operation: asyncio.Task[Any],
+    ) -> None:
+        while not operation.done():
+            self._heartbeat(
+                reason_code="OPERATIONAL_CYCLE_ACTIVE"
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(operation),
+                    timeout=self.heartbeat_seconds,
+                )
+            except TimeoutError:
+                continue
 
     def _apply_control_request(self) -> None:
         if not self.control_path.is_file():

@@ -268,6 +268,73 @@ class DonchianBreakout(Strategy):
         return self._output(features, entry=entry, exit=exit, parameters=p, entry_reason="DONCHIAN_BREAKOUT", exit_reason="DONCHIAN_EXIT")
 
 
+class MultiTimeframeDonchianVolumeBreakout(Strategy):
+    """4h breakout gated by the last fully closed 1d short-trend state."""
+
+    strategy_id = "mtf_1d_4h_donchian_rvol"
+    family = "multi_timeframe_breakout"
+    description = (
+        "Enter a 4h Donchian breakout with relative-volume confirmation only "
+        "when the last fully closed 1d candle has a rising EMA50 trend."
+    )
+    required_higher_timeframes: ClassVar[tuple[str, ...]] = ("1d",)
+    defaults = {
+        "period": 20,
+        "exit_period": 10,
+        "relative_volume_threshold": 1.1,
+        "stop_atr": 2.0,
+        "target_atr": 5.0,
+        "trailing_atr": 2.5,
+        "maximum_holding_bars": 120,
+    }
+    parameter_space = {
+        "period": (20, 55),
+        "relative_volume_threshold": (1.0, 1.1, 1.25),
+        "stop_atr": (1.5, 2.0, 2.5),
+        "target_atr": (4.0, 5.0, 6.0),
+    }
+
+    def generate(
+        self,
+        features: pd.DataFrame,
+        parameters: dict[str, Any] | None = None,
+    ) -> StrategyOutput:
+        p = self.parameters(parameters)
+        high = features.get(
+            f"donchian_high_{p['period']}",
+            features["high"].rolling(p["period"]).max().shift(1),
+        )
+        low = features.get(
+            f"donchian_low_{p['exit_period']}",
+            features["low"].rolling(p["exit_period"]).min().shift(1),
+        )
+        context = features.get("htf_1d_trend_bullish")
+        if context is None:
+            context = pd.Series(False, index=features.index)
+        entry = (
+            crossed_above(features["close"], high)
+            & context.fillna(False).astype(bool)
+            & (
+                features["relative_volume_20"]
+                >= float(p["relative_volume_threshold"])
+            )
+        )
+        exit = crossed_below(features["close"], low) | ~context.fillna(False)
+        return self._output(
+            features,
+            entry=entry,
+            exit=exit,
+            parameters=p,
+            entry_reason="MTF_1D_TREND_4H_DONCHIAN_RVOL",
+            exit_reason="MTF_DONCHIAN_OR_DAILY_TREND_EXIT",
+            metadata={
+                "execution_timeframe": "4h",
+                "context_timeframes": ["1d"],
+                "alignment": "BACKWARD_ASOF_AFTER_SOURCE_CANDLE_CLOSE",
+            },
+        )
+
+
 class BollingerMeanReversion(Strategy):
     strategy_id = "bollinger_mean_reversion"
     family = "mean_reversion"
@@ -622,6 +689,7 @@ _STRATEGIES: tuple[Strategy, ...] = (
     EmaTrendPullback(),
     EmaCrossoverTrendFilter(),
     DonchianBreakout(),
+    MultiTimeframeDonchianVolumeBreakout(),
     BollingerMeanReversion(),
     RsiMeanReversion(),
     ConnorsRsiPullback(),

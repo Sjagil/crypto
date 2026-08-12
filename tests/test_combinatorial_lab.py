@@ -19,6 +19,7 @@ from research.backtest import BacktestConfig, BacktestEngine
 from research.combinatorial_lab import (
     ECONOMIC_HYPOTHESIS_TEMPLATES,
     HYPOTHESIS_BLOCKS,
+    LOWER_TIMEFRAME_MTF_TEMPLATES,
     BlockDirection,
     BlockRole,
     CombinationGenerator,
@@ -35,14 +36,17 @@ from research.combinatorial_lab import (
     UniverseManager,
     UniverseType,
     _matches_research_slice,
+    _terminate_process_pool,
     canonical_parameters,
     diverse_screening_survivors,
     economic_hypothesis_family,
     fast_screen,
     parameter_hash,
+    prefer_deeper_derived_frame,
     screening_survivor_score,
     signal_block_registry,
     validate_blocks,
+    validate_explicit_research_markets,
 )
 from research.features import (
     FeaturePipeline,
@@ -65,6 +69,93 @@ def lab_settings(settings: Settings, tmp_path) -> Settings:
         }
     )
     return settings.model_copy(update={"paths": paths})
+
+
+def test_deeper_resample_never_replaces_fresher_native_edge() -> None:
+    native = pd.DataFrame(
+        {"close": [1.0, 2.0]},
+        index=pd.to_datetime(
+            ["2026-08-02T21:00:00Z", "2026-08-02T21:15:00Z"],
+            utc=True,
+        ),
+    )
+    stale_but_longer = pd.DataFrame(
+        {"close": [1.0, 1.1, 1.2]},
+        index=pd.to_datetime(
+            [
+                "2026-08-02T20:00:00Z",
+                "2026-08-02T20:15:00Z",
+                "2026-08-02T20:30:00Z",
+            ],
+            utc=True,
+        ),
+    )
+    fresh_and_longer = pd.concat(
+        [native.iloc[:1], native],
+        ignore_index=False,
+    )
+
+    assert prefer_deeper_derived_frame(native, stale_but_longer) is False
+    assert prefer_deeper_derived_frame(native, fresh_and_longer) is True
+
+
+def test_terminate_process_pool_stops_only_captured_workers() -> None:
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+            self.joins: list[float] = []
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self, timeout: float) -> None:
+            self.joins.append(timeout)
+            if len(self.joins) > 1:
+                self.alive = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.process = FakeProcess()
+            self._processes = {self.process.pid: self.process}
+            self.shutdown_arguments: tuple[bool, bool] | None = None
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            self.shutdown_arguments = (wait, cancel_futures)
+
+    executor = FakeExecutor()
+    assert _terminate_process_pool(executor) == [4321]  # type: ignore[arg-type]
+    assert executor.process.terminated is True
+    assert executor.process.killed is True
+    assert executor.process.joins == [5.0, 5.0]
+    assert executor.shutdown_arguments == (False, True)
+
+
+def test_explicit_review_market_is_research_only(
+    restrictive_settings: Settings,
+) -> None:
+    markets, review_only = validate_explicit_research_markets(
+        restrictive_settings,
+        ["BTC-EUR", "ICP-EUR"],
+        include_review_required_research_only=True,
+    )
+    assert markets == ["BTC-EUR", "ICP-EUR"]
+    assert review_only == ["ICP-EUR"]
+    with pytest.raises(PermissionError, match="not ALLOWED"):
+        validate_explicit_research_markets(
+            restrictive_settings,
+            ["ICP-EUR"],
+            include_review_required_research_only=False,
+        )
 
 
 def test_exact_half_steps_hashes_and_generalized_smoothing(features) -> None:
@@ -216,6 +307,31 @@ def test_economic_hypothesis_templates_are_exact_and_statically_valid() -> None:
         ]
         assert len(exact) == 1
         assert exact[0].eligibility_status is CombinationState.GENERATED
+
+
+def test_lower_timeframe_mtf_templates_are_bounded_and_supported() -> None:
+    registry = signal_block_registry()
+    assert len(LOWER_TIMEFRAME_MTF_TEMPLATES) == 8
+    for membership in LOWER_TIMEFRAME_MTF_TEMPLATES.values():
+        blocks = [registry[block_id] for block_id in membership]
+        assert sum(block.role is BlockRole.ENTRY_TRIGGER for block in blocks) == 1
+        assert sum(block.role is BlockRole.REGIME_FILTER for block in blocks) <= 1
+        assert sum(block.role is BlockRole.CONFIRMATION for block in blocks) <= 2
+        generated = CombinationGenerator(registry).generate(
+            sizes=(len(membership),),
+            logic_modes=(LogicMode.LAYERED,),
+            mode=GenerationMode.FAMILY_AWARE,
+            block_ids=membership,
+            timeframes=("15m", "1h", "4h"),
+        )
+        exact = [
+            item
+            for item in generated
+            if item.block_ids == tuple(sorted(membership))
+        ]
+        assert len(exact) == 1
+        assert exact[0].eligibility_status is CombinationState.GENERATED
+        assert exact[0].common_supported_timeframes == ("15m", "1h", "4h")
 
 
 def test_combinations_one_through_five_are_canonical_and_accounted() -> None:
@@ -391,10 +507,10 @@ def test_universe_scans_past_exclusions_and_persists_point_in_time(
 
 
 def test_discovery_universe_reaches_25_independent_of_allowlist(
-    isolated_settings,
+    restrictive_settings,
     tmp_path,
 ) -> None:
-    settings = lab_settings(isolated_settings, tmp_path)
+    settings = lab_settings(restrictive_settings, tmp_path)
     manager = UniverseManager(settings, database=Database(sqlite_path=settings.paths.database_path))
     symbols = ["BTC", "ETH", "SOL", "LINK", *[f"A{index:02d}" for index in range(1, 28)]]
     rankings = [
@@ -562,12 +678,59 @@ def test_combinatorial_exit_dna_has_distinct_fixed_trailing_and_time_profiles(
     atr = features["atr_14"].astype(float)
     assert (fixed.trailing_distance.dropna() == 0).all()
     assert fixed.metadata["exit_profile"] == ExitProfile.FIXED_R.value
-    assert trend.target_distance.dropna().equals((atr * 20.0).dropna())
+    assert trend.target_distance.dropna().equals(
+        (atr * 1_000_000.0).dropna()
+    )
     assert trend.trailing_distance.dropna().equals((atr * 2.5).dropna())
     assert trend.maximum_holding_bars == 720
-    assert time_regime.target_distance.dropna().equals((atr * 20.0).dropna())
+    assert time_regime.target_distance.dropna().equals(
+        (atr * 1_000_000.0).dropna()
+    )
     assert (time_regime.trailing_distance.dropna() == 0).all()
     assert time_regime.maximum_holding_bars == 480
+
+
+def test_canonical_parameter_sets_screen_every_exit_profile(
+    isolated_settings,
+    tmp_path,
+) -> None:
+    settings = lab_settings(isolated_settings, tmp_path)
+    runner = LabRunner(settings)
+    registry = signal_block_registry()
+    combination = CombinationGenerator(
+        {"rsi_oversold": registry["rsi_oversold"]}
+    ).generate(sizes=(1,), timeframes=("1h",))[0]
+    parameter_sets = runner._parameter_sets(combination, None)
+    profiles = {
+        parameters["__strategy__"]["exit__profile"]
+        for _, parameters in parameter_sets
+    }
+    assert profiles == {profile.value for profile in ExitProfile}
+    assert sum(
+        sensitivity == "CLI_OVERRIDE"
+        for sensitivity, _ in parameter_sets
+    ) >= len(ExitProfile) - 1
+
+
+def test_indicator_exit_profiles_are_causal_and_retain_atr_stop(
+    features,
+) -> None:
+    registry = signal_block_registry()
+    combination = CombinationGenerator(
+        {"positive_return_20": registry["positive_return_20"]}
+    ).generate(sizes=(1,), timeframes=("1h",))[0]
+    strategy = CombinatorialStrategy(combination, registry)
+    output = strategy.generate(
+        features,
+        {
+            "exit__profile": ExitProfile.VWAP_EXIT.value,
+        },
+    )
+    assert output.exit.equals(
+        (features["close"] < features["vwap_20"]).fillna(False)
+    )
+    assert (output.stop_distance.dropna() > 0.0).all()
+    assert output.maximum_holding_bars is None
 
 
 def test_fast_screen_uses_maximum_holding_exit_instead_of_holding_forever(
@@ -604,6 +767,72 @@ def test_fast_screen_uses_maximum_holding_exit_instead_of_holding_forever(
     assert screen["conservative_same_bar_stop_priority"]
     assert screen["trade_entry_buckets"]
     assert len(screen["trade_overlap_signature"]) == 64
+    funnel = screen["signal_funnel"]
+    assert funnel["raw_entry_signal_count"] == 12
+    assert funnel["entry_candidate_count"] == 11
+    assert funnel["completed_round_trip_count"] == 4
+    assert funnel["blocked_existing_position"] == 7
+    assert funnel["trade_definition"] == "COMPLETED_ROUND_TRIP"
+    assert funnel["maximum_holding_bars"] == 3
+    assert funnel["per_market"]["BTC-EUR"][
+        "completed_round_trip_count"
+    ] == 4
+
+
+def test_fast_screen_event_jump_preserves_exit_precedence_and_reentry(
+    ohlcv,
+) -> None:
+    selected = ohlcv.iloc[:20].copy()
+    selected[["open", "high", "low", "close"]] = 100.0
+    selected.loc[selected.index[3], "open"] = 104.0
+    selected.loc[selected.index[4], ["high", "low"]] = [110.0, 90.0]
+    selected.loc[selected.index[5], ["high", "low"]] = [104.0, 99.0]
+    selected.loc[selected.index[6], ["high", "low"]] = [103.0, 101.0]
+    selected.loc[selected.index[9], "close"] = 103.0
+    selected.loc[selected.index[19], "close"] = 101.0
+
+    class ScriptedEntries:
+        def generate(self, frame):
+            index = frame.index
+            entry = pd.Series(False, index=index)
+            entry.iloc[[0, 3, 4, 6, 10, 18]] = True
+            exit_signal = pd.Series(False, index=index)
+            exit_signal.iloc[2] = True
+            stop_distance = pd.Series(50.0, index=index)
+            target_distance = pd.Series(50.0, index=index)
+            trailing_distance = pd.Series(0.0, index=index)
+            stop_distance.iloc[3] = 5.0
+            target_distance.iloc[3] = 5.0
+            trailing_distance.iloc[4] = 2.0
+            stop_distance.iloc[10] = float("nan")
+            return StrategyOutput(
+                entry=entry,
+                exit=exit_signal,
+                avoid=pd.Series(False, index=index),
+                reduce=pd.Series(False, index=index),
+                stop_distance=stop_distance,
+                target_distance=target_distance,
+                trailing_distance=trailing_distance,
+                size_multiplier=pd.Series(1.0, index=index),
+                maximum_holding_bars=3,
+                entry_reason="TEST",
+                exit_reason="TEST",
+            )
+
+    screen = fast_screen(
+        {"BTC-EUR": selected},
+        ScriptedEntries(),
+        round_trip_cost=0.0,
+    )
+    expected = 1.04 * 0.95 * 1.02 * 1.03 * 1.01 - 1.0
+    assert screen["trades"] == 5
+    assert screen["screening_return"] == pytest.approx(expected)
+    assert screen["exit_reason_counts"] == {
+        "MAXIMUM_HOLDING": 1,
+        "SIGNAL_EXIT_NEXT_OPEN": 1,
+        "STOP_OR_PRIOR_TRAILING_STOP": 2,
+        "TERMINAL_LIQUIDATION": 1,
+    }
 
 
 def test_fast_screen_survivor_score_requires_minimum_trades_and_finite_score() -> None:
@@ -690,12 +919,32 @@ def test_result_types_and_diverse_survivors_separate_sensitivity_from_joint_scre
         sensitivity_parameter="CLI_OVERRIDE",
         **base_arguments,
     )
+    trailing = store.queue_job(
+        combination=combinations[0],
+        parameters={
+            **combinations[0].default_parameters,
+            "__strategy__": {
+                "exit__profile": ExitProfile.ATR_TRAILING_ONLY.value,
+            },
+        },
+        sensitivity_parameter="CLI_OVERRIDE",
+        **base_arguments,
+    )
     assert baseline["result_type"] == "BASELINE_SCREEN"
     assert sensitivity["result_type"] == "PARAMETER_SENSITIVITY"
     assert joint["result_type"] == "JOINT_PARAMETER_SCREEN"
     assert baseline["screen_policy_version"]
     assert baseline["exit_model_version"]
     assert baseline["survivor_policy_version"]
+    assert baseline["strategy_variant_dna_hash"]
+    assert (
+        baseline["strategy_variant_dna_hash"]
+        != trailing["strategy_variant_dna_hash"]
+    )
+    assert (
+        baseline["strategy_dna_hash"]
+        == trailing["strategy_dna_hash"]
+    )
 
     candidates = [
         (
@@ -867,6 +1116,17 @@ def test_real_frames_require_real_provenance_and_never_fallback(
         "common_period_requested"
     ]
 
+    naive_frames, _, _ = runner._frames(
+        markets=["BTC-EUR"],
+        timeframe="1h",
+        rows=None,
+        data_mode="real",
+        start_at=ohlcv.index[100].tz_localize(None),
+        end_at=ohlcv.index[500].tz_localize(None),
+    )
+    assert naive_frames["BTC-EUR"].index[0] == ohlcv.index[100]
+    assert naive_frames["BTC-EUR"].index[-1] == ohlcv.index[500]
+
 
 def test_durable_job_dedup_resume_and_half_step_trial_rows(
     isolated_settings,
@@ -974,6 +1234,42 @@ def test_queue_status_is_run_scoped_and_old_incomplete_jobs_are_superseded(
         == CombinationState.QUEUED_BASELINE.value
     )
     assert store.queue_status()["remaining_work"] == 1
+
+
+def test_active_run_heartbeat_uses_bounded_in_memory_queue_accounting(
+    isolated_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = lab_settings(isolated_settings, tmp_path)
+    runner = LabRunner(settings)
+    runner._run_queue_totals["bounded-run"] = 7
+
+    def forbidden_full_queue_scan(*_args, **_kwargs):
+        raise AssertionError("active heartbeat must not scan durable jobs")
+
+    monkeypatch.setattr(
+        runner.store,
+        "queue_status",
+        forbidden_full_queue_scan,
+    )
+    payload = runner.heartbeat(
+        run_id="bounded-run",
+        status="SCREENING",
+        completed_jobs=3,
+        failed_jobs=1,
+    )
+
+    assert payload["queue"]["accounting_source"] == (
+        "IN_MEMORY_ACTIVE_RUN"
+    )
+    assert payload["queue"]["total"] == 7
+    assert payload["queue"]["remaining_work"] == 3
+    assert payload["queue"]["by_status"] == {
+        "COMPLETED": 3,
+        "FAILED": 1,
+        "REMAINING": 3,
+    }
 
 
 def test_persisted_results_must_match_the_exact_active_data_slice() -> None:

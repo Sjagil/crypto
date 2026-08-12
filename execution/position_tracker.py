@@ -7,10 +7,13 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.contracts import Fill, OrderSide, normalize_market
 from utils.common import atomic_write_json, read_json, utc_now
+
+if TYPE_CHECKING:
+    from execution.canonical_state import CanonicalExecutionState
 
 ZERO = Decimal("0")
 LOGGER = logging.getLogger("crypto.position_tracker")
@@ -40,12 +43,21 @@ class Position:
     target_price: Decimal | None = None
     trailing_stop: Decimal | None = None
     initial_risk: Decimal = ZERO
-    current_open_risk: Decimal = ZERO
+    current_open_risk: Decimal | None = ZERO
+    protected_quantity: Decimal = ZERO
+    unprotected_quantity: Decimal = ZERO
+    protection_state: str = "LEGACY_UNKNOWN"
+    ownership_state: str = "UNKNOWN"
+    cost_basis_known: bool = True
+    risk_complete: bool = False
+    state_source: str = "LEGACY_POSITION_TRACKER"
+    canonical_state_hash: str | None = None
     maximum_favorable_excursion: Decimal = ZERO
     maximum_adverse_excursion: Decimal = ZERO
 
     def update_derived(self) -> None:
-        self.cost_basis = self.average_entry_price * self.owned_quantity
+        if self.cost_basis_known:
+            self.cost_basis = self.average_entry_price * self.owned_quantity
         self.unrealized_pnl = (
             (self.mark_price - self.average_entry_price) * self.owned_quantity
             if self.mark_price > 0 and self.owned_quantity > 0
@@ -54,11 +66,26 @@ class Position:
         self.unrealized_pnl_percentage = (
             self.unrealized_pnl / self.cost_basis if self.cost_basis else ZERO
         )
-        self.current_open_risk = (
-            max(ZERO, self.mark_price - self.stop_price) * self.owned_quantity
-            if self.stop_price is not None and self.mark_price > 0
-            else ZERO
+        self.protected_quantity = min(
+            self.owned_quantity,
+            max(ZERO, self.protected_quantity),
         )
+        self.unprotected_quantity = max(
+            ZERO,
+            self.owned_quantity - self.protected_quantity,
+        )
+        if self.cost_basis_known:
+            protected_risk = (
+                max(ZERO, self.average_entry_price - self.stop_price)
+                * self.protected_quantity
+                if self.stop_price is not None
+                else ZERO
+            )
+            unprotected_risk = self.average_entry_price * self.unprotected_quantity
+            self.current_open_risk = protected_risk + unprotected_risk
+        else:
+            self.current_open_risk = None
+            self.risk_complete = False
         if self.cost_basis:
             excursion = self.unrealized_pnl / self.cost_basis
             self.maximum_favorable_excursion = max(
@@ -122,6 +149,14 @@ class PositionTracker:
                 position.target_price = target_price
                 position.trailing_stop = trailing_stop
                 position.initial_risk = initial_risk
+                position.protection_state = (
+                    "LEGACY_STOP_UNCONFIRMED"
+                    if stop_price is not None
+                    else "MISSING"
+                )
+                position.ownership_state = (
+                    "KNOWN" if strategy_id else "UNKNOWN"
+                )
         else:
             if quantity > position.owned_quantity:
                 raise ValueError("sell fill would create a negative spot position")
@@ -145,6 +180,9 @@ class PositionTracker:
                 position.reserved_quantity = ZERO
                 position.average_entry_price = ZERO
                 position.opened_at = None
+                position.protected_quantity = ZERO
+                position.unprotected_quantity = ZERO
+                position.protection_state = "NOT_REQUIRED"
         position.total_fees += fee
         if position.mark_price <= 0:
             position.mark_price = fill.price
@@ -252,7 +290,9 @@ class PositionTracker:
             (
                 Decimal(item["realized_pnl"])
                 for item in self.realized_events
-                if datetime.fromisoformat(item["filled_at"]).date() == selected
+                if item.get("complete") is not False
+                and item.get("realized_pnl") is not None
+                and datetime.fromisoformat(item["filled_at"]).date() == selected
             ),
             ZERO,
         )
@@ -276,7 +316,87 @@ class PositionTracker:
             "fill_ids": sorted(self.fill_ids),
             "realized_events": self.realized_events,
             "updated_at": utc_now().isoformat(),
+            "state_source": self._state_source(),
+            "canonical_state_hash": self._canonical_state_hash(),
+            "read_model_only": True,
         }
+
+    def _state_source(self) -> str:
+        sources = {position.state_source for position in self.positions.values()}
+        return next(iter(sources)) if len(sources) == 1 else "MIXED_MIGRATION_STATE"
+
+    def _canonical_state_hash(self) -> str | None:
+        hashes = {
+            position.canonical_state_hash
+            for position in self.positions.values()
+            if position.canonical_state_hash
+        }
+        return next(iter(hashes)) if len(hashes) == 1 else None
+
+    def apply_canonical_state(self, state: CanonicalExecutionState) -> dict[str, Any]:
+        """Replace this read model from canonical replay without mutating it."""
+
+        prior_marks = {
+            market: position.mark_price
+            for market, position in self.positions.items()
+            if position.mark_price > ZERO
+        }
+        state_hash = state.state_hash
+        rebuilt: dict[str, Position] = {}
+        for market, canonical in state.positions.items():
+            if canonical.quantity <= ZERO and canonical.realized_pnl_eur == ZERO:
+                continue
+            position = Position(
+                market=market,
+                base_asset=canonical.base_asset,
+                quote_asset=canonical.quote_asset,
+                owned_quantity=canonical.quantity,
+                available_quantity=canonical.available_quantity,
+                reserved_quantity=canonical.reserved_quantity,
+                average_entry_price=canonical.average_entry_price,
+                cost_basis=canonical.cost_basis_eur,
+                entry_fees=ZERO,
+                mark_price=prior_marks.get(market, canonical.average_entry_price),
+                realized_pnl=canonical.realized_pnl_eur,
+                total_fees=canonical.total_fees_eur,
+                strategy_id=canonical.strategy_id or "",
+                parameter_hash=canonical.strategy_dna_hash or "",
+                opened_at=canonical.opened_at,
+                updated_at=canonical.updated_at,
+                stop_price=canonical.effective_stop_price,
+                initial_risk=canonical.planned_risk_eur or ZERO,
+                current_open_risk=canonical.open_risk_eur,
+                protected_quantity=canonical.protected_quantity,
+                unprotected_quantity=canonical.unprotected_quantity,
+                protection_state=canonical.protection_state.value,
+                ownership_state=canonical.ownership_state.value,
+                cost_basis_known=canonical.cost_basis_known,
+                risk_complete=canonical.open_risk_eur is not None,
+                state_source="CANONICAL_EXECUTION_STATE",
+                canonical_state_hash=state_hash,
+            )
+            position.update_derived()
+            rebuilt[market] = position
+        self.positions = rebuilt
+        self.fill_ids = set(state.fills)
+        self.realized_events = [
+            {
+                "fill_id": row.fill_id,
+                "market": row.market,
+                "strategy_id": row.strategy_id or "",
+                "realized_pnl": (
+                    str(row.realized_pnl_eur)
+                    if row.realized_pnl_eur is not None
+                    else None
+                ),
+                "complete": row.complete,
+                "filled_at": row.filled_at.isoformat(),
+                "source": "CANONICAL_EXECUTION_STATE",
+            }
+            for row in state.realized_pnl_events.values()
+        ]
+        self.persist()
+        return self.snapshot()
 
     @staticmethod
     def _serialize_position(position: Position) -> dict[str, Any]:
@@ -314,6 +434,8 @@ class PositionTracker:
             "trailing_stop",
             "initial_risk",
             "current_open_risk",
+            "protected_quantity",
+            "unprotected_quantity",
             "maximum_favorable_excursion",
             "maximum_adverse_excursion",
         }

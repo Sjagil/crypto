@@ -30,8 +30,8 @@ def test_default_canary_is_registered_but_disabled(
     isolated_settings,
 ) -> None:
     policy = CanaryPolicy.from_settings(isolated_settings)
-    assert policy.maximum_order_eur == Decimal("5")
-    assert policy.maximum_total_eur == Decimal("5")
+    assert policy.maximum_order_eur == Decimal("10")
+    assert policy.maximum_total_eur == Decimal("10")
     assert policy.maximum_open_positions == 1
     assert not policy.enabled
     decision = InstitutionalCanaryGuard(policy).assess_buy(
@@ -62,6 +62,29 @@ def test_canary_caps_order_and_total_exposure() -> None:
     )
     assert not full.approved
     assert full.approved_notional_eur == Decimal("0")
+
+
+def test_evidence_authorized_capital_policy_supports_level_two(
+    isolated_settings,
+) -> None:
+    policy = CanaryPolicy.from_cap_limits(
+        isolated_settings,
+        maximum_order_eur=Decimal("25"),
+        maximum_total_eur=Decimal("75"),
+        maximum_open_positions=2,
+        capital_level=2,
+        enabled=True,
+    )
+    guard = InstitutionalCanaryGuard(policy)
+    decision = guard.assess_buy(
+        requested_notional_eur=Decimal("30"),
+        current_total_exposure_eur=Decimal("20"),
+        current_open_positions=1,
+        exchange_minimum_order_eur=Decimal("5"),
+    )
+    assert decision.approved
+    assert decision.approved_notional_eur == Decimal("25")
+    assert policy.autoscale is False
 
 
 def test_canary_never_autoscales_to_exchange_minimum() -> None:
@@ -99,7 +122,7 @@ def test_execution_settings_reject_larger_or_autoscaled_canary() -> None:
     with pytest.raises(ValueError):
         ExecutionSettings(live_canary_autoscale=True)
     with pytest.raises(ValueError):
-        ExecutionSettings(maximum_live_order_eur=5.01)
+        ExecutionSettings(maximum_live_order_eur=10.01)
 
 
 def test_canary_manifest_is_content_stable_and_revision_protected(

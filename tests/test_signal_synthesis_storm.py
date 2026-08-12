@@ -115,9 +115,9 @@ def test_signal_storm_plan_is_deterministic_unique_and_covers_registry():
 
     plan = signal_storm_plan()
     assert plan["trial_count"] == SIGNAL_STORM_TRIAL_COUNT
-    assert plan["registered_signal_blocks"] == 134
-    assert plan["executable_signal_blocks"] == 133
-    assert plan["covered_executable_blocks"] == 133
+    assert plan["registered_signal_blocks"] == 170
+    assert plan["executable_signal_blocks"] == 169
+    assert plan["covered_executable_blocks"] == 169
     assert plan["blocked_signal_blocks"] == dict(SIGNAL_STORM_CONTEXT_BLOCKERS)
     assert len(plan["families_covered"]) == 11
 

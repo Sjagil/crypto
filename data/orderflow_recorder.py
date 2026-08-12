@@ -10,13 +10,15 @@ import lzma
 import os
 import shutil
 import statistics
-from collections import defaultdict
+from bisect import bisect_left
+from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from core.contracts import NormalizedStreamEvent, StreamEventType
+from data.realtime_candle_builder import RealtimeCandleBuilder
 from utils.common import (
     atomic_write_json,
     read_json,
@@ -28,6 +30,7 @@ from utils.common import (
 ORDERFLOW_SCHEMA = "prospective_orderflow_event_v1"
 ORDERFLOW_CHECKPOINT_SCHEMA = "prospective_orderflow_checkpoint_v1"
 MICROSTRUCTURE_SCHEMA = "microstructure_hourly_snapshot_v4"
+MICROSTRUCTURE_15M_SCHEMA = "microstructure_15m_snapshot_v1"
 SUPPORTED_MICROSTRUCTURE_SCHEMAS = {
     "microstructure_hourly_snapshot_v1",
     "microstructure_hourly_snapshot_v2",
@@ -124,6 +127,18 @@ def _closed_hour_start(observed_at: datetime) -> datetime:
         microsecond=0,
     )
     return normalized - timedelta(hours=1)
+
+
+def _closed_quarter_start(observed_at: datetime) -> datetime:
+    """Return the start of the most recently closed UTC 15-minute bucket."""
+
+    observed = _utc(observed_at)
+    current_start = observed.replace(
+        minute=(observed.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+    return current_start - timedelta(minutes=15)
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -256,32 +271,38 @@ def verify_orderflow_ledger(
             opener = gzip.open
         else:
             opener = open
-        with opener(path, "rt", encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = dict(json.loads(line))
-                except (TypeError, ValueError):
-                    failures.append(
-                        f"INVALID_JSON:{path}:{line_number}"
-                    )
-                    continue
-                record_hash = str(record.pop("record_hash", ""))
-                if record.get("previous_record_hash") != previous_hash:
-                    failures.append(
-                        f"CHAIN_BREAK:{path}:{line_number}"
-                    )
-                expected = stable_hash(record, length=64)
-                if record_hash != expected:
-                    failures.append(
-                        f"HASH_MISMATCH:{path}:{line_number}"
-                    )
-                previous_hash = record_hash or expected
-                arrival = record.get("arrival_timestamp")
-                first_arrival = first_arrival or arrival
-                last_arrival = arrival or last_arrival
-                count += 1
+        try:
+            with opener(path, "rt", encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = dict(json.loads(line))
+                    except (TypeError, ValueError):
+                        failures.append(
+                            f"INVALID_JSON:{path}:{line_number}"
+                        )
+                        continue
+                    record_hash = str(record.pop("record_hash", ""))
+                    if record.get("previous_record_hash") != previous_hash:
+                        failures.append(
+                            f"CHAIN_BREAK:{path}:{line_number}"
+                        )
+                    expected = stable_hash(record, length=64)
+                    if record_hash != expected:
+                        failures.append(
+                            f"HASH_MISMATCH:{path}:{line_number}"
+                        )
+                    previous_hash = record_hash or expected
+                    arrival = record.get("arrival_timestamp")
+                    first_arrival = first_arrival or arrival
+                    last_arrival = arrival or last_arrival
+                    count += 1
+        except FileNotFoundError:
+            # The live recorder may atomically rotate/compress a segment after
+            # discovery. Verification remains fail-closed and can pass on the
+            # next stable snapshot instead of crashing the entire supervisor.
+            failures.append(f"SEGMENT_ROTATED_DURING_VERIFY:{path}")
     return {
         "schema_version": "prospective_orderflow_audit_v1",
         "status": "PASSED" if not failures else "FAILED",
@@ -291,6 +312,107 @@ def verify_orderflow_ledger(
         "first_arrival_timestamp": first_arrival,
         "last_arrival_timestamp": last_arrival,
         "integrity_failures": failures,
+        "orders_generated": 0,
+    }
+
+
+def _read_last_nonempty_json_line(path: Path) -> dict[str, Any]:
+    """Read the last durable raw JSONL record without scanning the segment."""
+
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        buffer = bytearray()
+        while position > 0:
+            position -= 1
+            stream.seek(position)
+            value = stream.read(1)
+            if value == b"\n" and buffer:
+                break
+            if value not in {b"\n", b"\r"}:
+                buffer.extend(value)
+        raw = bytes(reversed(buffer)).decode("utf-8")
+    if not raw.strip():
+        raise RuntimeError("ORDERFLOW_CHECKPOINT_EMPTY_LAST_SEGMENT")
+    try:
+        selected = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("ORDERFLOW_CHECKPOINT_INVALID_LAST_RECORD") from exc
+    if not isinstance(selected, dict):
+        raise RuntimeError("ORDERFLOW_CHECKPOINT_INVALID_LAST_RECORD")
+    return dict(selected)
+
+
+def verify_orderflow_checkpoint(
+    root: Path | str,
+    checkpoint_path: Path | str,
+) -> dict[str, Any]:
+    """Verify the durable chain head for bounded restart recovery.
+
+    A successful result proves that the checkpoint references the exact last
+    durable record, and that this record is internally hashed correctly.  The
+    historical chain was verified before that checkpoint was published; a
+    full forensic rescan remains available through :func:`verify_orderflow_ledger`.
+    """
+
+    directory = Path(root).resolve()
+    checkpoint_file = Path(checkpoint_path)
+    failures: list[str] = []
+    try:
+        checkpoint = dict(read_json(checkpoint_file))
+    except (OSError, TypeError, ValueError):
+        checkpoint = {}
+        failures.append("CHECKPOINT_UNREADABLE")
+    if checkpoint.get("schema_version") != ORDERFLOW_CHECKPOINT_SCHEMA:
+        failures.append("CHECKPOINT_SCHEMA_MISMATCH")
+    root_hash = str(checkpoint.get("root_hash") or "")
+    count = int(checkpoint.get("record_count") or 0)
+    last_segment_raw = str(checkpoint.get("last_segment") or "")
+    last_segment: Path | None = None
+    if len(root_hash) != 64 or any(value not in "0123456789abcdef" for value in root_hash):
+        failures.append("CHECKPOINT_ROOT_HASH_INVALID")
+    if count <= 0:
+        failures.append("CHECKPOINT_RECORD_COUNT_INVALID")
+    if not last_segment_raw:
+        failures.append("CHECKPOINT_LAST_SEGMENT_MISSING")
+    else:
+        try:
+            last_segment = Path(last_segment_raw).resolve()
+            last_segment.relative_to(directory)
+        except (OSError, ValueError):
+            failures.append("CHECKPOINT_LAST_SEGMENT_OUTSIDE_ROOT")
+            last_segment = None
+    if last_segment is not None:
+        if not last_segment.is_file() or not last_segment.name.endswith(".jsonl"):
+            failures.append("CHECKPOINT_LAST_SEGMENT_UNAVAILABLE")
+        else:
+            expected_size = checkpoint.get("last_segment_size_bytes")
+            if expected_size is not None and int(expected_size) != last_segment.stat().st_size:
+                failures.append("CHECKPOINT_LAST_SEGMENT_SIZE_MISMATCH")
+            try:
+                last_record = _read_last_nonempty_json_line(last_segment)
+                record_hash = str(last_record.pop("record_hash", ""))
+                if record_hash != stable_hash(last_record, length=64):
+                    failures.append("CHECKPOINT_LAST_RECORD_HASH_MISMATCH")
+                if record_hash != root_hash:
+                    failures.append("CHECKPOINT_CHAIN_HEAD_MISMATCH")
+                if (
+                    checkpoint.get("last_arrival_timestamp")
+                    != last_record.get("arrival_timestamp")
+                ):
+                    failures.append("CHECKPOINT_LAST_ARRIVAL_MISMATCH")
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failures.append(str(exc))
+    return {
+        "schema_version": "prospective_orderflow_checkpoint_audit_v1",
+        "status": "PASSED" if not failures else "FAILED",
+        "record_count": count,
+        "root_hash": root_hash,
+        "last_arrival_timestamp": checkpoint.get("last_arrival_timestamp"),
+        "last_segment": str(last_segment) if last_segment is not None else None,
+        "integrity_failures": failures,
+        "recovery_mode": "CHECKPOINT_CHAIN_HEAD_VERIFIED",
+        "full_historical_rescan_deferred": True,
         "orders_generated": 0,
     }
 
@@ -513,14 +635,26 @@ class HashChainedOrderflowLedger:
         root: Path,
         checkpoint_path: Path,
         maximum_storage_bytes: int | None = None,
+        checkpoint_first_recovery: bool = False,
     ) -> None:
         self.root = root
         self.checkpoint_path = checkpoint_path
         self.maximum_storage_bytes = maximum_storage_bytes
         self.root.mkdir(parents=True, exist_ok=True)
-        audit = verify_orderflow_ledger(self.root)
+        audit = (
+            verify_orderflow_checkpoint(self.root, checkpoint_path)
+            if checkpoint_first_recovery and checkpoint_path.is_file()
+            else verify_orderflow_ledger(self.root)
+        )
         if audit["status"] != "PASSED":
             raise RuntimeError("ORDERFLOW_LEDGER_INTEGRITY_FAILED")
+        self.recovery_mode = str(
+            audit.get("recovery_mode") or "FULL_LEDGER_VERIFIED"
+        )
+        self.integrity_status = str(audit["status"])
+        self.full_historical_rescan_deferred = bool(
+            audit.get("full_historical_rescan_deferred", False)
+        )
         self.previous_hash = str(audit["root_hash"])
         self.record_count = int(audit["record_count"])
         self.last_arrival_timestamp = audit[
@@ -641,6 +775,9 @@ class HashChainedOrderflowLedger:
                             )
                         )
                     ),
+                    "last_segment_size_bytes": self._segment(
+                        _utc(records[-1]["arrival_timestamp"])
+                    ).stat().st_size,
                     "orders_generated": 0,
                 },
             )
@@ -663,12 +800,12 @@ def _book_metrics(
         record.get("book_bids")
         or record.get("bid_updates")
         or []
-    )[:depth]
+    )
     asks = list(
         record.get("book_asks")
         or record.get("ask_updates")
         or []
-    )[:depth]
+    )
     parsed_bids = [
         (_decimal(row[0]), _decimal(row[1]))
         for row in bids
@@ -696,17 +833,21 @@ def _book_metrics(
             "spread_bps": None,
             "book_sequence": record.get("sequence_end"),
         }
-    bid_total = sum((row[1] for row in parsed_bids), Decimal(0))
-    ask_total = sum((row[1] for row in parsed_asks), Decimal(0))
-    total = bid_total + ask_total
     best_bid, best_bid_quantity = parsed_bids[0]
     best_ask, best_ask_quantity = parsed_asks[0]
     top_total = best_bid_quantity + best_ask_quantity
     mid = (best_bid + best_ask) / Decimal(2)
-    return {
+    selected_bid_total = sum(
+        (row[1] for row in parsed_bids[:depth]), Decimal(0)
+    )
+    selected_ask_total = sum(
+        (row[1] for row in parsed_asks[:depth]), Decimal(0)
+    )
+    selected_total = selected_bid_total + selected_ask_total
+    result = {
         "orderbook_imbalance": (
-            float((bid_total - ask_total) / total)
-            if total > 0
+            float((selected_bid_total - selected_ask_total) / selected_total)
+            if selected_total > 0
             else None
         ),
         "microprice": (
@@ -727,6 +868,43 @@ def _book_metrics(
         ),
         "book_sequence": record.get("sequence_end"),
     }
+    for selected_depth in (5, 10, 25):
+        depth_bids = parsed_bids[:selected_depth]
+        depth_asks = parsed_asks[:selected_depth]
+        bid_size = sum((row[1] for row in depth_bids), Decimal(0))
+        ask_size = sum((row[1] for row in depth_asks), Decimal(0))
+        depth_total = bid_size + ask_size
+        result[f"orderbook_imbalance_top_{selected_depth}"] = (
+            float((bid_size - ask_size) / depth_total)
+            if depth_total > 0
+            else None
+        )
+        result[f"bid_liquidity_top_{selected_depth}_quote"] = float(
+            sum((price * quantity for price, quantity in depth_bids), Decimal(0))
+        )
+        result[f"ask_liquidity_top_{selected_depth}_quote"] = float(
+            sum((price * quantity for price, quantity in depth_asks), Decimal(0))
+        )
+    for band_bps in (5, 10, 25, 50):
+        fraction = Decimal(band_bps) / Decimal(10_000)
+        lower, upper = mid * (Decimal(1) - fraction), mid * (Decimal(1) + fraction)
+        band_bids = [row for row in parsed_bids if row[0] >= lower]
+        band_asks = [row for row in parsed_asks if row[0] <= upper]
+        bid_quote = sum(
+            (price * quantity for price, quantity in band_bids), Decimal(0)
+        )
+        ask_quote = sum(
+            (price * quantity for price, quantity in band_asks), Decimal(0)
+        )
+        band_total = bid_quote + ask_quote
+        result[f"bid_liquidity_within_{band_bps}bps_quote"] = float(bid_quote)
+        result[f"ask_liquidity_within_{band_bps}bps_quote"] = float(ask_quote)
+        result[f"orderbook_imbalance_within_{band_bps}bps"] = (
+            float((bid_quote - ask_quote) / band_total)
+            if band_total > 0
+            else None
+        )
+    return result
 
 
 def summarize_orderflow_hour(
@@ -736,11 +914,17 @@ def summarize_orderflow_hour(
     hour_start: datetime,
     recorder_started_at: datetime,
     health: Mapping[str, Any],
+    interval: timedelta = timedelta(hours=1),
 ) -> dict[str, Any]:
-    """Calculate causal facts and explicitly grade hour completeness."""
+    """Calculate causal facts and explicitly grade interval completeness.
+
+    The public name is retained for backwards compatibility. Hourly callers
+    use the default; the live recorder also applies the exact same forensic
+    calculation to separately sealed 15-minute entry buckets.
+    """
 
     start = _utc(hour_start)
-    end = start + timedelta(hours=1)
+    end = start + interval
     selected = [
         dict(record)
         for record in records
@@ -813,9 +997,20 @@ def summarize_orderflow_hour(
     started = _utc(recorder_started_at)
     reasons: list[str] = []
     if started > start:
-        reasons.append("RECORDER_STARTED_MID_HOUR")
+        reasons.append(
+            "RECORDER_STARTED_MID_HOUR"
+            if interval == timedelta(hours=1)
+            else "RECORDER_STARTED_MID_INTERVAL"
+        )
     if not selected:
         reasons.append("NO_STREAM_EVENTS")
+    coverage_grace = timedelta(
+        minutes=5 if interval >= timedelta(hours=1) else 2
+    )
+    if arrivals and arrivals[0] > start + coverage_grace:
+        reasons.append("ARRIVAL_START_LATE")
+    if arrivals and arrivals[-1] < end - coverage_grace:
+        reasons.append("ARRIVAL_END_EARLY")
     if not trades:
         reasons.append("NO_TRADES")
     if not book_samples:
@@ -842,10 +1037,70 @@ def summarize_orderflow_hour(
         reasons.append("STREAM_RECONNECTED")
     if str(health.get("state")) not in {"CONNECTED", "STOPPED"}:
         reasons.append("STREAM_NOT_HEALTHY")
+    latest_book_metrics = _book_metrics(
+        book_samples[-1] if book_samples else None,
+        depth=10,
+    )
+    first_book_metrics = _book_metrics(
+        book_samples[0] if book_samples else None,
+        depth=10,
+    )
+    initial_bid_quote = _decimal(
+        first_book_metrics.get("bid_liquidity_top_25_quote")
+    ) or Decimal(0)
+    initial_ask_quote = _decimal(
+        first_book_metrics.get("ask_liquidity_top_25_quote")
+    ) or Decimal(0)
+    final_bid_quote = _decimal(
+        latest_book_metrics.get("bid_liquidity_top_25_quote")
+    ) or Decimal(0)
+    final_ask_quote = _decimal(
+        latest_book_metrics.get("ask_liquidity_top_25_quote")
+    ) or Decimal(0)
+    bid_liquidity_change = final_bid_quote - initial_bid_quote
+    ask_liquidity_change = final_ask_quote - initial_ask_quote
+    ofi_quote = bid_liquidity_change - ask_liquidity_change
+    initial_depth_quote = initial_bid_quote + initial_ask_quote
+    ofi_normalized = (
+        float(ofi_quote / initial_depth_quote)
+        if initial_depth_quote > 0
+        else None
+    )
+    ordered_trades = sorted(
+        trades,
+        key=lambda row: _utc(row["arrival_timestamp"]),
+    )
+    first_trade_price = (
+        _decimal(ordered_trades[0].get("price"))
+        if ordered_trades
+        else None
+    )
+    last_trade_price = (
+        _decimal(ordered_trades[-1].get("price"))
+        if ordered_trades
+        else None
+    )
+    price_change_fraction = (
+        float(last_trade_price / first_trade_price - Decimal(1))
+        if first_trade_price is not None
+        and first_trade_price > 0
+        and last_trade_price is not None
+        else None
+    )
+    price_stability = (
+        max(0.0, 1.0 - abs(price_change_fraction) / 0.0025)
+        if price_change_fraction is not None
+        else 0.0
+    )
+    buy_share = float(buy_base / total_base) if total_base > 0 else 0.0
+    sell_share = float(sell_base / total_base) if total_base > 0 else 0.0
+    positive_refill = max(0.0, min(1.0, (ofi_normalized or 0.0) + 0.5))
+    negative_refill = max(0.0, min(1.0, -(ofi_normalized or 0.0) + 0.5))
     return {
         "market": market,
         "hour_start": start.isoformat(),
         "hour_end": end.isoformat(),
+        "interval_minutes": int(interval.total_seconds() // 60),
         "status": "COMPLETE" if not reasons else "DATA_GAP",
         "reason_codes": reasons,
         "stream_event_count": len(selected),
@@ -865,6 +1120,18 @@ def summarize_orderflow_hour(
             if total_base > 0
             else None
         ),
+        "aggressive_buy_share": buy_share,
+        "aggressive_sell_share": sell_share,
+        "price_change_fraction": price_change_fraction,
+        "bid_liquidity_change_top_25_quote": float(bid_liquidity_change),
+        "ask_liquidity_change_top_25_quote": float(ask_liquidity_change),
+        "order_flow_imbalance_quote": float(ofi_quote),
+        "order_flow_imbalance_normalized": ofi_normalized,
+        "bullish_absorption_score": sell_share * price_stability * positive_refill,
+        "bearish_absorption_score": buy_share * price_stability * negative_refill,
+        "absorption_method": (
+            "AGGRESSOR_SHARE_X_LOW_PRICE_IMPACT_X_TOP25_BOOK_REFILL"
+        ),
         "spot_base_volume": float(total_base),
         "spot_quote_volume": float(total_quote),
         "spot_volume_24h": (
@@ -883,9 +1150,7 @@ def summarize_orderflow_hour(
             else None
         ),
         "orderbook_sample_count": len(book_samples),
-        **_book_metrics(
-            book_samples[-1] if book_samples else None
-        ),
+        **latest_book_metrics,
         "source_record_hashes": [
             record.get("record_hash") for record in selected
         ],
@@ -1685,8 +1950,10 @@ class ProspectiveOrderflowRecorder:
         markets: tuple[str, ...],
         feature_directory: Path,
         readiness_path: Path,
+        fifteen_minute_feature_directory: Path | None = None,
         health_path: Path | None = None,
         positioning_directory: Path | None = None,
+        realtime_candle_path: Path | None = None,
         flush_seconds: float = 1.0,
         batch_size: int = 500,
         finalization_grace_minutes: int = 5,
@@ -1696,9 +1963,19 @@ class ProspectiveOrderflowRecorder:
         self.database = database
         self.markets = markets
         self.feature_directory = feature_directory
+        self.fifteen_minute_feature_directory = (
+            fifteen_minute_feature_directory
+            or feature_directory.parent / "microstructure_15m"
+        )
         self.readiness_path = readiness_path
         self.health_path = health_path
         self.positioning_directory = positioning_directory
+        self.realtime_candle_builder = RealtimeCandleBuilder(
+            output_path=(
+                realtime_candle_path
+                or feature_directory.parent / "realtime_candles.json"
+            )
+        )
         self.flush_seconds = flush_seconds
         self.batch_size = batch_size
         self.finalization_grace_minutes = max(
@@ -1722,6 +1999,11 @@ class ProspectiveOrderflowRecorder:
             "dropped_messages": 0,
             "reconnects": 0,
         }
+        self._quarter_health_counters = {
+            "sequence_gaps": 0,
+            "dropped_messages": 0,
+            "reconnects": 0,
+        }
         self._acknowledged_stream_counters = {
             "sequence_gaps": 0,
             "dropped_messages": 0,
@@ -1730,6 +2012,945 @@ class ProspectiveOrderflowRecorder:
         self._last_recovery_at: str | None = None
         self._last_ticker_minute: dict[str, datetime] = {}
         self._last_book_state_bucket: dict[str, int] = {}
+        # The durable ledger remains the forensic source of truth.  These
+        # bounded, in-memory windows are a low-latency view of the same
+        # prospective events for event-driven decisions; they are never used
+        # to rewrite or backfill historical facts.
+        self._realtime_trades: dict[
+            str,
+            deque[tuple[datetime, float, float, int]],
+        ] = defaultdict(lambda: deque(maxlen=50_000))
+        self._realtime_tickers: dict[
+            str,
+            deque[tuple[datetime, float, float | None]],
+        ] = defaultdict(lambda: deque(maxlen=7_500))
+        self._realtime_books: dict[
+            str,
+            deque[dict[str, Any]],
+        ] = defaultdict(lambda: deque(maxlen=1_500))
+
+    @staticmethod
+    def _trim_realtime_window(
+        rows: deque[Any],
+        *,
+        cutoff: datetime,
+    ) -> None:
+        while rows and rows[0][0] < cutoff:
+            rows.popleft()
+
+    def _record_realtime_event(
+        self,
+        event: NormalizedStreamEvent,
+    ) -> None:
+        market = event.canonical_market
+        observed = event.observed_at.astimezone(UTC)
+        cutoff = observed - timedelta(minutes=70)
+        if event.event_type is StreamEventType.TRADE:
+            price = _decimal(event.payload.get("price"))
+            base_quantity = _decimal(
+                event.payload.get(
+                    "base_quantity",
+                    event.payload.get("quantity"),
+                )
+            )
+            quote_quantity = _decimal(
+                event.payload.get("quote_quantity")
+            )
+            if (
+                quote_quantity is None
+                and price is not None
+                and base_quantity is not None
+            ):
+                quote_quantity = price * base_quantity
+            if price is None or quote_quantity is None or price <= 0:
+                return
+            side = str(
+                event.payload.get("aggressor_side")
+                or event.payload.get("side")
+                or ""
+            ).casefold()
+            direction = 1 if side in {"buy", "bid"} else -1
+            self.realtime_candle_builder.ingest_trade(
+                market=market,
+                timestamp=event.timestamp,
+                observed_at=observed,
+                price=float(price),
+                base_quantity=float(base_quantity or 0),
+                quote_quantity=float(quote_quantity),
+                aggressor_side=side,
+            )
+            rows = self._realtime_trades[market]
+            rows.append(
+                (
+                    observed,
+                    float(price),
+                    float(quote_quantity),
+                    direction,
+                )
+            )
+            self._trim_realtime_window(rows, cutoff=cutoff)
+        elif event.event_type is StreamEventType.TICKER:
+            price = _decimal(
+                event.payload.get("last_price")
+                or event.payload.get("price")
+            )
+            if price is None or price <= 0:
+                return
+            quote_volume = _decimal(event.payload.get("quote_volume_24h"))
+            rows = self._realtime_tickers[market]
+            rows.append(
+                (
+                    observed,
+                    float(price),
+                    float(quote_volume) if quote_volume is not None else None,
+                )
+            )
+            self._trim_realtime_window(rows, cutoff=cutoff)
+
+    def _record_realtime_book(
+        self,
+        *,
+        market: str,
+        observed_at: datetime,
+        bids: Mapping[Decimal, Decimal],
+        asks: Mapping[Decimal, Decimal],
+        valid: bool,
+    ) -> None:
+        if not valid or not bids or not asks:
+            return
+        sorted_bids = sorted(bids.items(), reverse=True)[:20]
+        sorted_asks = sorted(asks.items())[:20]
+        best_bid = sorted_bids[0][0]
+        best_ask = sorted_asks[0][0]
+        best_bid_quantity = sorted_bids[0][1]
+        best_ask_quantity = sorted_asks[0][1]
+        midpoint = (best_bid + best_ask) / Decimal("2")
+        if midpoint <= 0:
+            return
+        bid_depths = [
+            float(price * quantity)
+            for price, quantity in sorted_bids
+        ]
+        ask_depths = [
+            float(price * quantity)
+            for price, quantity in sorted_asks
+        ]
+        bid_top_5 = sum(bid_depths[:5])
+        ask_top_5 = sum(ask_depths[:5])
+        bid_top_10 = sum(bid_depths[:10])
+        ask_top_10 = sum(ask_depths[:10])
+        denominator_5 = bid_top_5 + ask_top_5
+        denominator_10 = bid_top_10 + ask_top_10
+        top_quantity = best_bid_quantity + best_ask_quantity
+        microprice = (
+            (
+                best_ask * best_bid_quantity
+                + best_bid * best_ask_quantity
+            )
+            / top_quantity
+            if top_quantity > 0
+            else midpoint
+        )
+        midpoint_float = float(midpoint)
+
+        def depth_within_bps(
+            levels: list[tuple[Decimal, Decimal]],
+            *,
+            side: str,
+            distance_bps: float,
+        ) -> float:
+            total = 0.0
+            for level_price, level_quantity in levels:
+                distance = (
+                    (midpoint_float - float(level_price)) / midpoint_float
+                    if side == "bid"
+                    else (float(level_price) - midpoint_float) / midpoint_float
+                ) * 10_000.0
+                if distance <= distance_bps + 1e-12:
+                    total += float(level_price * level_quantity)
+            return total
+
+        distance_depth: dict[int, tuple[float, float]] = {}
+        for distance_bps in (5, 10, 25):
+            distance_depth[distance_bps] = (
+                depth_within_bps(
+                    sorted_bids,
+                    side="bid",
+                    distance_bps=float(distance_bps),
+                ),
+                depth_within_bps(
+                    sorted_asks,
+                    side="ask",
+                    distance_bps=float(distance_bps),
+                ),
+            )
+
+        weighted_bid = sum(
+            float(price * quantity)
+            / (
+                1.0
+                + max(
+                    0.0,
+                    (midpoint_float - float(price))
+                    / midpoint_float
+                    * 10_000.0,
+                )
+            )
+            for price, quantity in sorted_bids[:10]
+        )
+        weighted_ask = sum(
+            float(price * quantity)
+            / (
+                1.0
+                + max(
+                    0.0,
+                    (float(price) - midpoint_float)
+                    / midpoint_float
+                    * 10_000.0,
+                )
+            )
+            for price, quantity in sorted_asks[:10]
+        )
+        weighted_denominator = weighted_bid + weighted_ask
+        current_spread_bps = float(
+            (best_ask - best_bid) / midpoint * Decimal("10000")
+        )
+        prior_spreads = [
+            float(row["spread_bps"])
+            for row in list(self._realtime_books[market])[-299:]
+            if row.get("spread_bps") is not None
+        ]
+        spread_sample = [*prior_spreads, current_spread_bps]
+        spread_median = statistics.median(spread_sample)
+        spread_mad = statistics.median(
+            abs(value - spread_median) for value in spread_sample
+        )
+        spread_p75 = (
+            statistics.quantiles(
+                spread_sample,
+                n=4,
+                method="inclusive",
+            )[2]
+            if len(spread_sample) >= 2
+            else current_spread_bps
+        )
+        dynamic_spread_cap = min(35.0, spread_p75 * 1.25)
+        record = {
+            "observed_at": observed_at.astimezone(UTC),
+            "best_bid": float(best_bid),
+            "best_ask": float(best_ask),
+            "midpoint": float(midpoint),
+            "microprice": float(microprice),
+            "microprice_edge_bps": float(
+                (microprice - midpoint) / midpoint * Decimal("10000")
+            ),
+            "spread_bps": current_spread_bps,
+            "spread_rolling_median_bps": spread_median,
+            "spread_rolling_mad_bps": spread_mad,
+            "spread_rolling_p75_bps": spread_p75,
+            "spread_robust_zscore": (
+                (current_spread_bps - spread_median) / spread_mad
+                if spread_mad > 1e-12
+                else 0.0
+            ),
+            "dynamic_spread_cap_bps": dynamic_spread_cap,
+            "spread_within_dynamic_cap": (
+                current_spread_bps <= dynamic_spread_cap
+            ),
+            "bid_depth_eur_top_5": bid_top_5,
+            "ask_depth_eur_top_5": ask_top_5,
+            "bid_depth_eur_top_10": bid_top_10,
+            "ask_depth_eur_top_10": ask_top_10,
+            "mlobi_top_5": (
+                (bid_top_5 - ask_top_5) / denominator_5
+                if denominator_5 > 0
+                else None
+            ),
+            "mlobi_top_10": (
+                (bid_top_10 - ask_top_10) / denominator_10
+                if denominator_10 > 0
+                else None
+            ),
+            "distance_weighted_imbalance_top_10": (
+                (weighted_bid - weighted_ask) / weighted_denominator
+                if weighted_denominator > 0
+                else None
+            ),
+            **{
+                f"bid_depth_eur_within_{distance}_bps": bid_depth
+                for distance, (bid_depth, _ask_depth) in distance_depth.items()
+            },
+            **{
+                f"ask_depth_eur_within_{distance}_bps": ask_depth
+                for distance, (_bid_depth, ask_depth) in distance_depth.items()
+            },
+            **{
+                f"depth_imbalance_within_{distance}_bps": (
+                    (bid_depth - ask_depth) / (bid_depth + ask_depth)
+                    if bid_depth + ask_depth > 0
+                    else None
+                )
+                for distance, (bid_depth, ask_depth) in distance_depth.items()
+            },
+            "bid_book_slope_eur_per_bp": (
+                distance_depth[25][0] / 25.0
+            ),
+            "ask_book_slope_eur_per_bp": (
+                distance_depth[25][1] / 25.0
+            ),
+            "asks": [
+                (float(price), float(quantity))
+                for price, quantity in sorted_asks
+            ],
+        }
+        rows = self._realtime_books[market]
+        rows.append(record)
+        cutoff = record["observed_at"] - timedelta(minutes=70)
+        while rows and rows[0]["observed_at"] < cutoff:
+            rows.popleft()
+
+    @staticmethod
+    def _window_trade_metrics(
+        rows: list[tuple[datetime, float, float, int]],
+        *,
+        now: datetime,
+        seconds: int,
+    ) -> dict[str, float | int | None]:
+        current = [
+            row
+            for row in rows
+            if row[0] >= now - timedelta(seconds=seconds)
+        ]
+        if not current:
+            return {
+                "return": None,
+                "quote_volume_eur": 0.0,
+                "trade_count": 0,
+                "taker_buy_ratio": None,
+                "cvd_quote_eur": 0.0,
+            }
+        quote_volume = sum(row[2] for row in current)
+        buy_volume = sum(row[2] for row in current if row[3] > 0)
+        return {
+            "return": (
+                current[-1][1] / current[0][1] - 1.0
+                if len(current) >= 2 and current[0][1] > 0
+                else 0.0
+            ),
+            "quote_volume_eur": quote_volume,
+            "trade_count": len(current),
+            "taker_buy_ratio": (
+                buy_volume / quote_volume if quote_volume > 0 else None
+            ),
+            "cvd_quote_eur": sum(row[2] * row[3] for row in current),
+        }
+
+    @staticmethod
+    def _relative_window_activity(
+        rows: list[tuple[datetime, float, float, int]],
+        *,
+        now: datetime,
+        seconds: int,
+        metric_index: int | None,
+    ) -> float | None:
+        current_start = now - timedelta(seconds=seconds)
+        baseline_start = current_start - timedelta(seconds=seconds * 10)
+        current = [row for row in rows if row[0] >= current_start]
+        baseline = [
+            row for row in rows if baseline_start <= row[0] < current_start
+        ]
+        if not current or not baseline:
+            return None
+        if metric_index is None:
+            current_value = float(len(current))
+            baseline_value = float(len(baseline)) / 10.0
+        else:
+            current_value = sum(row[metric_index] for row in current)
+            baseline_value = (
+                sum(row[metric_index] for row in baseline) / 10.0
+            )
+        return (
+            current_value / baseline_value
+            if baseline_value > 0
+            else None
+        )
+
+    @staticmethod
+    def _buy_slippage_bps(
+        asks: list[tuple[float, float]],
+        *,
+        notional_eur: float,
+    ) -> float | None:
+        if not asks or notional_eur <= 0:
+            return None
+        best_ask = asks[0][0]
+        remaining = notional_eur
+        acquired = 0.0
+        spent = 0.0
+        for price, quantity in asks:
+            available = price * quantity
+            selected = min(available, remaining)
+            if selected <= 0:
+                continue
+            spent += selected
+            acquired += selected / price
+            remaining -= selected
+            if remaining <= 1e-12:
+                break
+        if remaining > 1e-9 or acquired <= 0 or best_ask <= 0:
+            return None
+        average = spent / acquired
+        return (average / best_ask - 1.0) * 10_000.0
+
+    @staticmethod
+    def _compiled_trade_snapshot(
+        rows: list[tuple[datetime, float, float, int]],
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Compile all realtime trade windows in one linear pass.
+
+        The previous implementation rescanned the complete 70-minute trade
+        deque for every return, CVD and activity horizon.  On liquid markets
+        that meant millions of Python comparisons per second.  Prefix sums
+        retain the exact causal definitions while making every window lookup
+        constant-time after one bounded pass.
+        """
+
+        labels = {
+            "10s": 10,
+            "30s": 30,
+            "90s": 90,
+            "1m": 60,
+            "3m": 180,
+            "5m": 300,
+            "15m": 900,
+            "1h": 3_600,
+        }
+        empty_window: dict[str, float | int | None] = {
+            "return": None,
+            "quote_volume_eur": 0.0,
+            "trade_count": 0,
+            "taker_buy_ratio": None,
+            "cvd_quote_eur": 0.0,
+        }
+        if not rows:
+            return {
+                "windows": {
+                    label: dict(empty_window) for label in labels
+                },
+                "prior_1m_return": None,
+                "one_minute_trades": [],
+                "relative_volume_1m": None,
+                "relative_volume_5m": None,
+                "trade_intensity_1m": None,
+            }
+
+        timestamps: list[datetime] = []
+        quote_prefix = [0.0]
+        buy_prefix = [0.0]
+        cvd_prefix = [0.0]
+        for timestamp, _price, quote, direction in rows:
+            timestamps.append(timestamp)
+            quote_prefix.append(quote_prefix[-1] + quote)
+            buy_prefix.append(
+                buy_prefix[-1] + (quote if direction > 0 else 0.0)
+            )
+            cvd_prefix.append(cvd_prefix[-1] + quote * direction)
+
+        end = len(rows)
+
+        def index(seconds: int) -> int:
+            return bisect_left(
+                timestamps,
+                now - timedelta(seconds=seconds),
+            )
+
+        starts = {label: index(seconds) for label, seconds in labels.items()}
+
+        def window(start: int, stop: int = end) -> dict[str, float | int | None]:
+            count = max(0, stop - start)
+            if count == 0:
+                return dict(empty_window)
+            quote = quote_prefix[stop] - quote_prefix[start]
+            buy = buy_prefix[stop] - buy_prefix[start]
+            return {
+                "return": (
+                    rows[stop - 1][1] / rows[start][1] - 1.0
+                    if count >= 2 and rows[start][1] > 0
+                    else 0.0
+                ),
+                "quote_volume_eur": quote,
+                "trade_count": count,
+                "taker_buy_ratio": buy / quote if quote > 0 else None,
+                "cvd_quote_eur": cvd_prefix[stop] - cvd_prefix[start],
+            }
+
+        windows = {
+            label: window(starts[label]) for label in labels
+        }
+        prior_start = index(120)
+        prior_end = starts["1m"]
+        prior_1m_return = (
+            rows[prior_end - 1][1] / rows[prior_start][1] - 1.0
+            if prior_end - prior_start >= 2
+            and rows[prior_start][1] > 0
+            else None
+        )
+
+        def activity(seconds: int, *, volume: bool) -> float | None:
+            current_start = index(seconds)
+            baseline_start = index(seconds * 11)
+            current_count = end - current_start
+            baseline_count = current_start - baseline_start
+            if current_count <= 0 or baseline_count <= 0:
+                return None
+            if volume:
+                current_value = quote_prefix[end] - quote_prefix[current_start]
+                baseline_value = (
+                    quote_prefix[current_start]
+                    - quote_prefix[baseline_start]
+                ) / 10.0
+            else:
+                current_value = float(current_count)
+                baseline_value = float(baseline_count) / 10.0
+            return (
+                current_value / baseline_value
+                if baseline_value > 0
+                else None
+            )
+
+        return {
+            "windows": windows,
+            "prior_1m_return": prior_1m_return,
+            "one_minute_trades": rows[starts["1m"] :],
+            "relative_volume_1m": activity(60, volume=True),
+            "relative_volume_5m": activity(300, volume=True),
+            "trade_intensity_1m": activity(60, volume=False),
+        }
+
+    def realtime_snapshot(
+        self,
+        *,
+        markets: Iterable[str] | None = None,
+        observed_at: datetime | None = None,
+        order_notional_eur: float = 5.0,
+    ) -> dict[str, Any]:
+        """Return causal sub-minute flow facts for event-driven decisions."""
+
+        now = _utc(observed_at or utc_now())
+        selected_markets = tuple(markets or self.markets)
+        output: list[dict[str, Any]] = []
+        for market in selected_markets:
+            trades = list(self._realtime_trades.get(market, ()))
+            tickers = list(self._realtime_tickers.get(market, ()))
+            books = list(self._realtime_books.get(market, ()))
+            latest_trade_at = trades[-1][0] if trades else None
+            latest_ticker_at = tickers[-1][0] if tickers else None
+            latest_book = books[-1] if books else None
+            latest_book_at = (
+                latest_book.get("observed_at") if latest_book else None
+            )
+            timestamps = [
+                value
+                for value in (
+                    latest_trade_at,
+                    latest_ticker_at,
+                    latest_book_at,
+                )
+                if isinstance(value, datetime)
+            ]
+            latest_at = max(timestamps) if timestamps else None
+            age_seconds = (
+                max(0.0, (now - latest_at).total_seconds())
+                if latest_at is not None
+                else None
+            )
+            compiled = self._compiled_trade_snapshot(trades, now=now)
+            windows = compiled["windows"]
+            current_1m = windows["1m"].get("return")
+            prior_1m = compiled["prior_1m_return"]
+            recent_books = [
+                row
+                for row in books
+                if row["observed_at"] >= now - timedelta(minutes=1)
+            ]
+            persistent_books = [
+                row
+                for row in books
+                if row["observed_at"] >= now - timedelta(seconds=10)
+            ]
+            first_book = recent_books[0] if recent_books else None
+
+            def normalized_ofi(seconds: int) -> float | None:
+                selected = [
+                    row
+                    for row in books
+                    if row["observed_at"] >= now - timedelta(seconds=seconds)
+                ]
+                if len(selected) < 2:
+                    return None
+                first = selected[0]
+                last = selected[-1]
+                starting_depth = (
+                    float(first["bid_depth_eur_top_10"])
+                    + float(first["ask_depth_eur_top_10"])
+                )
+                if starting_depth <= 0:
+                    return None
+                bid_delta = (
+                    float(last["bid_depth_eur_top_10"])
+                    - float(first["bid_depth_eur_top_10"])
+                )
+                ask_delta = (
+                    float(last["ask_depth_eur_top_10"])
+                    - float(first["ask_depth_eur_top_10"])
+                )
+                return (bid_delta - ask_delta) / starting_depth
+
+            ofi_windows = {
+                label: normalized_ofi(seconds)
+                for label, seconds in (
+                    ("10s", 10),
+                    ("30s", 30),
+                    ("90s", 90),
+                    ("300s", 300),
+                )
+            }
+            bid_change = (
+                float(latest_book["bid_depth_eur_top_10"])
+                - float(first_book["bid_depth_eur_top_10"])
+                if latest_book and first_book
+                else None
+            )
+            ask_change = (
+                float(latest_book["ask_depth_eur_top_10"])
+                - float(first_book["ask_depth_eur_top_10"])
+                if latest_book and first_book
+                else None
+            )
+            depth_total = (
+                float(first_book["bid_depth_eur_top_10"])
+                + float(first_book["ask_depth_eur_top_10"])
+                if first_book
+                else 0.0
+            )
+            ofi = (
+                (bid_change - ask_change) / depth_total
+                if bid_change is not None
+                and ask_change is not None
+                and depth_total > 0
+                else None
+            )
+            positive_book_persistence = (
+                sum(
+                    float(row.get("mlobi_top_10") or 0.0) > 0.03
+                    for row in persistent_books
+                )
+                / len(persistent_books)
+                if persistent_books
+                else None
+            )
+            one_minute_trades = compiled["one_minute_trades"]
+            current_price = (
+                trades[-1][1]
+                if trades
+                else tickers[-1][1]
+                if tickers
+                else None
+            )
+            one_minute_low = (
+                min(row[1] for row in one_minute_trades)
+                if one_minute_trades
+                else None
+            )
+            one_minute_first = (
+                one_minute_trades[0][1] if one_minute_trades else None
+            )
+            sell_quote = sum(
+                row[2] for row in one_minute_trades if row[3] < 0
+            )
+            one_minute_quote = sum(row[2] for row in one_minute_trades)
+            price_stability = (
+                max(
+                    0.0,
+                    1.0
+                    - abs(
+                        float(windows["1m"].get("return") or 0.0)
+                    )
+                    / 0.005,
+                )
+                if one_minute_trades
+                else 0.0
+            )
+            bid_refill_ratio = (
+                max(0.0, min(1.0, float(bid_change) / depth_total))
+                if bid_change is not None and depth_total > 0
+                else 0.0
+            )
+            ask_depletion_ratio = (
+                max(0.0, min(1.0, -float(ask_change) / depth_total))
+                if ask_change is not None and depth_total > 0
+                else 0.0
+            )
+            bullish_absorption = (
+                (sell_quote / one_minute_quote)
+                * price_stability
+                * bid_refill_ratio
+                if one_minute_quote > 0
+                else 0.0
+            )
+            downside_sweep_reclaim = bool(
+                current_price is not None
+                and one_minute_low is not None
+                and one_minute_first is not None
+                and one_minute_first > 0
+                and one_minute_low / one_minute_first - 1.0 <= -0.003
+                and current_price / one_minute_low - 1.0 >= 0.002
+                and float(windows["1m"].get("cvd_quote_eur") or 0.0) > 0
+            )
+            output.append(
+                {
+                    "market": market,
+                    "observed_at": now.isoformat(),
+                    "latest_event_at": (
+                        latest_at.isoformat() if latest_at else None
+                    ),
+                    "latest_trade_at": (
+                        latest_trade_at.isoformat()
+                        if latest_trade_at
+                        else None
+                    ),
+                    "latest_ticker_at": (
+                        latest_ticker_at.isoformat()
+                        if latest_ticker_at
+                        else None
+                    ),
+                    "age_seconds": age_seconds,
+                    "fresh": age_seconds is not None and age_seconds <= 10,
+                    "trade_age_seconds": (
+                        max(0.0, (now - latest_trade_at).total_seconds())
+                        if latest_trade_at is not None
+                        else None
+                    ),
+                    "ticker_age_seconds": (
+                        max(0.0, (now - latest_ticker_at).total_seconds())
+                        if latest_ticker_at is not None
+                        else None
+                    ),
+                    "price": current_price,
+                    "windows": windows,
+                    "acceleration_1m": (
+                        float(current_1m) - prior_1m
+                        if current_1m is not None and prior_1m is not None
+                        else None
+                    ),
+                    "relative_volume_1m": compiled["relative_volume_1m"],
+                    "relative_volume_5m": compiled["relative_volume_5m"],
+                    "trade_intensity_1m": compiled["trade_intensity_1m"],
+                    "book": (
+                        {
+                            key: value
+                            for key, value in latest_book.items()
+                            if key not in {"observed_at", "asks"}
+                        }
+                        if latest_book
+                        else None
+                    ),
+                    "book_age_seconds": (
+                        max(0.0, (now - latest_book_at).total_seconds())
+                        if isinstance(latest_book_at, datetime)
+                        else None
+                    ),
+                    "ofi_1m": ofi,
+                    "ofi_windows": ofi_windows,
+                    "mlobi_positive_persistence_10s": (
+                        positive_book_persistence
+                    ),
+                    "microprice_edge_bps": (
+                        latest_book.get("microprice_edge_bps")
+                        if latest_book
+                        else None
+                    ),
+                    "bid_replenishment_eur_1m": bid_change,
+                    "bid_replenishment_ratio_1m": bid_refill_ratio,
+                    "ask_depletion_eur_1m": (
+                        -ask_change if ask_change is not None else None
+                    ),
+                    "ask_depletion_ratio_1m": ask_depletion_ratio,
+                    "book_update_count_10s": len(persistent_books),
+                    "book_update_count_1m": len(recent_books),
+                    "bullish_absorption_score_1m": bullish_absorption,
+                    "downside_sweep_reclaim_1m": downside_sweep_reclaim,
+                    "estimated_buy_slippage_bps": (
+                        self._buy_slippage_bps(
+                            latest_book.get("asks") or [],
+                            notional_eur=order_notional_eur,
+                        )
+                        if latest_book
+                        else None
+                    ),
+                    "sequence_valid": bool(
+                        (self._books.get(market) or {}).get("valid")
+                    ),
+                    "synthetic_data_used": False,
+                }
+            )
+        return {
+            "schema_version": "realtime_microstructure_snapshot_v1",
+            "observed_at": now.isoformat(),
+            "markets": output,
+            "market_data_levels": {
+                "L1": {
+                    "status": "AVAILABLE_NATIVE",
+                    "fields": ["ticker", "best_bid", "best_ask", "spread"],
+                },
+                "L2": {
+                    "status": "AVAILABLE_NATIVE_AGGREGATED_PRICE_LEVELS",
+                    "fields": [
+                        "depth_5_10_25_bps",
+                        "multi_level_imbalance",
+                        "microprice",
+                        "replenishment",
+                        "ofi",
+                        "slippage_depth_walk",
+                    ],
+                },
+                "L3": {
+                    "status": "UNAVAILABLE_ON_CURRENT_BITVAVO_FEED",
+                    "individual_order_ids_available": False,
+                    "synthetic_values_used": False,
+                },
+            },
+            "orders_generated": 0,
+            "synthetic_data_used": False,
+        }
+
+    def realtime_ticker_movers(
+        self,
+        *,
+        observed_at: datetime | None = None,
+        minimum_sample_span_seconds: float = 8.0,
+        minimum_quote_volume_eur: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Rank positive venue-wide moves from the cheap ticker stream.
+
+        The isolated order-flow connection subscribes to ticker24h for every
+        Bitvavo EUR market, while trades and books remain resource-bounded.
+        This projection makes that inexpensive coverage actionable for
+        *data-promotion* only: it can rotate a market into intensive tracking,
+        but it cannot grant strategy authority or create an order.
+        """
+
+        now = _utc(observed_at or utc_now())
+
+        def window_return(
+            rows: list[tuple[datetime, float, float | None]],
+            seconds: int,
+        ) -> float | None:
+            if len(rows) < 2:
+                return None
+            cutoff = now - timedelta(seconds=seconds)
+            candidates = [row for row in rows if row[0] >= cutoff]
+            if len(candidates) < 2:
+                return None
+            span = (candidates[-1][0] - candidates[0][0]).total_seconds()
+            required = max(float(seconds) * 0.75, minimum_sample_span_seconds)
+            first = float(candidates[0][1])
+            last = float(candidates[-1][1])
+            if span < required or first <= 0.0:
+                return None
+            return last / first - 1.0
+
+        ranking: list[dict[str, Any]] = []
+        for market, source in self._realtime_tickers.items():
+            rows = list(source)
+            if len(rows) < 2:
+                continue
+            returns = {
+                label: window_return(rows, seconds)
+                for label, seconds in (
+                    ("10s", 10),
+                    ("1m", 60),
+                    ("3m", 180),
+                    ("5m", 300),
+                    ("15m", 900),
+                    ("1h", 3_600),
+                )
+            }
+            available = [value for value in returns.values() if value is not None]
+            if not available:
+                continue
+            return_1m = float(returns["1m"] or 0.0)
+            return_10s = float(returns["10s"] or 0.0)
+            return_3m = float(returns["3m"] or 0.0)
+            return_5m = float(returns["5m"] or 0.0)
+            return_15m = float(returns["15m"] or 0.0)
+            return_1h = float(returns["1h"] or 0.0)
+            latest_quote_volume = next(
+                (
+                    float(row[2])
+                    for row in reversed(rows)
+                    if row[2] is not None
+                ),
+                None,
+            )
+            acceleration = return_1m - max(0.0, return_5m / 5.0)
+            activity = min(1.0, len(rows) / 60.0)
+            score = 100.0 * (
+                0.15 * min(1.0, max(0.0, return_10s) / 0.004)
+                + 0.20 * min(1.0, max(0.0, return_1m) / 0.008)
+                + 0.15 * min(1.0, max(0.0, return_3m) / 0.015)
+                + 0.15 * min(1.0, max(0.0, return_5m) / 0.025)
+                + 0.12 * min(1.0, max(0.0, return_15m) / 0.050)
+                + 0.08 * min(1.0, max(0.0, return_1h) / 0.100)
+                + 0.10 * min(1.0, max(0.0, acceleration) / 0.006)
+                + 0.05 * activity
+            )
+            liquid = bool(
+                latest_quote_volume is not None
+                and latest_quote_volume >= minimum_quote_volume_eur
+            )
+            qualified = bool(
+                liquid
+                and (
+                    return_10s >= 0.0015
+                    or return_1m >= 0.002
+                    or return_3m >= 0.004
+                    or return_5m >= 0.006
+                    or return_15m >= 0.010
+                    or return_1h >= 0.020
+                )
+            )
+            ranking.append(
+                {
+                    "market": market,
+                    "observed_at": now.isoformat(),
+                    "latest_ticker_at": rows[-1][0].isoformat(),
+                    "latest_price": float(rows[-1][1]),
+                    "returns": returns,
+                    "acceleration_1m_vs_5m_rate": acceleration,
+                    "ticker_sample_count": len(rows),
+                    "quote_volume_24h_eur": latest_quote_volume,
+                    "minimum_quote_volume_eur": minimum_quote_volume_eur,
+                    "liquidity_qualified": liquid,
+                    "score": score,
+                    "qualified_for_intensive_tracking": qualified,
+                    "execution_authority_granted": False,
+                    "orders_generated": 0,
+                    "orders_submitted": 0,
+                }
+            )
+        ranking.sort(
+            key=lambda row: (
+                bool(row["qualified_for_intensive_tracking"]),
+                float(row["score"]),
+            ),
+            reverse=True,
+        )
+        for rank, row in enumerate(ranking, start=1):
+            row["rank"] = rank
+        return ranking
 
     def stop(self) -> None:
         self._stop.set()
@@ -1748,11 +2969,21 @@ class ProspectiveOrderflowRecorder:
     def acknowledge_stream_recovery(
         self,
         health: Mapping[str, Any],
+        *,
+        reset_period_baselines: bool = False,
     ) -> None:
         for counter in self._acknowledged_stream_counters:
-            self._acknowledged_stream_counters[counter] = int(
-                health.get(counter) or 0
-            )
+            current = int(health.get(counter) or 0)
+            self._acknowledged_stream_counters[counter] = current
+            # Initial synchronization can legitimately observe buffered
+            # pre-snapshot deltas.  Those are discarded against the REST
+            # nonce and must not poison the first interval.  During an actual
+            # recovery, however, the counter delta remains evidence that the
+            # affected hour/quarter was incomplete.  Keep the forensic period
+            # baselines intact unless this is the initial synchronization.
+            if reset_period_baselines:
+                self._health_counters[counter] = current
+                self._quarter_health_counters[counter] = current
         self._last_recovery_at = utc_now().isoformat()
 
     def _write_health(self, manager: Any) -> dict[str, Any]:
@@ -1799,6 +3030,11 @@ class ProspectiveOrderflowRecorder:
             "queue_utilization": queue_utilization,
             "record_count": self.ledger.record_count,
             "ledger_root_hash": self.ledger.previous_hash,
+            "ledger_integrity_status": self.ledger.integrity_status,
+            "ledger_recovery_mode": self.ledger.recovery_mode,
+            "full_historical_rescan_deferred": (
+                self.ledger.full_historical_rescan_deferred
+            ),
             "last_arrival_timestamp": (
                 self.ledger.last_arrival_timestamp
             ),
@@ -1846,10 +3082,29 @@ class ProspectiveOrderflowRecorder:
             "valid": bool(bids and asks and sequence is not None),
         }
 
+    def invalid_orderbook_markets(self) -> tuple[str, ...]:
+        """Return subscribed markets whose local book needs a fresh seed.
+
+        The transport-level sequence counter is useful, but it is not the
+        final authority for every local-book failure.  A malformed delta or
+        a market-specific nonce discontinuity can invalidate one book while
+        the shared WebSocket remains connected.  Exposing that state lets the
+        supervisor repair only the affected markets instead of leaving a
+        valid opportunity permanently blocked.
+        """
+
+        return tuple(
+            market
+            for market in self.markets
+            if not bool((self._books.get(market) or {}).get("valid"))
+        )
+
     def _persist_database(
         self,
         records: Iterable[Mapping[str, Any]],
     ) -> None:
+        if self.database is None:
+            return
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(
             list
         )
@@ -1959,17 +3214,6 @@ class ProspectiveOrderflowRecorder:
                         side.pop(price, None)
                     else:
                         side[price] = quantity
-            book_bids = [
-                [str(price), str(quantity)]
-                for price, quantity in sorted(
-                    bids.items(),
-                    reverse=True,
-                )[:100]
-            ]
-            book_asks = [
-                [str(price), str(quantity)]
-                for price, quantity in sorted(asks.items())[:100]
-            ]
             state["last_sequence"] = event.sequence
             state_bucket = int(event.observed_at.timestamp()) // 5
             include_book_state = (
@@ -1982,14 +3226,36 @@ class ProspectiveOrderflowRecorder:
                 self._last_book_state_bucket[
                     event.canonical_market
                 ] = state_bucket
+            else:
+                # Every delta has already been applied to the in-memory book.
+                # Persisting an empty shell for every high-frequency update
+                # adds no analytical value: hourly OBI/OFI uses periodic full
+                # states, while trades remain lossless.  Five-second states
+                # keep the signal path responsive and auditable.
+                continue
+            sorted_bids = sorted(bids.items(), reverse=True)[:500]
+            sorted_asks = sorted(asks.items())[:500]
+            state["bids"] = dict(sorted_bids)
+            state["asks"] = dict(sorted_asks)
+            self._record_realtime_book(
+                market=event.canonical_market,
+                observed_at=event.observed_at,
+                bids=state["bids"],
+                asks=state["asks"],
+                valid=bool(state.get("valid")),
+            )
+            book_bids = [
+                [str(price), str(quantity)]
+                for price, quantity in sorted_bids[:100]
+            ]
+            book_asks = [
+                [str(price), str(quantity)]
+                for price, quantity in sorted_asks[:100]
+            ]
             payload.update(
                 {
-                    "book_bids": (
-                        book_bids if include_book_state else []
-                    ),
-                    "book_asks": (
-                        book_asks if include_book_state else []
-                    ),
+                    "book_bids": book_bids,
+                    "book_asks": book_asks,
                     "snapshot_reference": state[
                         "snapshot_reference"
                     ],
@@ -2024,6 +3290,14 @@ class ProspectiveOrderflowRecorder:
             self._last_ticker_minute[event.canonical_market] = minute
             selected.append(event)
         return selected
+
+    def _prepare_batch(
+        self,
+        events: Iterable[NormalizedStreamEvent],
+    ) -> list[NormalizedStreamEvent]:
+        """Prepare one durable batch outside the supervisor event loop."""
+
+        return self._enrich_orderbooks(self._select_events(events))
 
     def finalize_previous_hour(
         self,
@@ -2292,11 +3566,98 @@ class ProspectiveOrderflowRecorder:
             "snapshot": snapshot,
         }
 
+    def finalize_previous_quarter(
+        self,
+        *,
+        observed_at: datetime,
+        health: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Seal one completed spot-only 15-minute orderflow bucket.
+
+        Derivatives and GEX remain independently timestamped regime overlays.
+        Requiring those slower fields inside every 15-minute spot bucket would
+        add latency without improving the point-in-time integrity of the flow
+        confirmation itself.
+        """
+
+        interval_start = _closed_quarter_start(observed_at)
+        interval_end = interval_start + timedelta(minutes=15)
+        directory = self.fifteen_minute_feature_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / interval_start.strftime(
+            "%Y%m%dT%H%M00Z.json"
+        )
+        if target.is_file():
+            return {
+                "finalization_state": "ALREADY_FINALIZED",
+                "snapshot": dict(read_json(target)),
+            }
+
+        provider_health = dict(health.get("bitvavo") or health)
+        period_health = dict(provider_health)
+        for counter in self._quarter_health_counters:
+            current = int(provider_health.get(counter) or 0)
+            period_health[counter] = max(
+                0,
+                current - self._quarter_health_counters[counter],
+            )
+            self._quarter_health_counters[counter] = current
+
+        records = _read_segment(self.ledger.root, interval_start)
+        markets = [
+            summarize_orderflow_hour(
+                records,
+                market=market,
+                hour_start=interval_start,
+                recorder_started_at=self.started_at,
+                health=period_health,
+                interval=timedelta(minutes=15),
+            )
+            for market in self.markets
+        ]
+        _apply_cvd_history(
+            directory,
+            target_path=target,
+            markets=markets,
+        )
+        body = {
+            "schema_version": MICROSTRUCTURE_15M_SCHEMA,
+            # Keep hour_start/hour_end aliases so the existing causal loader
+            # can consume interval snapshots without a second timestamp path.
+            "hour_start": interval_start.isoformat(),
+            "hour_end": interval_end.isoformat(),
+            "interval_start": interval_start.isoformat(),
+            "interval_end": interval_end.isoformat(),
+            "interval_minutes": 15,
+            "finalized_at": _utc(observed_at).isoformat(),
+            "status": (
+                "COMPLETE"
+                if all(row["status"] == "COMPLETE" for row in markets)
+                else "DATA_GAP"
+            ),
+            "markets": markets,
+            "stream_health": period_health,
+            "ledger_root_hash": self.ledger.previous_hash,
+            "synthetic_data_used": False,
+            "orders_generated": 0,
+        }
+        snapshot = {
+            **body,
+            "snapshot_hash": stable_hash(body, length=64),
+        }
+        atomic_write_json(target, snapshot)
+        return {
+            "finalization_state": "FINALIZED",
+            "snapshot": snapshot,
+        }
+
     async def run(self, manager: Any) -> None:
         buffer: list[NormalizedStreamEvent] = []
         last_flush = asyncio.get_running_loop().time()
         last_finalized: datetime | None = None
         last_finalization_attempt: datetime | None = None
+        last_quarter_finalized: datetime | None = None
+        last_quarter_attempt: datetime | None = None
         try:
             while (
                 not self._stop.is_set()
@@ -2325,7 +3686,13 @@ class ProspectiveOrderflowRecorder:
                         event.event_type
                         is not StreamEventType.CONNECTION_STATUS
                     ):
+                        self._record_realtime_event(event)
                         buffer.append(event)
+                        # A busy top-20 book stream can keep queue reads
+                        # immediately ready.  Yield explicitly so execution,
+                        # reconciliation and heartbeat tasks are never starved.
+                        if len(buffer) % 50 == 0:
+                            await asyncio.sleep(0.001)
                 except TimeoutError:
                     pass
                 now_monotonic = asyncio.get_running_loop().time()
@@ -2337,16 +3704,43 @@ class ProspectiveOrderflowRecorder:
                         >= self.flush_seconds
                     )
                 ):
-                    records = self.ledger.append(
-                        self._enrich_orderbooks(
-                            self._select_events(buffer)
-                        )
-                    )
-                    self._persist_database(records)
+                    batch = buffer.copy()
                     buffer.clear()
+                    enriched = await asyncio.to_thread(
+                        self._prepare_batch,
+                        batch,
+                    )
+                    records = await asyncio.to_thread(
+                        self.ledger.append,
+                        enriched,
+                    )
+                    await asyncio.to_thread(
+                        self._persist_database,
+                        records,
+                    )
                     last_flush = now_monotonic
                     self._write_health(manager)
                 now = utc_now()
+                closed_quarter = _closed_quarter_start(now)
+                quarter_end = closed_quarter + timedelta(minutes=15)
+                if (
+                    (
+                        last_quarter_finalized is None
+                        or closed_quarter > last_quarter_finalized
+                    )
+                    and now >= quarter_end + timedelta(minutes=1)
+                    and (
+                        last_quarter_attempt is None
+                        or (now - last_quarter_attempt).total_seconds() >= 5
+                    )
+                ):
+                    await asyncio.to_thread(
+                        self.finalize_previous_quarter,
+                        observed_at=now,
+                        health=manager.health(),
+                    )
+                    last_quarter_attempt = now
+                    last_quarter_finalized = closed_quarter
                 current_closed = _closed_hour_start(now)
                 if (
                     (
@@ -2362,7 +3756,8 @@ class ProspectiveOrderflowRecorder:
                         >= 5
                     )
                 ):
-                    result = self.finalize_previous_hour(
+                    result = await asyncio.to_thread(
+                        self.finalize_previous_hour,
                         observed_at=now,
                         health=manager.health(),
                     )
@@ -2375,12 +3770,18 @@ class ProspectiveOrderflowRecorder:
             self._write_health(manager)
         finally:
             if buffer:
-                records = self.ledger.append(
-                    self._enrich_orderbooks(
-                        self._select_events(buffer)
-                    )
+                enriched = await asyncio.to_thread(
+                    self._prepare_batch,
+                    buffer.copy(),
                 )
-                self._persist_database(records)
+                records = await asyncio.to_thread(
+                    self.ledger.append,
+                    enriched,
+                )
+                await asyncio.to_thread(
+                    self._persist_database,
+                    records,
+                )
             self._write_health(manager)
 
 
@@ -2394,5 +3795,6 @@ __all__ = [
     "prospective_milestone_status",
     "seal_completed_orderflow_segments",
     "summarize_orderflow_hour",
+    "verify_orderflow_checkpoint",
     "verify_orderflow_ledger",
 ]

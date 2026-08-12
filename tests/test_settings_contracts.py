@@ -15,15 +15,31 @@ from core.contracts import (
 )
 
 
-def test_default_allowlist_is_fail_closed(isolated_settings: Settings) -> None:
+def test_operator_review_covers_eur_spot_but_not_other_quote_markets(
+    isolated_settings: Settings,
+) -> None:
     assert isolated_settings.shariah.eligibility("BTC-EUR").status is EligibilityStatus.ALLOWED
     assert (
         isolated_settings.shariah.eligibility("DOGE-EUR").status
-        is EligibilityStatus.REVIEW_REQUIRED
+        is EligibilityStatus.ALLOWED
     )
     isolated_settings.shariah.require_allowed("ETH-EUR")
+    isolated_settings.shariah.require_allowed("UNKNOWN-EUR")
     with pytest.raises(PermissionError):
-        isolated_settings.shariah.require_allowed("UNKNOWN-EUR")
+        isolated_settings.shariah.require_allowed("UNKNOWN-USDT")
+
+
+def test_dynamic_eur_spot_liquidity_limits_are_fail_closed_defaults(
+    isolated_settings: Settings,
+) -> None:
+    limits = isolated_settings.autonomous_live.liquidity_limits("ADA-EUR")
+
+    assert limits["maximum_spread_bps"] == 75.0
+    assert limits["maximum_slippage_bps"] == 75.0
+    assert limits["minimum_visible_ask_depth_eur"] == 500.0
+    assert limits["minimum_24h_quote_volume_eur"] == 100_000.0
+    with pytest.raises(ValueError):
+        isolated_settings.autonomous_live.liquidity_limits("ADA-USDT")
 
 
 def test_secret_aliases_are_loaded_and_redacted(tmp_path) -> None:
@@ -31,6 +47,8 @@ def test_secret_aliases_are_loaded_and_redacted(tmp_path) -> None:
     env.write_text(
         "VENUE_A_API_KEY=unit-key-value\n"
         "VENUE_A_API_SECRET=unit-secret-value\n"
+        "TELEGRAM_BOT_TOKEN=unit-telegram-token\n"
+        "TELEGRAM_CHAT_ID=unit-telegram-chat\n"
         "WM_OPERATOR_ID=1234\n",
         encoding="utf-8",
     )
@@ -39,7 +57,11 @@ def test_secret_aliases_are_loaded_and_redacted(tmp_path) -> None:
     assert settings.providers.bitvavo_operator_id == 1234
     assert "unit-key-value" not in rendered
     assert "unit-secret-value" not in rendered
+    assert "unit-telegram-token" not in rendered
+    assert "unit-telegram-chat" not in rendered
     assert settings.redacted_dict()["providers"]["bitvavo_trade_api_key"] == "***REDACTED***"
+    assert settings.redacted_dict()["telegram"]["bot_token"] == "***REDACTED***"
+    assert settings.redacted_dict()["telegram"]["chat_id"] == "***REDACTED***"
 
 
 def test_live_is_blocked_by_default(isolated_settings: Settings) -> None:
@@ -47,17 +69,48 @@ def test_live_is_blocked_by_default(isolated_settings: Settings) -> None:
     assert "LIVE_BLOCKED_NOT_PRODUCTION" in failures
     assert "LIVE_BLOCKED_MODE_NOT_LIVE" in failures
     assert "LIVE_BLOCKED_CANARY_DISABLED" in failures
-    assert isolated_settings.execution.maximum_live_order_eur == 5.0
-    assert isolated_settings.execution.maximum_live_total_eur == 5.0
+    assert isolated_settings.execution.maximum_live_order_eur == 10.0
+    assert isolated_settings.execution.maximum_live_total_eur == 10.0
+    assert (
+        isolated_settings.execution.maximum_live_new_orders_per_day
+        == 1
+    )
+    assert isolated_settings.execution.live_limit_entries_enabled is True
+    assert (
+        isolated_settings.execution.live_limit_market_fallback_enabled
+        is False
+    )
 
 
 def test_default_market_data_includes_requested_intraday_timeframes(
     isolated_settings: Settings,
 ) -> None:
-    assert {"5m", "15m", "1h", "4h", "1d"} <= set(
-        isolated_settings.market_data.timeframes
-    )
+    assert isolated_settings.market_data.timeframes == [
+        "1m",
+        "3m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "3h",
+        "4h",
+        "6h",
+        "8h",
+        "12h",
+        "1d",
+        "2d",
+        "3d",
+        "1W",
+        "1mo",
+    ]
     assert isolated_settings.lab.deep_history_mode == "common_full_history"
+    assert isolated_settings.autopilot_execution.execution_cycle_seconds == 300
+    assert isolated_settings.autopilot_execution.min_cycle_interval_hours == 4.0
+    assert (
+        isolated_settings.autopilot_execution.windows_task_name
+        == "CryptoPracticalAutopilot"
+    )
 
 
 def test_practical_profile_and_candidate_manifest_are_fail_closed(

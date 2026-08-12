@@ -1,0 +1,830 @@
+{
+  "active": true,
+  "approval_phrase_stored": false,
+  "approved_playbooks": [
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-04T14:54:56.224891+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "BTC_BULL",
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY"
+      ],
+      "family": "MOMENTUM_BREAKOUT",
+      "identity_migrated_at": "2026-08-08T12:00:51.864939+00:00",
+      "identity_migration_reason": "CATALOG_METADATA_CHANGED_PARAMETER_BAND_UNCHANGED",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "c50959d2276d47aa28e1ff8a51c5f5200b41df5a5fddb6f8b5efed68eb32d493",
+      "playbook_id": "MOMENTUM_BREAKOUT_V1",
+      "previous_playbook_dna": "f25d4882db28a85576bd9935c5a473fcc4649fe072373de5dad69b60fd4bf28c"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-04T14:54:56.226401+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "BTC_BULL",
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY"
+      ],
+      "family": "BREAKOUT_PULLBACK",
+      "identity_migrated_at": "2026-08-08T12:00:51.864939+00:00",
+      "identity_migration_reason": "CATALOG_METADATA_CHANGED_PARAMETER_BAND_UNCHANGED",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "pullback_pct": [
+          0.1,
+          1.5
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "0675b34cc0f7a744d9c295c8d28d9a4cb49eab5a5bf67e91ed710b7a18320252",
+      "playbook_dna": "e27989e54777d6841de15aaaaf5cedd2866bef4160ecb37fcdb1b9ab9f7b71e8",
+      "playbook_id": "BREAKOUT_PULLBACK_V1",
+      "previous_playbook_dna": "6ac96bc259b5fd16a2cca2c6203baa8353f67e3a1baa7ed662573b484340595b"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-04T14:54:56.228400+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "SIDEWAYS_HIGH_VOL",
+        "CAPITULATION",
+        "RECOVERY"
+      ],
+      "family": "LIQUIDITY_SWEEP_RECLAIM",
+      "identity_migrated_at": "2026-08-08T12:00:51.864939+00:00",
+      "identity_migration_reason": "CATALOG_METADATA_CHANGED_PARAMETER_BAND_UNCHANGED",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "reversal_1m": [
+          0.05,
+          3.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "a2f137000fec2163d072553791bf87b204c94be532d989bc733fc6a1c0d947ce",
+      "playbook_dna": "d3e4d3e30257d10e3001a0672928eac5d727fd781b9c0ef7b7d28f5efcb7d1d3",
+      "playbook_id": "LIQUIDITY_SWEEP_RECLAIM_V1",
+      "previous_playbook_dna": "d8cce692781441c810bf3b65e632d70ad275888e0ea904bedd269fde2ffd7952"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-04T14:54:56.231400+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "SIDEWAYS_LOW_VOL",
+        "RECOVERY",
+        "BROAD_RISK_ON"
+      ],
+      "family": "VWAP_RECLAIM",
+      "identity_migrated_at": "2026-08-08T12:00:51.864939+00:00",
+      "identity_migration_reason": "CATALOG_METADATA_CHANGED_PARAMETER_BAND_UNCHANGED",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "score": [
+          54.0,
+          100.0
+        ],
+        "vwap_distance_pct": [
+          0.0,
+          1.0
+        ]
+      },
+      "parameter_band_hash": "6220f3a5040260cb651df80812891430327e5b08143684c4d4f364c53507e655",
+      "playbook_dna": "f89d036c0fcdd4cdc928f2e89fea4183fe029e8b7e2222d5634b07a7f40d93dc",
+      "playbook_id": "VWAP_RECLAIM_V1",
+      "previous_playbook_dna": "69bb5bf3b91e9529756e987f9dc6ba8a77ba0b32ff2ca1438f7a709eedd20e60"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-04T14:54:56.233400+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY"
+      ],
+      "family": "RELATIVE_STRENGTH_ROTATION",
+      "identity_migrated_at": "2026-08-08T12:00:51.864939+00:00",
+      "identity_migration_reason": "CATALOG_METADATA_CHANGED_PARAMETER_BAND_UNCHANGED",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "relative_return_5m": [
+          0.1,
+          5.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "36fe83de6b426250109c6d583303f1d091eb14e343db07b7f3663319bd422b03",
+      "playbook_dna": "634c946a39810b268a8fda8ed6f324616233992837d9bc5db6362920f7ee352a",
+      "playbook_id": "RELATIVE_STRENGTH_ROTATION_V1",
+      "previous_playbook_dna": "7c91e2dce488dd291ec61cbe465192bc8cd60971b1e8e5d26d495a163d3d4640"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-06T23:29:42.622495+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "execution_timeframes": [
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "SIDEWAYS_LOW_VOL",
+        "SIDEWAYS_HIGH_VOL",
+        "RECOVERY"
+      ],
+      "family": "FAILED_BREAKDOWN_REVERSAL",
+      "markets": [
+        "TAO-EUR"
+      ],
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "flow_flip": [
+          0.05,
+          1.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "9b645beca22bd9b78f57893a5cc7b15e6ccd15547b88d4544af5e64a5c85eac3",
+      "playbook_dna": "37a6d7b2d3e3721156e709101a7f609b1902c618fe09b422355b73afc7909caf",
+      "playbook_id": "FAILED_BREAKDOWN_REVERSAL_V1"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.318860+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "5m",
+        "15m"
+      ],
+      "expected_regimes": [
+        "BTC_BULL",
+        "ALT_BULL",
+        "BROAD_RISK_ON"
+      ],
+      "family": "TREND_PULLBACK",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "pullback_atr": [
+          0.25,
+          2.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "d7b104f9a48312e4e6f324936c2f25fc3bcdca33e61a1a149cb50ce03b748216",
+      "playbook_dna": "445e4f770a3b4c321719aa089e106c6e20187a7a3fdafa325a5f9290f029fb50",
+      "playbook_id": "TREND_PULLBACK_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.320859+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "5m",
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "SIDEWAYS_LOW_VOL",
+        "SIDEWAYS_HIGH_VOL",
+        "RECOVERY"
+      ],
+      "family": "RANGE_VWAP_REVERSION",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "6acc37751ac20b45032f9cb1f36dc6bdfffabc03e2a42f79457bf915cbc57bde",
+      "playbook_id": "RANGE_VWAP_REVERSION_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.322859+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "5m",
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "SIDEWAYS_LOW_VOL",
+        "BROAD_RISK_ON",
+        "ALT_BULL",
+        "RECOVERY"
+      ],
+      "family": "VOLATILITY_COMPRESSION_BREAKOUT",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          56.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "d24b64fdc28fd4a3ebf6063a601ebe009063ea3fa34d0df46210413530a7a251",
+      "playbook_dna": "15ac500e77e940c68ea00b32ceeeb69a95f368cd40d57409a94f097ed61bba98",
+      "playbook_id": "COMPRESSION_BREAKOUT_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.324858+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "5m",
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY",
+        "UNKNOWN"
+      ],
+      "family": "RS_LEADER_PULLBACK",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          56.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "d24b64fdc28fd4a3ebf6063a601ebe009063ea3fa34d0df46210413530a7a251",
+      "playbook_dna": "0ef674c7e1adbe63fede643a207d40d2b0a989bc286a8cc23b5d9592cc843c3d",
+      "playbook_id": "RS_LEADER_PULLBACK_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.326860+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "BTC_BULL",
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY"
+      ],
+      "family": "NORMAL_SWING_TREND_RETEST",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "fc7cf2a9f67cdf2957b49c67640aec9b2da94b7b0a8772442866550f401fb332",
+      "playbook_id": "NORMAL_SWING_TREND_RETEST_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.329859+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "BTC_BULL",
+        "ALT_BULL",
+        "BROAD_RISK_ON",
+        "RECOVERY"
+      ],
+      "family": "NORMAL_SWING_BREAKOUT_RETEST",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "e11f51f484707b8f96f98e8b787600579c1665fca67ff977387c19ace1b3b4fd",
+      "playbook_id": "NORMAL_SWING_BREAKOUT_RETEST_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.331860+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "RISK_OFF",
+        "MACRO_RISK_OFF",
+        "CAPITULATION",
+        "RECOVERY"
+      ],
+      "family": "BEAR_SPOT_LIQUIDITY_RECOVERY",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "90ed46dc6dcc3e68e952515cf84a660b5dc13590d98b491dba44fd58f0c08639",
+      "playbook_id": "BEAR_SPOT_LIQUIDITY_RECOVERY_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    },
+    {
+      "active": true,
+      "approval_phrase_stored": false,
+      "approved_at": "2026-08-08T22:31:08.334860+00:00",
+      "authority_basis": "OPERATOR_MICRO_LIVE_PLAYBOOK_BAND_APPROVAL",
+      "authority_level": "VALIDATED_PLAYBOOK",
+      "authority_levels": [
+        "EXACT_STRATEGY",
+        "VALIDATED_PLAYBOOK"
+      ],
+      "autoscale": false,
+      "evidence_multiplier": "0.40",
+      "execution_timeframes": [
+        "15m",
+        "1h"
+      ],
+      "expected_regimes": [
+        "RISK_OFF",
+        "MACRO_RISK_OFF",
+        "SIDEWAYS_HIGH_VOL",
+        "RECOVERY"
+      ],
+      "family": "BEAR_SPOT_FAILED_BREAKDOWN",
+      "markets": [
+        "BTC-EUR",
+        "ETH-EUR",
+        "SOL-EUR",
+        "LINK-EUR",
+        "ADA-EUR",
+        "BNB-EUR",
+        "XRP-EUR",
+        "HYPE-EUR",
+        "DOGE-EUR",
+        "XLM-EUR",
+        "BCH-EUR",
+        "LTC-EUR",
+        "TAO-EUR",
+        "NPC-EUR"
+      ],
+      "maximum_family_positions": 1,
+      "maximum_new_orders_per_day": 3,
+      "maximum_open_positions": 3,
+      "maximum_order_eur": "25",
+      "maximum_total_exposure_eur": "75",
+      "parameter_band": {
+        "confirmations": [
+          3.0,
+          7.0
+        ],
+        "score": [
+          54.0,
+          100.0
+        ]
+      },
+      "parameter_band_hash": "84d47c6b7854a829aa85fa6fd8217eeb34a7931d40cd4224354de1deda055d27",
+      "playbook_dna": "4fdea8b8fd5519252a056f381328e532ba70664fbad9ddc6a7f7f5ce07673078",
+      "playbook_id": "BEAR_SPOT_FAILED_BREAKDOWN_V1",
+      "strategy_role": "EXPERIMENTAL_CANARY"
+    }
+  ],
+  "autoscale": false,
+  "capital_level": 2,
+  "leverage": false,
+  "margin": false,
+  "maximum_new_orders_per_day": 3,
+  "maximum_open_positions": 3,
+  "maximum_order_eur": "25",
+  "maximum_total_exposure_eur": "75",
+  "schema_version": "event_driven_playbook_authority_v1",
+  "shorting": false,
+  "spot_only": true,
+  "withdrawals": false
+}

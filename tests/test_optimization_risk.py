@@ -261,8 +261,8 @@ def test_robust_score_preserves_zero_risk_metrics() -> None:
     assert math.isfinite(score)
 
 
-def test_risk_manager_rejects_unknown_and_loss_limit(isolated_settings) -> None:
-    manager = RiskManager.from_settings(isolated_settings)
+def test_risk_manager_rejects_unknown_and_loss_limit(restrictive_settings) -> None:
+    manager = RiskManager.from_settings(restrictive_settings)
     healthy = PortfolioSnapshot(
         equity_eur=10_000,
         cash_eur=10_000,
@@ -278,7 +278,7 @@ def test_risk_manager_rejects_unknown_and_loss_limit(isolated_settings) -> None:
     )
     assert approved.approved
     unknown = manager.assess_entry(
-        market="DOGE-EUR",
+        market="UNKNOWN-EUR",
         entry_price=100,
         stop_price=95,
         snapshot=healthy,

@@ -937,3 +937,41 @@ def test_daily_watermark_requires_exact_previous_utc_day(tmp_path):
     )
     assert waiting["complete_daily_snapshot"] is False
     assert waiting["checks"]["LINK-EUR"] is False
+
+
+def test_daily_watermark_accepts_canonical_timestamp_column(tmp_path):
+    expected = pd.Timestamp("2026-08-01", tz="UTC")
+    paths = {}
+    for market in ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR"):
+        path = tmp_path / f"{market}.parquet"
+        pd.DataFrame(
+            {
+                "timestamp": [expected - pd.offsets.Day(1), expected],
+                "close": [100.0, 101.0],
+            }
+        ).to_parquet(path, index=False)
+        paths[market] = path
+
+    result = cli._daily_snapshot_watermark(
+        paths,
+        now=datetime(2026, 8, 2, 21, 0, tzinfo=UTC),
+    )
+
+    assert result["complete_daily_snapshot"] is True
+    assert set(result["latest_by_market"].values()) == {
+        expected.isoformat()
+    }
+
+
+def test_research_frame_loader_normalizes_timestamp_column(tmp_path):
+    path = tmp_path / "BTC-EUR_1d.parquet"
+    timestamps = pd.date_range("2026-07-30", periods=3, freq="1D", tz="UTC")
+    pd.DataFrame(
+        {"timestamp": timestamps, "close": [100.0, 101.0, 102.0]}
+    ).to_parquet(path, index=False)
+
+    frame = cli._read_timestamped_ohlcv(path)
+
+    assert isinstance(frame.index, pd.DatetimeIndex)
+    assert str(frame.index.tz) == "UTC"
+    assert frame.index.equals(timestamps)

@@ -30,6 +30,7 @@ from research.combinatorial_lab import (
 from research.optimization import deflated_sharpe_ratio
 from research.portfolio_storm import large_matrix_multiple_testing
 from utils.common import stable_hash
+from utils.pandas_time import sunday_week_end_labels
 
 SIGNAL_STORM_ENGINE_VERSION = "1.1.0"
 SIGNAL_STORM_TRIAL_COUNT = 5_000
@@ -762,10 +763,11 @@ def _weekly(
     compound: bool,
 ) -> np.ndarray:
     frame = pd.DataFrame(values, index=index)
+    labels = sunday_week_end_labels(frame.index)
     if compound:
-        result = (1.0 + frame).resample("W-SUN").prod() - 1.0
+        result = (1.0 + frame).groupby(labels).prod() - 1.0
     else:
-        result = frame.resample("W-SUN").sum()
+        result = frame.groupby(labels).sum()
     result = result.reindex(weekly_index)
     if result.isna().any(axis=None):
         missing = int(result.isna().any(axis=1).sum())

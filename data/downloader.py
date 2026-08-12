@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import numpy as np
@@ -29,6 +30,7 @@ from utils.common import atomic_write_json, utc_iso
 BITVAVO_BASE_URL = "https://api.bitvavo.com/v2"
 KRAKEN_BASE_URL = "https://api.kraken.com/0/public"
 CMC_BASE_URL = "https://pro-api.coinmarketcap.com"
+BITVAVO_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 BITVAVO_INTERVALS = frozenset(
     {
         "1m",
@@ -43,7 +45,7 @@ BITVAVO_INTERVALS = frozenset(
         "12h",
         "1d",
         "1W",
-        "1M",
+        "1mo",
     }
 )
 KRAKEN_INTERVALS = {
@@ -56,6 +58,18 @@ KRAKEN_INTERVALS = {
     "1d": 1_440,
     "1W": 10_080,
 }
+
+
+def _bitvavo_week_boundary_ms(value_ms: int) -> int:
+    instant = datetime.fromtimestamp(max(0, value_ms) / 1_000, tz=UTC)
+    local = instant.astimezone(BITVAVO_TIMEZONE)
+    monday = (local - timedelta(days=local.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return int(monday.astimezone(UTC).timestamp() * 1_000)
 
 
 class DownloadResult(BaseModel):
@@ -176,9 +190,18 @@ class BitvavoProvider:
         if timeframe not in BITVAVO_INTERVALS:
             raise DataValidationError(f"Bitvavo does not support {timeframe}")
         normalized = normalize_market(market)
+        provider_interval = (
+            "1M"
+            if timeframe == "1mo"
+            else timeframe
+        )
         interval_ms = int(timeframe_delta(timeframe).total_seconds() * 1_000)
         start_ms = int(start.timestamp() * 1_000) // interval_ms * interval_ms
         cursor_end = int(end.timestamp() * 1_000) // interval_ms * interval_ms
+        if timeframe == "1W":
+            start_ms = _bitvavo_week_boundary_ms(start_ms)
+            cursor_boundary = _bitvavo_week_boundary_ms(cursor_end)
+            cursor_end = cursor_boundary - interval_ms
         rows: list[list[Any]] = []
         seen: set[int] = set()
         while cursor_end >= start_ms:
@@ -190,7 +213,7 @@ class BitvavoProvider:
             payload = await self.client.get_json(
                 f"{BITVAVO_BASE_URL}/{quote(normalized)}/candles",
                 params={
-                    "interval": timeframe,
+                    "interval": provider_interval,
                     "limit": 1_440,
                     "start": start_ms,
                     "end": query_end,
@@ -384,30 +407,51 @@ class CanonicalDownloader:
             / f"{normalized}_{timeframe}.parquet"
         )
         existing: pd.DataFrame | None = None
-        effective_start = start
         resumed = False
         if resume and target.is_file():
             existing = load_ohlcv(target, market=normalized, validate=True)
-            effective_start = max(
-                start,
-                existing.index[-1].to_pydatetime() - timeframe_delta(timeframe),
-            )
             resumed = True
-        downloaded = await provider.fetch_candles(
-            normalized,
-            timeframe,
-            start=effective_start,
-            end=end,
-        )
-        downloaded = drop_open_candles(
-            downloaded,
-            timeframe=timeframe,
-            now=end,
-            close_grace_seconds=(
-                self.settings.market_data.candle_close_grace_for(timeframe)
-            ),
-        )
-        combined = merge_candles(existing, downloaded)
+        interval = timeframe_delta(timeframe)
+        missing_ranges: list[tuple[datetime, datetime]] = []
+        if existing is None or existing.empty:
+            missing_ranges.append((start, end))
+        else:
+            existing_start = existing.index[0].to_pydatetime()
+            existing_end = existing.index[-1].to_pydatetime()
+            # Include one overlap candle at each boundary. merge_candles
+            # reconciles that overlap and fails closed on provider drift.
+            if start < existing_start:
+                missing_ranges.append((start, min(end, existing_start)))
+            if end > existing_end + interval:
+                missing_ranges.append((max(start, existing_end), end))
+
+        combined = existing
+        for range_start, range_end in missing_ranges:
+            if range_start >= range_end:
+                continue
+            downloaded = await provider.fetch_candles(
+                normalized,
+                timeframe,
+                start=range_start,
+                end=range_end,
+            )
+            downloaded.attrs["provider"] = provider.name
+            downloaded.attrs["exchange"] = provider.name
+            downloaded = drop_open_candles(
+                downloaded,
+                timeframe=timeframe,
+                now=end,
+                close_grace_seconds=(
+                    self.settings.market_data.candle_close_grace_for(timeframe)
+                ),
+            )
+            combined = merge_candles(combined, downloaded)
+        if combined is None or combined.empty:
+            raise DataValidationError(
+                f"provider returned no usable candles for {normalized} {timeframe}"
+            )
+        combined.attrs["provider"] = provider.name
+        combined.attrs["exchange"] = provider.name
         _, manifest = save_ohlcv(
             combined,
             target,
@@ -415,6 +459,10 @@ class CanonicalDownloader:
             timeframe=timeframe,
             maximum_staleness=self.settings.market_data.maximum_staleness,
             now=end,
+            provider=provider.name,
+            exchange=provider.name,
+            requested_start=start,
+            requested_end=end,
         )
         return DownloadResult(
             market=normalized,

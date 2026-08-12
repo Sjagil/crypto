@@ -237,6 +237,8 @@ def _performance_metrics(
     equity: pd.Series,
     weights: pd.DataFrame,
     decisions: pd.DataFrame,
+    *,
+    periods_per_year: float = 365.25,
 ) -> dict[str, Any]:
     returns = equity.pct_change(fill_method=None).dropna()
     elapsed_days = max(
@@ -267,12 +269,12 @@ def _performance_metrics(
         "annualized_return": float(
             equity.iloc[-1] ** (1.0 / years) - 1.0
         ),
-        "annualized_volatility": standard * math.sqrt(365.25),
+        "annualized_volatility": standard * math.sqrt(periods_per_year),
         "sharpe": (
             float(
                 returns.mean()
                 / standard
-                * math.sqrt(365.25)
+                * math.sqrt(periods_per_year)
             )
             if standard > 0.0
             else 0.0
@@ -281,7 +283,7 @@ def _performance_metrics(
             float(
                 returns.mean()
                 / downside_deviation
-                * math.sqrt(365.25)
+                * math.sqrt(periods_per_year)
             )
             if downside_deviation > 0.0
             else 0.0
@@ -306,6 +308,7 @@ def _performance_metrics(
         ),
         "cash_fraction_average": float(1.0 - exposure.mean()),
         "observations": int(len(returns)),
+        "periods_per_year": float(periods_per_year),
     }
 
 

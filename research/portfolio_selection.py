@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from utils.common import stable_hash
+from utils.pandas_time import sunday_week_end_labels
 
 WeightingMode = Literal["equal", "inverse_volatility", "risk_parity"]
 ExposureMappingMode = Literal["frozen", "continuous", "piecewise"]
@@ -526,12 +527,21 @@ def _validated_panel(
     normalized: dict[str, pd.DataFrame] = {}
     for raw_market, raw in frames.items():
         market = raw_market.upper().replace("/", "-").replace("_", "-")
-        missing = {"open", "close"} - set(raw.columns)
+        source = raw
+        if not isinstance(source.index, pd.DatetimeIndex):
+            if "timestamp" not in source.columns:
+                raise TypeError(
+                    f"{market} requires a DatetimeIndex or timestamp column"
+                )
+            source = source.copy()
+            timestamps = pd.to_datetime(source.pop("timestamp"), utc=True, errors="raise")
+            if timestamps.isna().any():
+                raise ValueError(f"{market} contains invalid timestamps")
+            source.index = pd.DatetimeIndex(timestamps, name="timestamp")
+        missing = {"open", "close"} - set(source.columns)
         if missing:
             raise ValueError(f"{market} is missing required columns: {sorted(missing)}")
-        if not isinstance(raw.index, pd.DatetimeIndex):
-            raise TypeError(f"{market} requires a DatetimeIndex")
-        selected = raw.loc[:, ["open", "close"]].copy()
+        selected = source.loc[:, ["open", "close"]].copy()
         selected.index = pd.to_datetime(selected.index, utc=True)
         selected = selected[~selected.index.duplicated(keep="last")].sort_index()
         if not selected.index.is_monotonic_increasing:
@@ -564,6 +574,8 @@ def _effective_sample_size(returns: pd.Series) -> tuple[int, float]:
     selected = returns.dropna().astype(float)
     if selected.empty:
         return 0, 0.0
+    if selected.nunique(dropna=True) <= 1:
+        return len(selected), 0.0
     lag_one = float(selected.autocorr(lag=1)) if len(selected) > 2 else 0.0
     if not math.isfinite(lag_one) or abs(lag_one) >= 1.0:
         lag_one = 0.0
@@ -1474,13 +1486,17 @@ def backtest_rotation(
 
     equity = pd.Series(
         [value for _, value in equity_rows],
-        index=pd.DatetimeIndex([timestamp for timestamp, _ in equity_rows]),
+        index=pd.DatetimeIndex(
+            [timestamp for timestamp, _ in equity_rows]
+        ).as_unit("ns"),
         name="net_equity",
         dtype=float,
     )
     gross = pd.Series(
         [value for _, value in gross_rows],
-        index=pd.DatetimeIndex([timestamp for timestamp, _ in gross_rows]),
+        index=pd.DatetimeIndex(
+            [timestamp for timestamp, _ in gross_rows]
+        ).as_unit("ns"),
         name="gross_equity",
         dtype=float,
     )
@@ -1503,7 +1519,8 @@ def backtest_rotation(
     )
     drawdown = equity / equity.cummax() - 1.0
     maximum_drawdown = float(drawdown.min())
-    yearly = equity.resample("YE").last().pct_change(fill_method=None).dropna()
+    year_end_equity = equity.groupby(equity.index.year).last()
+    yearly = year_end_equity.pct_change(fill_method=None).dropna()
     average_exposure = (
         float(executed_weights.abs().sum(axis=1).mean())
         if not executed_weights.empty
@@ -1539,8 +1556,13 @@ def backtest_rotation(
     underwater_durations = (
         underwater.groupby(underwater_groups).sum()[lambda row: row > 0]
     )
-    weekly_for_risk = equity.resample("W-SUN").last().pct_change(fill_method=None).dropna()
-    monthly_for_risk = equity.resample("ME").last().pct_change(fill_method=None).dropna()
+    week_end_labels = sunday_week_end_labels(equity.index)
+    weekly_equity = equity.groupby(week_end_labels).last()
+    monthly_equity = equity.groupby(
+        [equity.index.year, equity.index.month]
+    ).last()
+    weekly_for_risk = weekly_equity.pct_change(fill_method=None).dropna()
+    monthly_for_risk = monthly_equity.pct_change(fill_method=None).dropna()
     tail_cutoff = float(net_returns.quantile(0.05)) if len(net_returns) else 0.0
     tail = net_returns[net_returns <= tail_cutoff]
     cash_attribution_average: dict[str, float] = {}
@@ -1587,9 +1609,7 @@ def backtest_rotation(
     rebalance_episode_returns = rebalance_equity.pct_change(
         fill_method=None
     ).dropna()
-    weekly_returns = (
-        equity.resample("W-SUN").last().pct_change(fill_method=None).dropna()
-    )
+    weekly_returns = weekly_for_risk
     sample_metrics = portfolio_sample_metrics(
         portfolio_period_returns=weekly_returns,
         position_episodes=position_episodes,

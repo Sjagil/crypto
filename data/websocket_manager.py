@@ -7,7 +7,7 @@ import json
 import logging
 import random
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -171,6 +171,12 @@ def decode_mexc_protobuf(payload: bytes) -> dict[str, Any]:
 def _timestamp(value: Any, *, milliseconds: bool = False) -> datetime:
     if value is None:
         return utc_now()
+    if isinstance(value, str):
+        numeric = value.strip()
+        try:
+            value = float(numeric)
+        except ValueError:
+            pass
     if isinstance(value, (int, float)):
         number = float(value)
         magnitude = abs(number)
@@ -200,11 +206,14 @@ class StreamHealth:
     subscriptions: int = 0
     messages: int = 0
     duplicates: int = 0
+    coalesced_messages: int = 0
     dropped_messages: int = 0
     parse_errors: int = 0
     sequence_gaps: int = 0
     pings: int = 0
     last_message_at: datetime | None = None
+    event_counts: dict[str, int] = field(default_factory=dict)
+    last_event_at: dict[str, datetime] = field(default_factory=dict)
     last_error: str | None = None
     latencies_ms: list[float] = field(default_factory=list)
     started_at: datetime | None = None
@@ -212,6 +221,11 @@ class StreamHealth:
     def snapshot(self, stale_after: timedelta) -> dict[str, Any]:
         now = utc_now()
         uptime = (now - self.started_at).total_seconds() if self.started_at else 0.0
+        last_message_age_ms = (
+            max(0.0, (now - self.last_message_at).total_seconds() * 1_000)
+            if self.last_message_at is not None
+            else None
+        )
         stale = (
             self.state == "CONNECTED"
             and (
@@ -229,6 +243,7 @@ class StreamHealth:
             "subscriptions": self.subscriptions,
             "messages": self.messages,
             "duplicates": self.duplicates,
+            "coalesced_messages": self.coalesced_messages,
             "dropped_messages": self.dropped_messages,
             "parse_errors": self.parse_errors,
             "sequence_gaps": self.sequence_gaps,
@@ -243,6 +258,20 @@ class StreamHealth:
             "last_message_at": (
                 self.last_message_at.isoformat() if self.last_message_at else None
             ),
+            "last_message_age_ms": last_message_age_ms,
+            "event_counts": dict(sorted(self.event_counts.items())),
+            "event_last_message_at": {
+                name: timestamp.isoformat()
+                for name, timestamp in sorted(self.last_event_at.items())
+            },
+            "event_last_message_age_ms": {
+                name: max(
+                    0.0,
+                    (now - timestamp).total_seconds() * 1_000,
+                )
+                for name, timestamp in sorted(self.last_event_at.items())
+            },
+            "stale_after_ms": stale_after.total_seconds() * 1_000,
             "last_error": self.last_error,
         }
 
@@ -256,24 +285,43 @@ class WebSocketManager:
         maximum_connection_attempts: int = 5,
         inactivity_timeout: float = 45.0,
         heartbeat: float = 20.0,
+        ticker_minimum_interval_seconds: float = 0.0,
         seed: int = 42,
         session: aiohttp.ClientSession | None = None,
         connect: Callable[..., Any] | None = None,
     ) -> None:
-        if queue_size < 1 or maximum_connection_attempts < 1:
+        if (
+            queue_size < 1
+            or maximum_connection_attempts < 1
+            or ticker_minimum_interval_seconds < 0
+        ):
             raise ValueError("queue size and attempts must be positive")
         self.queue: asyncio.Queue[NormalizedStreamEvent] = asyncio.Queue(queue_size)
         self.backpressure_policy = backpressure_policy
         self.maximum_connection_attempts = maximum_connection_attempts
         self.inactivity_timeout = inactivity_timeout
         self.heartbeat = heartbeat
+        self.ticker_minimum_interval_seconds = float(
+            ticker_minimum_interval_seconds
+        )
         self.random = random.Random(seed)
         self.session = session
         self.connect_override = connect
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._sockets: dict[str, Any] = {}
+        self._subscription_locks: dict[str, asyncio.Lock] = {}
+        # Dynamic subscriptions must survive a provider-managed reconnect.
+        # `run_provider` deliberately keeps a reference to this mutable
+        # mapping, while `update_bitvavo_subscriptions` changes it only after
+        # the venue write succeeds.  Previously a reconnect reverted to the
+        # staged startup book-only set and silently dropped trades/tickers.
+        self._subscriptions: dict[str, dict[str, Any]] = {}
         self._stop = asyncio.Event()
         self._message_ids: dict[str, set[str]] = {}
         self._sequence: dict[tuple[str, str, str], int] = {}
+        self._last_ticker_publish_monotonic: dict[
+            tuple[str, str], float
+        ] = {}
         self.health_state = {
             provider: StreamHealth(provider)
             for provider in ("bitvavo", "kraken", "mexc")
@@ -281,7 +329,7 @@ class WebSocketManager:
 
     async def start(
         self,
-        subscriptions: Mapping[str, Mapping[str, Sequence[str]]],
+        subscriptions: Mapping[str, Mapping[str, Any]],
     ) -> None:
         self._stop.clear()
         for provider, channels in subscriptions.items():
@@ -289,8 +337,10 @@ class WebSocketManager:
                 raise ValueError(f"unsupported WebSocket provider: {provider}")
             if provider in self._tasks and not self._tasks[provider].done():
                 continue
+            selected_channels = dict(channels)
+            self._subscriptions[provider] = selected_channels
             self._tasks[provider] = asyncio.create_task(
-                self.run_provider(provider, channels),
+                self.run_provider(provider, selected_channels),
                 name=f"websocket-{provider}",
             )
 
@@ -324,7 +374,7 @@ class WebSocketManager:
         return await asyncio.wait_for(self.queue.get(), timeout=timeout)
 
     async def run_provider(
-        self, provider: str, channels: Mapping[str, Sequence[str]]
+        self, provider: str, channels: Mapping[str, Any]
     ) -> None:
         health = self.health_state[provider]
         health.started_at = health.started_at or utc_now()
@@ -344,6 +394,7 @@ class WebSocketManager:
             except Exception as exc:
                 health.last_error = f"{type(exc).__name__}: {exc}"
                 health.state = "RECONNECTING"
+                await self._emit_status(provider, "RECONNECTING")
                 LOGGER.exception(
                     "public WebSocket reconnect scheduled",
                     extra={
@@ -358,13 +409,14 @@ class WebSocketManager:
                 )
                 if attempts >= self.maximum_connection_attempts:
                     health.state = "FAILED"
+                    await self._emit_status(provider, "FAILED")
                     break
                 delay = min(30.0, 0.5 * 2 ** (attempts - 1))
                 delay *= 0.75 + self.random.random() * 0.5
                 await asyncio.sleep(delay)
 
     async def _connection(
-        self, provider: str, channels: Mapping[str, Sequence[str]]
+        self, provider: str, channels: Mapping[str, Any]
     ) -> None:
         health = self.health_state[provider]
         owned = self.session is None
@@ -377,7 +429,9 @@ class WebSocketManager:
         connector = self.connect_override or session.ws_connect
         try:
             async with connector(endpoint, heartbeat=self.heartbeat) as socket:
+                self._sockets[provider] = socket
                 health.state = "CONNECTED"
+                health.last_error = None
                 health.connections += 1
                 LOGGER.info(
                     "public WebSocket connected",
@@ -404,6 +458,7 @@ class WebSocketManager:
                             "reason_code": "SUBSCRIBED",
                         },
                     )
+                published_since_yield = 0
                 while not self._stop.is_set():
                     try:
                         message = await asyncio.wait_for(
@@ -425,47 +480,207 @@ class WebSocketManager:
                             raise ValueError("unexpected binary provider message")
                         raw = decode_mexc_protobuf(message.data)
                     elif message.type == aiohttp.WSMsgType.TEXT:
-                        raw = json.loads(message.data)
+                        # Kraken's L2 checksum contract requires price and
+                        # quantity precision to survive JSON decoding.
+                        raw = json.loads(message.data, parse_float=Decimal)
                     else:
                         continue
                     if self._is_control_message(provider, raw):
                         continue
                     for event in self.parse_message(provider, raw):
                         await self._publish(event)
+                        published_since_yield += 1
                         health.messages += 1
                         health.last_message_at = utc_now()
-                        latency = max(
-                            0.0,
-                            (event.observed_at - event.timestamp).total_seconds() * 1_000,
+                        event_name = event.event_type.value
+                        health.event_counts[event_name] = (
+                            health.event_counts.get(event_name, 0) + 1
                         )
-                        health.latencies_ms.append(latency)
-                        if len(health.latencies_ms) > 10_000:
-                            del health.latencies_ms[:5_000]
+                        health.last_event_at[event_name] = health.last_message_at
+                        self._record_transport_latency(health, event)
+                    if published_since_yield >= 50:
+                        # aiohttp can serve a large already-buffered burst
+                        # without suspending.  `_publish` is intentionally a
+                        # non-blocking queue operation, so neither await would
+                        # otherwise yield control.  Cooperative scheduling is
+                        # mandatory here: heartbeats, reconciliation and
+                        # execution must run while the initial book backlog is
+                        # being normalized, not only after it is exhausted.
+                        published_since_yield = 0
+                        await asyncio.sleep(0)
         finally:
+            self._sockets.pop(provider, None)
             if owned:
                 await session.close()
 
+    async def update_bitvavo_subscriptions(
+        self,
+        *,
+        subscribe: Mapping[str, Iterable[str]] | None = None,
+        unsubscribe: Mapping[str, Iterable[str]] | None = None,
+    ) -> dict[str, Any]:
+        """Update public Bitvavo channels without reconnecting the stream.
+
+        Bitvavo accepts the same channel schema for ``subscribe`` and
+        ``unsubscribe``.  Keeping the socket alive avoids a venue-wide data
+        gap whenever the dynamic mover set changes.
+        """
+
+        socket = self._sockets.get("bitvavo")
+        if socket is None or bool(getattr(socket, "closed", False)):
+            raise ConnectionError("BITVAVO_WEBSOCKET_NOT_CONNECTED")
+        lock = self._subscription_locks.setdefault(
+            "bitvavo",
+            asyncio.Lock(),
+        )
+
+        def payload(
+            action: str,
+            channels: Mapping[str, Iterable[str]],
+        ) -> dict[str, Any]:
+            selected_channels: list[dict[str, Any]] = []
+            for channel, markets in channels.items():
+                selected_markets = list(dict.fromkeys(markets))
+                if selected_markets:
+                    selected_channels.append(
+                        {"name": channel, "markets": selected_markets}
+                    )
+            return {
+                "action": action,
+                "channels": selected_channels,
+            }
+
+        sent: list[dict[str, Any]] = []
+        async with lock:
+            for action, channels in (
+                ("unsubscribe", unsubscribe or {}),
+                ("subscribe", subscribe or {}),
+            ):
+                message = payload(action, channels)
+                if not message["channels"]:
+                    continue
+                if action == "subscribe":
+                    promoted = {
+                        market
+                        for channel in message["channels"]
+                        if channel["name"] == "book"
+                        for market in channel["markets"]
+                    }
+                    self._sequence = {
+                        key: value
+                        for key, value in self._sequence.items()
+                        if not (
+                            key[0] == "bitvavo" and key[1] in promoted
+                        )
+                    }
+                await socket.send_json(message)
+                active = self._subscriptions.setdefault("bitvavo", {})
+                for channel in message["channels"]:
+                    name = str(channel["name"])
+                    selected = list(channel["markets"])
+                    existing_configuration = active.get(name)
+                    if isinstance(existing_configuration, Mapping):
+                        existing = list(
+                            existing_configuration.get("markets") or []
+                        )
+                    else:
+                        existing = list(existing_configuration or [])
+                    if action == "subscribe":
+                        updated = list(dict.fromkeys((*existing, *selected)))
+                    else:
+                        removed = set(selected)
+                        updated = [
+                            market for market in existing if market not in removed
+                        ]
+                    if isinstance(existing_configuration, Mapping):
+                        active[name] = {
+                            **dict(existing_configuration),
+                            "markets": updated,
+                        }
+                    elif updated:
+                        active[name] = updated
+                    else:
+                        active.pop(name, None)
+                self.health_state["bitvavo"].subscriptions += 1
+                sent.append(message)
+        return {
+            "status": "UPDATED",
+            "messages_sent": len(sent),
+            "subscribed": {
+                channel: list(dict.fromkeys(markets))
+                for channel, markets in (subscribe or {}).items()
+            },
+            "unsubscribed": {
+                channel: list(dict.fromkeys(markets))
+                for channel, markets in (unsubscribe or {}).items()
+            },
+            "connection_preserved": True,
+        }
+
+    @staticmethod
+    def _record_transport_latency(
+        health: StreamHealth,
+        event: NormalizedStreamEvent,
+    ) -> None:
+        """Track network latency without mistaking candle age for transport delay."""
+
+        if event.event_type is StreamEventType.CANDLE:
+            return
+        latency = max(
+            0.0,
+            (event.observed_at - event.timestamp).total_seconds() * 1_000,
+        )
+        health.latencies_ms.append(latency)
+        if len(health.latencies_ms) > 10_000:
+            del health.latencies_ms[:5_000]
+
     @staticmethod
     def subscription_messages(
-        provider: str, channels: Mapping[str, Sequence[str]]
+        provider: str, channels: Mapping[str, Any]
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         if provider == "bitvavo":
+            selected_channels: list[dict[str, Any]] = []
+            for channel, configuration in channels.items():
+                if isinstance(configuration, Mapping):
+                    selected = {
+                        "name": channel,
+                        "markets": list(configuration.get("markets") or []),
+                    }
+                    intervals = configuration.get("interval")
+                    if intervals:
+                        selected["interval"] = list(intervals)
+                else:
+                    selected = {
+                        "name": channel,
+                        "markets": list(configuration),
+                    }
+                selected_channels.append(selected)
             messages.append(
                 {
                     "action": "subscribe",
-                    "channels": [
-                        {"name": channel, "markets": list(markets)}
-                        for channel, markets in channels.items()
-                    ],
+                    "channels": selected_channels,
                 }
             )
         elif provider == "kraken":
-            for channel, markets in channels.items():
+            for channel, configuration in channels.items():
+                if isinstance(configuration, Mapping):
+                    markets = list(configuration.get("markets") or [])
+                    params: dict[str, Any] = {
+                        "channel": channel,
+                        "symbol": markets,
+                    }
+                    if channel == "book":
+                        params["depth"] = int(configuration.get("depth") or 100)
+                        params["snapshot"] = bool(configuration.get("snapshot", True))
+                    elif channel == "trade":
+                        params["snapshot"] = bool(configuration.get("snapshot", False))
+                else:
+                    params = {"channel": channel, "symbol": list(configuration)}
                 messages.append(
                     {
                         "method": "subscribe",
-                        "params": {"channel": channel, "symbol": list(markets)},
+                        "params": params,
                     }
                 )
         elif provider == "mexc":
@@ -602,11 +817,12 @@ class WebSocketManager:
             "ticker": StreamEventType.TICKER,
             "trade": StreamEventType.TRADE,
             "candle": StreamEventType.CANDLE,
+            "candles": StreamEventType.CANDLE,
             "book": StreamEventType.ORDERBOOK_DELTA,
         }
         if event not in mapping or not market:
             return []
-        if event == "candle":
+        if event in {"candle", "candles"}:
             return [
                 self._event(
                     provider="bitvavo",
@@ -644,6 +860,7 @@ class WebSocketManager:
                 ),
                 "ticker_kind": "BOOK",
                 "raw_payload_hash": sha256_text(stable_json(raw)),
+                "provider_payload": event_payload,
             }
         elif event == "trade":
             payload = _trade_payload(
@@ -653,12 +870,15 @@ class WebSocketManager:
                 side=raw.get("side"),
                 raw_payload=raw,
             )
+            payload["aggressor_semantics"] = "EXCHANGE_REPORTED_TAKER_SIDE"
+            payload["provider_payload"] = event_payload
         else:
             payload = {
                 "bids": raw.get("bids", []),
                 "asks": raw.get("asks", []),
                 "checksum": raw.get("checksum"),
                 "raw_payload_hash": sha256_text(stable_json(raw)),
+                "provider_payload": event_payload,
             }
         return [
             self._event(
@@ -714,6 +934,7 @@ class WebSocketManager:
                     side=item.get("side"),
                     raw_payload=item,
                 )
+                payload["aggressor_semantics"] = "EXCHANGE_REPORTED_TAKER_SIDE"
             elif channel == "ohlc":
                 payload = {
                     "interval": item.get("interval"),
@@ -732,6 +953,7 @@ class WebSocketManager:
                         stable_json(item)
                     ),
                 }
+            payload["provider_payload"] = item
             events.append(
                 self._event(
                     provider="kraken",
@@ -740,7 +962,11 @@ class WebSocketManager:
                     timestamp=timestamp,
                     payload=payload,
                     sequence=item.get("sequence"),
-                    message_id=str(item.get("trade_id") or "") or None,
+                    message_id=(
+                        f"{symbol}:{item.get('trade_id')}"
+                        if item.get("trade_id") is not None
+                        else None
+                    ),
                 )
             )
         return events
@@ -809,6 +1035,7 @@ class WebSocketManager:
         raw_payload_hash = sha256_text(stable_json(raw))
         for item in normalized_items:
             item.setdefault("raw_payload_hash", raw_payload_hash)
+            item.setdefault("provider_payload", raw)
         items = normalized_items
         return [
             self._event(
@@ -844,6 +1071,26 @@ class WebSocketManager:
         ]
 
     async def _publish(self, event: NormalizedStreamEvent) -> None:
+        if (
+            event.event_type is StreamEventType.TICKER
+            and self.ticker_minimum_interval_seconds > 0
+        ):
+            key = (event.provider, event.canonical_market)
+            now_monotonic = asyncio.get_running_loop().time()
+            previous = self._last_ticker_publish_monotonic.get(key)
+            if (
+                previous is not None
+                and now_monotonic - previous
+                < self.ticker_minimum_interval_seconds
+            ):
+                # The venue-wide 24h ticker can emit hundreds of redundant
+                # updates per second.  One causal sample per market per
+                # configured interval is enough for the 5-15 second mover
+                # ranker and prevents it from starving books, trades,
+                # heartbeats and execution.
+                self.health_state[event.provider].coalesced_messages += 1
+                return
+            self._last_ticker_publish_monotonic[key] = now_monotonic
         ids = self._message_ids.setdefault(event.provider, set())
         if event.message_id in ids:
             self.health_state[event.provider].duplicates += 1

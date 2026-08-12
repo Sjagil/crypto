@@ -109,13 +109,13 @@ def test_backtest_executes_at_next_open_and_charges_costs(features: pd.DataFrame
 
 def test_review_required_assets_need_explicit_research_only_scope(
     features: pd.DataFrame,
-    isolated_settings,
+    restrictive_settings,
 ) -> None:
     with pytest.raises(PermissionError, match="not ALLOWED"):
         BacktestEngine(
             BacktestConfig(bootstrap_samples=100, monte_carlo_runs=100),
-            settings=isolated_settings,
-        ).run({"BNB-EUR": features}, FixedStrategy())
+            settings=restrictive_settings,
+        ).run({"ICP-EUR": features}, FixedStrategy())
 
     result = BacktestEngine(
         BacktestConfig(
@@ -123,8 +123,8 @@ def test_review_required_assets_need_explicit_research_only_scope(
             monte_carlo_runs=100,
             allow_review_required_research_only=True,
         ),
-        settings=isolated_settings,
-    ).run({"BNB-EUR": features}, FixedStrategy())
+        settings=restrictive_settings,
+    ).run({"ICP-EUR": features}, FixedStrategy())
     assert result.integrity["long_only_spot"]
 
 

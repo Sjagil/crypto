@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import data.orderflow_recorder as orderflow_recorder
 from core.contracts import NormalizedStreamEvent, StreamEventType
 from data.orderflow_recorder import (
     HashChainedOrderflowLedger,
@@ -19,6 +20,7 @@ from data.orderflow_recorder import (
     prospective_milestone_status,
     seal_completed_orderflow_segments,
     summarize_orderflow_hour,
+    verify_orderflow_checkpoint,
     verify_orderflow_ledger,
 )
 from data.websocket_manager import WebSocketManager
@@ -120,6 +122,72 @@ def test_hash_chained_hourly_ledger_and_tamper_detection(
     lines[0] = json.dumps(payload)
     segment.write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert verify_orderflow_ledger(root)["status"] == "FAILED"
+
+
+def test_checkpoint_first_recovery_verifies_chain_head_without_full_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "stream"
+    checkpoint = tmp_path / "checkpoint.json"
+    ledger = HashChainedOrderflowLedger(root=root, checkpoint_path=checkpoint)
+    ledger.append(
+        [
+            event(
+                kind=StreamEventType.TRADE,
+                at=datetime(2026, 8, 3, 17, tzinfo=UTC),
+                message_id="fast-restart",
+                payload={"price": "100", "quantity": "1", "side": "buy"},
+            )
+        ]
+    )
+    checkpoint_payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert checkpoint_payload["last_segment_size_bytes"] > 0
+    assert verify_orderflow_checkpoint(root, checkpoint)["status"] == "PASSED"
+
+    def forbidden_full_scan(_root: Path) -> dict[str, object]:
+        raise AssertionError("full historical scan must not run on checkpoint recovery")
+
+    monkeypatch.setattr(orderflow_recorder, "verify_orderflow_ledger", forbidden_full_scan)
+    recovered = HashChainedOrderflowLedger(
+        root=root,
+        checkpoint_path=checkpoint,
+        checkpoint_first_recovery=True,
+    )
+    assert recovered.record_count == 1
+    assert recovered.recovery_mode == "CHECKPOINT_CHAIN_HEAD_VERIFIED"
+    assert recovered.full_historical_rescan_deferred is True
+
+
+def test_checkpoint_first_recovery_fails_closed_on_tampered_chain_head(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stream"
+    checkpoint = tmp_path / "checkpoint.json"
+    ledger = HashChainedOrderflowLedger(root=root, checkpoint_path=checkpoint)
+    ledger.append(
+        [
+            event(
+                kind=StreamEventType.TRADE,
+                at=datetime(2026, 8, 3, 17, tzinfo=UTC),
+                message_id="tamper-head",
+                payload={"price": "100", "quantity": "1", "side": "buy"},
+            )
+        ]
+    )
+    segment = next(root.rglob("*.jsonl"))
+    row = json.loads(segment.read_text(encoding="utf-8"))
+    row["market"] = "ETH-EUR"
+    segment.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    audit = verify_orderflow_checkpoint(root, checkpoint)
+    assert audit["status"] == "FAILED"
+    with pytest.raises(RuntimeError, match="ORDERFLOW_LEDGER_INTEGRITY_FAILED"):
+        HashChainedOrderflowLedger(
+            root=root,
+            checkpoint_path=checkpoint,
+            checkpoint_first_recovery=True,
+        )
 
 
 def test_closed_segment_is_losslessly_sealed_and_auditable(
@@ -331,7 +399,140 @@ def test_hour_summary_calculates_delta_obi_and_microprice() -> None:
     assert summary["trade_delta_percentage"] == pytest.approx(1 / 3)
     assert summary["orderbook_sample_count"] == 1
     assert summary["orderbook_imbalance"] == pytest.approx(1 / 3)
+    assert summary["orderbook_imbalance_top_5"] == pytest.approx(1 / 3)
+    assert summary["orderbook_imbalance_within_50bps"] is None
+    assert summary["order_flow_imbalance_normalized"] is not None
+    assert summary["bullish_absorption_score"] is not None
     assert summary["microprice"] == pytest.approx(100.3333333333)
+
+
+def test_15m_summary_uses_only_closed_interval_events() -> None:
+    start = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    raw = [
+        normalize_stream_event(
+            event(
+                kind=StreamEventType.TRADE,
+                at=start + timedelta(minutes=1),
+                message_id="buy-15m",
+                payload={"price": "100", "quantity": "2", "side": "buy"},
+            )
+        ),
+        normalize_stream_event(
+            event(
+                kind=StreamEventType.TICKER,
+                at=start + timedelta(minutes=5),
+                message_id="ticker-15m",
+                payload={
+                    "last_price": "100",
+                    "volume_24h": "1000",
+                    "quote_volume_24h": "100000",
+                },
+            )
+        ),
+        normalize_stream_event(
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=start + timedelta(minutes=14),
+                message_id="book-15m",
+                sequence=10,
+                payload={
+                    "book_bids": [["99", "10"]],
+                    "book_asks": [["101", "5"]],
+                    "book_state_status": "SEQUENCE_APPLIED",
+                },
+            )
+        ),
+        normalize_stream_event(
+            event(
+                kind=StreamEventType.TRADE,
+                at=start + timedelta(minutes=16),
+                message_id="outside-15m",
+                payload={"price": "101", "quantity": "50", "side": "sell"},
+            )
+        ),
+    ]
+    for index, record in enumerate(raw):
+        record["record_hash"] = f"{index:064d}"
+    summary = summarize_orderflow_hour(
+        raw,
+        market="BTC-EUR",
+        hour_start=start,
+        recorder_started_at=start,
+        health={
+            "state": "CONNECTED",
+            "sequence_gaps": 0,
+            "dropped_messages": 0,
+            "reconnects": 0,
+        },
+        interval=timedelta(minutes=15),
+    )
+    assert summary["status"] == "COMPLETE"
+    assert summary["interval_minutes"] == 15
+    assert summary["trade_count"] == 1
+    assert summary["trade_delta_base"] == pytest.approx(2.0)
+
+
+def test_recorder_seals_spot_only_15m_snapshot(tmp_path: Path) -> None:
+    start = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    ledger = HashChainedOrderflowLedger(
+        root=tmp_path / "stream",
+        checkpoint_path=tmp_path / "chain.json",
+    )
+    ledger.append(
+        [
+            event(
+                kind=StreamEventType.TRADE,
+                at=start + timedelta(minutes=1),
+                message_id="trade-15m",
+                payload={"price": "100", "quantity": "1", "side": "buy"},
+            ),
+            event(
+                kind=StreamEventType.TICKER,
+                at=start + timedelta(minutes=5),
+                message_id="ticker-15m",
+                payload={
+                    "last_price": "100",
+                    "volume_24h": "1000",
+                    "quote_volume_24h": "100000",
+                },
+            ),
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=start + timedelta(minutes=14),
+                message_id="book-15m",
+                sequence=10,
+                payload={
+                    "book_bids": [["99", "10"]],
+                    "book_asks": [["101", "5"]],
+                    "book_state_status": "SEQUENCE_APPLIED",
+                },
+            ),
+        ]
+    )
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=ledger,
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "microstructure_hourly",
+        fifteen_minute_feature_directory=tmp_path / "microstructure_15m",
+        readiness_path=tmp_path / "readiness.json",
+    )
+    recorder.started_at = start
+    result = recorder.finalize_previous_quarter(
+        observed_at=start + timedelta(minutes=16),
+        health={
+            "state": "CONNECTED",
+            "sequence_gaps": 0,
+            "dropped_messages": 0,
+            "reconnects": 0,
+        },
+    )
+    snapshot = result["snapshot"]
+    assert result["finalization_state"] == "FINALIZED"
+    assert snapshot["schema_version"] == "microstructure_15m_snapshot_v1"
+    assert snapshot["status"] == "COMPLETE"
+    assert snapshot["markets"][0]["status"] == "COMPLETE"
+    assert snapshot["synthetic_data_used"] is False
 
 
 def test_mid_hour_start_and_sequence_gap_fail_closed() -> None:
@@ -386,6 +587,7 @@ def test_orderbook_requires_seed_and_applies_exact_sequence(
             },
         )
     )
+    assert recorder.invalid_orderbook_markets() == ()
     at = datetime(2026, 7, 26, 10, tzinfo=UTC)
     applied, gap = recorder._enrich_orderbooks(
         [
@@ -410,6 +612,241 @@ def test_orderbook_requires_seed_and_applies_exact_sequence(
     assert applied.payload["book_bids"][0] == ["100", "1"]
     assert gap.payload["book_state_status"] == "SEQUENCE_GAP"
     assert not gap.payload["book_bids"]
+    assert recorder.invalid_orderbook_markets() == ("BTC-EUR",)
+
+    recorder.seed_orderbook(
+        SimpleNamespace(
+            canonical_market="BTC-EUR",
+            raw_hash="r" * 64,
+            values={
+                "sequence": 13,
+                "bids": [["100", "1"]],
+                "asks": [["102", "1"]],
+            },
+        )
+    )
+    assert recorder.invalid_orderbook_markets() == ()
+
+
+def test_orderbook_discards_buffered_pre_snapshot_delta_then_continues(
+    tmp_path: Path,
+) -> None:
+    """Match Bitvavo's documented buffer/snapshot/replay procedure."""
+
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=HashChainedOrderflowLedger(
+            root=tmp_path / "stream",
+            checkpoint_path=tmp_path / "chain.json",
+        ),
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "features",
+        readiness_path=tmp_path / "readiness.json",
+    )
+    recorder.seed_orderbook(
+        SimpleNamespace(
+            canonical_market="BTC-EUR",
+            raw_hash="s" * 64,
+            values={
+                "sequence": 10,
+                "bids": [["99", "2"]],
+                "asks": [["101", "3"]],
+            },
+        )
+    )
+    at = datetime(2026, 7, 26, 10, tzinfo=UTC)
+    stale, applied = recorder._enrich_orderbooks(
+        [
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=at,
+                message_id="buffered-book-9",
+                sequence=9,
+                payload={"bids": [["98", "4"]], "asks": []},
+            ),
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=at + timedelta(seconds=5),
+                message_id="book-11",
+                sequence=11,
+                payload={"bids": [["100", "1"]], "asks": []},
+            ),
+        ]
+    )
+    assert stale.payload["book_state_status"] == "STALE_BEFORE_SNAPSHOT"
+    assert stale.payload["book_bids"] == []
+    assert applied.payload["book_state_status"] == "SEQUENCE_APPLIED"
+    assert applied.payload["book_bids"][0] == ["100", "1"]
+
+
+def test_realtime_snapshot_exposes_causal_mover_and_book_facts(
+    tmp_path: Path,
+) -> None:
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=HashChainedOrderflowLedger(
+            root=tmp_path / "stream",
+            checkpoint_path=tmp_path / "chain.json",
+        ),
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "features",
+        readiness_path=tmp_path / "readiness.json",
+    )
+    recorder.seed_orderbook(
+        SimpleNamespace(
+            canonical_market="BTC-EUR",
+            raw_hash="s" * 64,
+            values={
+                "sequence": 10,
+                "bids": [["100.00", "100"]],
+                "asks": [["100.10", "100"]],
+            },
+        )
+    )
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
+    for index in range(21):
+        observed = now - timedelta(minutes=20 - index)
+        recorder._record_realtime_event(
+            event(
+                kind=StreamEventType.TRADE,
+                at=observed,
+                message_id=f"trade-{index}",
+                payload={
+                    "price": str(99.0 + index * 0.05),
+                    "quantity": "1" if index < 20 else "8",
+                    "side": "buy" if index >= 18 else "sell",
+                },
+            )
+        )
+    recorder._enrich_orderbooks(
+        [
+            event(
+                kind=StreamEventType.ORDERBOOK_DELTA,
+                at=now,
+                message_id="book-11",
+                sequence=11,
+                payload={
+                    "bids": [["100.05", "200"]],
+                    "asks": [["100.10", "50"]],
+                },
+            )
+        ]
+    )
+
+    snapshot = recorder.realtime_snapshot(
+        observed_at=now,
+        order_notional_eur=5.0,
+    )
+    row = snapshot["markets"][0]
+
+    assert row["fresh"] is True
+    assert row["sequence_valid"] is True
+    assert row["windows"]["1m"]["trade_count"] >= 1
+    assert row["windows"]["1m"]["cvd_quote_eur"] > 0
+    assert row["relative_volume_1m"] > 1
+    assert row["book"]["mlobi_top_10"] > 0
+    assert row["book"]["microprice"] > row["book"]["midpoint"]
+    assert row["microprice_edge_bps"] > 0
+    assert row["mlobi_positive_persistence_10s"] == 1.0
+    assert row["bullish_absorption_score_1m"] >= 0
+    assert row["trade_age_seconds"] == pytest.approx(0.0)
+    assert row["book_age_seconds"] == pytest.approx(0.0)
+    assert row["book_update_count_10s"] >= 1
+    assert row["book_update_count_1m"] >= 1
+    assert 0.0 <= row["bid_replenishment_ratio_1m"] <= 1.0
+    assert 0.0 <= row["ask_depletion_ratio_1m"] <= 1.0
+    assert isinstance(row["downside_sweep_reclaim_1m"], bool)
+    assert row["book"]["spread_bps"] > 0
+    assert row["book"]["bid_depth_eur_within_10_bps"] > 0
+    assert row["book"]["ask_depth_eur_within_10_bps"] > 0
+    assert row["book"]["distance_weighted_imbalance_top_10"] > 0
+    assert row["book"]["spread_within_dynamic_cap"] is True
+    assert set(row["ofi_windows"]) == {"10s", "30s", "90s", "300s"}
+    assert row["estimated_buy_slippage_bps"] == pytest.approx(0.0)
+    assert snapshot["market_data_levels"]["L1"]["status"] == "AVAILABLE_NATIVE"
+    assert snapshot["market_data_levels"]["L2"]["status"].startswith("AVAILABLE")
+    assert snapshot["market_data_levels"]["L3"] == {
+        "status": "UNAVAILABLE_ON_CURRENT_BITVAVO_FEED",
+        "individual_order_ids_available": False,
+        "synthetic_values_used": False,
+    }
+    assert snapshot["synthetic_data_used"] is False
+
+
+def test_venue_wide_ticker_movers_promote_fast_positive_market(
+    tmp_path: Path,
+) -> None:
+    recorder = ProspectiveOrderflowRecorder(
+        ledger=HashChainedOrderflowLedger(
+            root=tmp_path / "stream",
+            checkpoint_path=tmp_path / "chain.json",
+        ),
+        database=FakeDatabase(),
+        markets=("BTC-EUR",),
+        feature_directory=tmp_path / "features",
+        readiness_path=tmp_path / "readiness.json",
+    )
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
+    for market, prices in {
+        "ADA-EUR": (0.15, 0.153),
+        "NPC-EUR": (0.0050, 0.005005),
+        "ILLIQ-EUR": (0.01, 0.012),
+    }.items():
+        for offset, price in ((-60, prices[0]), (0, prices[1])):
+            observed = now + timedelta(seconds=offset)
+            recorder._record_realtime_event(
+                NormalizedStreamEvent(
+                    event_type=StreamEventType.TICKER,
+                    provider="bitvavo",
+                    source_symbol=market,
+                    canonical_market=market,
+                    timestamp=observed,
+                    observed_at=observed,
+                    sequence=None,
+                    message_id=f"{market}-{offset}",
+                    payload={
+                        "last_price": str(price),
+                        "quote_volume_24h": (
+                            "1000" if market == "ILLIQ-EUR" else "250000"
+                        ),
+                    },
+                )
+            )
+    for offset, price in ((-10, 1.0), (0, 1.002)):
+        observed = now + timedelta(seconds=offset)
+        recorder._record_realtime_event(
+            NormalizedStreamEvent(
+                event_type=StreamEventType.TICKER,
+                provider="bitvavo",
+                source_symbol="FAST-EUR",
+                canonical_market="FAST-EUR",
+                timestamp=observed,
+                observed_at=observed,
+                sequence=None,
+                message_id=f"FAST-EUR-{offset}",
+                payload={
+                    "last_price": str(price),
+                    "quote_volume_24h": "250000",
+                },
+            )
+        )
+
+    ranking = recorder.realtime_ticker_movers(
+        observed_at=now,
+        minimum_quote_volume_eur=100_000,
+    )
+    by_market = {row["market"]: row for row in ranking}
+
+    assert ranking[0]["market"] == "ADA-EUR"
+    assert by_market["ADA-EUR"]["returns"]["1m"] == pytest.approx(0.02)
+    assert by_market["ADA-EUR"]["qualified_for_intensive_tracking"] is True
+    assert by_market["NPC-EUR"]["qualified_for_intensive_tracking"] is False
+    assert by_market["ILLIQ-EUR"]["liquidity_qualified"] is False
+    assert by_market["ILLIQ-EUR"]["qualified_for_intensive_tracking"] is False
+    assert by_market["FAST-EUR"]["returns"]["10s"] == pytest.approx(0.002)
+    assert by_market["FAST-EUR"]["returns"]["1m"] is None
+    assert by_market["FAST-EUR"]["qualified_for_intensive_tracking"] is True
+    assert all(row["orders_generated"] == 0 for row in ranking)
 
 
 def test_bitvavo_parser_preserves_trade_hash_and_quote_volume() -> None:
@@ -541,10 +978,23 @@ async def test_recorder_pauses_for_reseed_and_acknowledges_recovery(
     task = asyncio.create_task(recorder.run(manager))
     await asyncio.wait_for(recorder.pause(), timeout=1)
     assert recorder._paused.is_set()
-    recorder.acknowledge_stream_recovery(manager.health())
+    recorder.acknowledge_stream_recovery(
+        manager.health(),
+        reset_period_baselines=True,
+    )
     assert recorder._write_health(manager)["status"] == "HEALTHY"
     manager.counters["sequence_gaps"] = 2
     assert recorder._write_health(manager)["status"] == "DEGRADED"
+    recorder.acknowledge_stream_recovery(manager.health())
+    # Recovery clears the live health warning but preserves the incident for
+    # the current forensic 15-minute/hourly completeness calculation.
+    assert recorder._write_health(manager)["status"] == "HEALTHY"
+    assert recorder._quarter_health_counters["sequence_gaps"] == 1
+    recorder.acknowledge_stream_recovery(
+        manager.health(),
+        reset_period_baselines=True,
+    )
+    assert recorder._quarter_health_counters["sequence_gaps"] == 2
     recorder.resume()
     recorder.stop()
     await asyncio.wait_for(task, timeout=1)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,6 +24,7 @@ from research.features import volume_features
 from research.global_trial_accounting import resolve_known_trial_count
 from research.optimization import deflated_sharpe_ratio
 from research.portfolio_storm import large_matrix_multiple_testing
+from research.strategies import Strategy, StrategyOutput
 from research.strategy_registry import (
     ContentAddressedTrialRegistry,
     gaussian_plateau_table,
@@ -34,6 +36,7 @@ from utils.common import (
     sha256_file,
     stable_hash,
 )
+from utils.pandas_time import sunday_week_end_labels
 
 VOLUME_STRATEGY_CAMPAIGN = "VOLUME_STRATEGY_CATALOG_V1"
 VOLUME_STRATEGY_ENGINE_VERSION = "1.0.0"
@@ -614,6 +617,116 @@ def _signals(
     )
 
 
+class VolumeCatalogStrategyAdapter(Strategy):
+    """Canonical event-driven adapter for one frozen catalog signal DNA.
+
+    The discovery campaign used a vectorized 20%-exposure sleeve without a
+    price stop. The canonical engine requires bounded risk. This adapter keeps
+    the frozen entry/exit parameters byte-for-byte and adds one explicit,
+    separately hashed 10% stop / 30% disaster target safety overlay.
+    """
+
+    family = "volume_catalog_canonical_adapter"
+    description = "Frozen volume-catalog signals in the canonical backtester."
+    parameter_space: dict[str, tuple[Any, ...]] = {}
+
+    def __init__(self, row: VolumeStrategyDNA) -> None:
+        self.row = row
+        self.strategy_id = row.strategy_id
+        self.family = f"volume_catalog_{row.archetype.lower()}"
+        self.description = (
+            f"Canonical adapter for frozen {row.archetype} coordinate "
+            f"{row.coordinate} on {row.market} {row.timeframe}."
+        )
+        self.defaults = {
+            **dict(row.parameters),
+            "stop_fraction": 0.10,
+            "target_fraction": 0.30,
+            "maximum_holding_bars": None,
+        }
+        self.parameter_space = {
+            key: (value,) for key, value in self.defaults.items()
+        }
+        self.legacy_strategy_dna_hash = row.dna_hash
+        self.canonical_adapter_dna_hash = stable_hash(
+            {
+                "legacy_strategy_dna_hash": row.dna_hash,
+                "adapter": "CANONICAL_BOUNDED_RISK_V1",
+                "stop_fraction": 0.10,
+                "target_fraction": 0.30,
+            },
+            length=64,
+        )
+        self.material_difference_reason = (
+            "LEGACY_20PCT_UNBOUNDED_SLEEVE_REPLACED_BY_CANONICAL_"
+            "RISK_SIZING_WITH_10PCT_STOP_AND_30PCT_DISASTER_TARGET"
+        )
+
+    def validate_parameters(self, parameters: dict[str, Any]) -> None:
+        if not 0 < float(parameters["stop_fraction"]) < 1:
+            raise ValueError("volume adapter stop fraction must be in (0,1)")
+        if float(parameters["target_fraction"]) <= 0:
+            raise ValueError("volume adapter target fraction must be positive")
+
+    def generate(
+        self,
+        features: pd.DataFrame,
+        parameters: dict[str, Any] | None = None,
+    ) -> StrategyOutput:
+        selected = self.parameters(parameters)
+        frozen = VolumeStrategyDNA(
+            market=self.row.market,
+            timeframe=self.row.timeframe,
+            archetype=self.row.archetype,
+            coordinate=self.row.coordinate,
+            parameters={
+                key: selected[key] for key in self.row.parameters
+            },
+        )
+        entries, exits = _signals(features, (frozen,))
+        entry = entries[frozen.strategy_id]
+        exit_ = exits[frozen.strategy_id]
+        close = features["close"].astype(float)
+        return StrategyOutput(
+            entry=(entry & ~exit_).fillna(False).astype(bool),
+            exit=exit_.fillna(False).astype(bool),
+            avoid=pd.Series(False, index=features.index),
+            reduce=pd.Series(False, index=features.index),
+            stop_distance=close * float(selected["stop_fraction"]),
+            target_distance=close * float(selected["target_fraction"]),
+            trailing_distance=pd.Series(0.0, index=features.index),
+            size_multiplier=pd.Series(1.0, index=features.index),
+            maximum_holding_bars=None,
+            entry_reason=f"FROZEN_{frozen.archetype}_ENTRY",
+            exit_reason=f"FROZEN_{frozen.archetype}_EXIT",
+            metadata={
+                "legacy_strategy_dna_hash": frozen.dna_hash,
+                "canonical_adapter_dna_hash": self.canonical_adapter_dna_hash,
+                "material_difference_reason": self.material_difference_reason,
+                "legacy_parameters_unchanged": True,
+            },
+        ).validate(features.index)
+
+
+@lru_cache(maxsize=256)
+def volume_strategy_adapter(strategy_id: str) -> VolumeCatalogStrategyAdapter:
+    """Resolve an exact frozen catalog strategy ID into its safe adapter."""
+
+    available_pairs = tuple(
+        (market, timeframe)
+        for market in VOLUME_STRATEGY_MARKETS
+        for timeframe in VOLUME_STRATEGY_TIMEFRAMES
+    )
+    matches = [
+        row
+        for row in volume_strategy_dna(available_pairs)
+        if row.strategy_id == strategy_id
+    ]
+    if len(matches) != 1:
+        raise KeyError(f"unknown volume catalog strategy: {strategy_id}")
+    return VolumeCatalogStrategyAdapter(matches[0])
+
+
 def _regime_labels(
     frame: pd.DataFrame,
     btc_frame: pd.DataFrame,
@@ -913,14 +1026,10 @@ def _regime_rows(
 
 
 def _weekly(series: pd.Series) -> pd.Series:
-    return (
-        (1.0 + series)
-        .resample("W-SUN")
-        .prod()
-        .sub(1.0)
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-    )
+    selected = 1.0 + series
+    return selected.groupby(sunday_week_end_labels(selected.index)).prod().sub(
+        1.0
+    ).replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def _selection_summary(

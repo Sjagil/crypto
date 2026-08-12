@@ -5,12 +5,62 @@ import pandas as pd
 import pytest
 
 from research.portfolio_breakout import (
+    AtrRiskBreakoutParameters,
     BreakoutPortfolioParameters,
+    EfficientAtrRiskBreakoutParameters,
     backtest_breakout_portfolio,
     breakout_observer_snapshot,
     breakout_portfolio_parameter_set,
+    efficient_atr_breakout_parameter_set,
 )
 from research.portfolio_selection import RotationPortfolioPolicy
+
+
+def test_atr_risk_breakout_is_separate_bounded_4h_dna() -> None:
+    frames = {
+        market: frame.set_axis(
+            pd.date_range(
+                "2022-01-01",
+                periods=len(frame),
+                freq="4h",
+                tz="UTC",
+            )
+        )
+        for market, frame in _frames(rows=900).items()
+    }
+    parameters = AtrRiskBreakoutParameters()
+    assert parameters.dna_hash not in {
+        row.dna_hash for row in breakout_portfolio_parameter_set()
+    }
+    result = backtest_breakout_portfolio(
+        frames,
+        parameters,
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=4.0,
+        portfolio_policy=_policy(tuple(frames)),
+    )
+    assert result.summary()["timeframe"] == "4h"
+    assert result.metrics["position_sizing_policy"] == "ATR_EQUAL_EUR_RISK"
+    assert result.metrics["maximum_exposure_observed"] <= 0.40 + 1e-12
+    assert result.metrics["maximum_position_exposure_observed"] <= 0.20 + 1e-12
+
+
+def test_efficient_atr_grid_is_small_frozen_and_separate_from_v1() -> None:
+    rows = efficient_atr_breakout_parameter_set()
+    assert len(rows) == 24
+    assert len({row.dna_hash for row in rows}) == len(rows)
+    assert AtrRiskBreakoutParameters().dna_hash not in {row.dna_hash for row in rows}
+    assert {row.rebalance_days for row in rows} == {3, 7}
+    assert {row.rebalance_buffer for row in rows} == {0.05, 0.10}
+    with pytest.raises(ValueError, match="pre-registered"):
+        EfficientAtrRiskBreakoutParameters(
+            entry_lookback=121,
+            exit_lookback=60,
+            trend_ema_period=600,
+            rebalance_days=3,
+            rebalance_buffer=0.05,
+        )
 
 
 def _frames(rows: int = 520) -> dict[str, pd.DataFrame]:
@@ -132,6 +182,44 @@ def test_future_close_cannot_change_prior_breakout_decisions_or_equity() -> None
         pd.to_datetime(changed.decisions["decision_at"], utc=True) < cutoff
     ].reset_index(drop=True)
     pd.testing.assert_frame_equal(baseline_decisions, changed_decisions)
+
+
+def test_isolated_asset_gap_defers_execution_and_uses_causal_valuation() -> None:
+    frames = _frames()
+    baseline = backtest_breakout_portfolio(
+        frames,
+        _parameters(),
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+        portfolio_policy=_policy(tuple(frames)),
+    )
+    episode = baseline.position_episodes.iloc[0]
+    market = str(episode["market"])
+    opened_at = pd.to_datetime(episode["opened_at"], utc=True)
+    closed_at = pd.to_datetime(episode["closed_at"], utc=True)
+    candidates = frames[market].index[
+        (frames[market].index > opened_at)
+        & (frames[market].index < closed_at)
+    ]
+    assert len(candidates) > 0
+    gapped = {name: frame.copy() for name, frame in frames.items()}
+    gapped[market] = gapped[market].drop(index=candidates[len(candidates) // 2])
+
+    result = backtest_breakout_portfolio(
+        gapped,
+        _parameters(),
+        fee_rate=0.0025,
+        slippage_bps=8.0,
+        spread_bps=5.0,
+        portfolio_policy=_policy(tuple(frames)),
+    )
+
+    assert result.metrics["valuation_carry_rows"] == 1
+    assert result.integrity["signal_ohlc_not_forward_filled"]
+    assert result.integrity["valuation_carry_is_backward_only"]
+    assert result.integrity["missing_candle_execution_deferred"]
+    assert result.integrity["asset_pnl_reconciled"]
 
 
 def test_breakout_costs_are_monotonic_and_unknown_asset_fails_closed() -> None:

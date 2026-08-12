@@ -5,11 +5,20 @@
 #    pip-compile --output-file=requirements.lock.txt --strip-extras requirements.txt
 #
 aiohappyeyeballs==2.7.1
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   ccxt
 aiohttp==3.14.3
-    # via -r requirements.txt
+    # via
+    #   -r requirements.txt
+    #   aiohttp-fast-zlib
+    #   ccxt
+aiohttp-fast-zlib==0.3.0
+    # via ccxt
 aiosignal==1.4.0
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   ccxt
 alembic==1.18.5
     # via optuna
 annotated-types==0.7.0
@@ -17,9 +26,27 @@ annotated-types==0.7.0
 arch==8.0.0
     # via -r requirements.txt
 attrs==26.1.0
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   ccxt
 beautifulsoup4==4.15.0
     # via -r requirements.txt
+ccxt==4.5.71
+    # via -r requirements.txt
+certifi==2026.6.17
+    # via
+    #   ccxt
+    #   requests
+cffi==2.0.0
+    # via
+    #   ccxt
+    #   cryptography
+charset-normalizer==3.4.7
+    # via
+    #   ccxt
+    #   requests
+coincurve==21.0.0
+    # via ccxt
 colorama==0.4.6
     # via
     #   colorlog
@@ -31,6 +58,8 @@ contourpy==1.3.3
     # via matplotlib
 coverage==7.15.2
     # via pytest-cov
+cryptography==50.0.0
+    # via ccxt
 cycler==0.12.1
     # via matplotlib
 dateparser==1.4.1
@@ -43,14 +72,22 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
+    #   ccxt
 greenlet==3.5.4
     # via
     #   playwright
     #   sqlalchemy
+hmmlearn==0.3.3
+    # via -r requirements.txt
 idna==3.18
-    # via yarl
+    # via
+    #   ccxt
+    #   requests
+    #   yarl
 iniconfig==2.3.0
     # via pytest
+joblib==1.5.3
+    # via scikit-learn
 kiwisolver==1.5.0
     # via matplotlib
 lxml==6.1.1
@@ -66,21 +103,28 @@ matplotlib==3.11.1
 multidict==6.7.1
     # via
     #   aiohttp
+    #   ccxt
     #   yarl
+narwhals==2.24.0
+    # via scikit-learn
 numpy==2.5.1
     # via
     #   -r requirements.txt
     #   arch
     #   contourpy
+    #   hmmlearn
     #   matplotlib
     #   optuna
     #   pandas
     #   patsy
+    #   scikit-learn
     #   scipy
     #   seaborn
     #   statsmodels
 optuna==4.9.0
     # via -r requirements.txt
+orjson==3.11.9
+    # via ccxt
 packaging==26.2
     # via
     #   arch
@@ -107,9 +151,14 @@ pluggy==1.6.0
 propcache==0.5.2
     # via
     #   aiohttp
+    #   ccxt
     #   yarl
 pyarrow==25.0.0
     # via -r requirements.txt
+pycparser==3.0
+    # via
+    #   ccxt
+    #   cffi
 pydantic==2.13.4
     # via
     #   -r requirements.txt
@@ -150,11 +199,17 @@ pyyaml==6.0.3
     #   optuna
 regex==2026.7.19
     # via dateparser
+requests==2.34.2
+    # via ccxt
 ruff==0.15.22
     # via -r requirements.txt
+scikit-learn==1.9.0
+    # via hmmlearn
 scipy==1.18.0
     # via
     #   arch
+    #   hmmlearn
+    #   scikit-learn
     #   statsmodels
 seaborn==0.13.2
     # via -r requirements.txt
@@ -171,6 +226,8 @@ sqlalchemy==2.0.51
     #   optuna
 statsmodels==0.14.6
     # via arch
+threadpoolctl==3.6.0
+    # via scikit-learn
 tqdm==4.69.0
     # via optuna
 typing-extensions==4.16.0
@@ -179,6 +236,7 @@ typing-extensions==4.16.0
     #   aiosignal
     #   alembic
     #   beautifulsoup4
+    #   ccxt
     #   pydantic
     #   pydantic-core
     #   pyee
@@ -195,5 +253,15 @@ tzdata==2026.3
     #   tzlocal
 tzlocal==5.4.4
     # via dateparser
+urllib3==2.7.0
+    # via
+    #   ccxt
+    #   requests
+winloop==0.6.3
+    # via ccxt
 yarl==1.24.5
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   ccxt
+zlib-ng==1.0.0
+    # via ccxt

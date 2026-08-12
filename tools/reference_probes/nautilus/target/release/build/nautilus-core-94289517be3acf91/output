@@ -1,0 +1,6 @@
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=Cargo.toml
+cargo:rerun-if-changed=../Cargo.toml
+cargo:rerun-if-changed=../../python/pyproject.toml
+cargo:rustc-env=NAUTILUS_VERSION=2.0.0rc3
+cargo:rustc-env=NAUTILUS_USER_AGENT=NautilusTrader/2.0.0rc3
