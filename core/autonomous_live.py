@@ -91,6 +91,11 @@ EVENT_STREAMS = (
 )
 
 
+def _platform_name() -> str:
+    # Keep platform selection patchable without mutating Python's global os module.
+    return os.name
+
+
 class AutonomousLiveLockError(RuntimeError):
     pass
 
@@ -2611,7 +2616,7 @@ class AutonomousLiveSupervisor:
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:
             return False
-        if os.name == "nt":
+        if _platform_name() == "nt":
             process_query_limited_information = 0x1000
             handle = ctypes.windll.kernel32.OpenProcess(
                 process_query_limited_information,

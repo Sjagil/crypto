@@ -229,6 +229,7 @@ def _managed_inventory_quantities(output_dir: Path) -> dict[str, Decimal]:
     state_paths = (
         output_dir / "live" / "event_driven_execution_state.json",
         output_dir / "live" / "generated_strategy_live_state.json",
+        output_dir / "live" / "swing_layer_live_state.json",
     )
     for path in state_paths:
         if not path.is_file():
@@ -449,10 +450,10 @@ async def live_account_health(
                 reconciliation = asdict(reconciled)
                 if not reconciled.healthy:
                     failures.append("RECONCILIATION_MISMATCH")
-        except ExecutionBlocked:
-            failures.append("PRIVATE_ACCOUNT_READ_BLOCKED")
         except ReconciliationRequired:
             failures.append("PRIVATE_ACCOUNT_RESPONSE_AMBIGUOUS")
+        except ExecutionBlocked:
+            failures.append("PRIVATE_ACCOUNT_READ_BLOCKED")
         except (aiohttp.ClientError, TimeoutError):
             failures.append("PRIVATE_ACCOUNT_NETWORK_ERROR")
 

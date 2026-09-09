@@ -855,10 +855,14 @@ def test_autonomous_live_windows_pid_check_rejects_exited_process_handle(
             self.closed.append(handle)
 
     kernel32 = _Kernel32()
-    monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(
-        "core.autonomous_live.ctypes.windll",
+        "core.autonomous_live._platform_name", lambda: "nt"
+    )
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
         SimpleNamespace(kernel32=kernel32),
+        raising=False,
     )
 
     supervisor = AutonomousLiveSupervisor(isolated_settings)

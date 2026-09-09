@@ -34,6 +34,7 @@ from core.contracts import (
     utc_now,
 )
 from portfolio.targets import CanonicalExecutionChain, validate_order_against_chain
+from execution.bitvavo_private_errors import classify_bitvavo_private_error
 from utils.common import append_jsonl, atomic_write_json, stable_hash
 
 BITVAVO_BASE_URL = "https://api.bitvavo.com/v2"
@@ -1452,8 +1453,30 @@ class BitvavoSpotClient:
                             "Bitvavo private read temporarily unavailable"
                         )
                     if response.status >= 400:
+                        try:
+                            rejection = await response.json(content_type=None)
+                        except (aiohttp.ClientError, ValueError):
+                            rejection = {}
+                        classified = classify_bitvavo_private_error(
+                            response.status,
+                            rejection if isinstance(rejection, Mapping) else {},
+                        )
+                        self.ledger.append(
+                            "PRIVATE_READ_REJECTED",
+                            {"path": path, **classified},
+                        )
+                        reason = json.dumps(
+                            classified,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        if classified["definitive"]:
+                            raise ExecutionBlocked(
+                                "Bitvavo private read definitively rejected: "
+                                + reason
+                            )
                         raise ReconciliationRequired(
-                            "Bitvavo private read rejected; retry after health recovery"
+                            "Bitvavo private read ambiguous: " + reason
                         )
                     return await response.json(content_type=None)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:

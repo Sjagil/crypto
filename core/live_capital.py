@@ -264,6 +264,47 @@ def _ledger_pending_buy_reservations(
     return reservations, failures
 
 
+def _canonical_swing_layer_positions(settings: Settings) -> list[dict[str, Any]]:
+    # Recover swing exposure from canonical ledger after a crash window.
+    path = settings.paths.checkpoints_dir / "live_execution.jsonl"
+    if not path.is_file():
+        return []
+    events = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                events.append(json.loads(line))
+        from execution.canonical_state import replay_execution_events
+        state = replay_execution_events(events)
+    except Exception:
+        return []
+    rows = []
+    for market, position in state.positions.items():
+        if (
+            position.quantity <= 0
+            or not str(position.strategy_id or "").startswith("SWING_LAYER_")
+        ):
+            continue
+        rows.append(
+            {
+                "source": "SWING_LAYER_CANONICAL_RECOVERY",
+                "identity": stable_hash(
+                    [market, position.strategy_id, position.signal_id],
+                    length=24,
+                ),
+                "market": market,
+                "status": "OPEN_RECOVERED",
+                "client_order_public_id": None,
+                "signal_id": position.signal_id,
+                "exposure_class": "CURRENT_POSITION",
+                "notional_eur": str(
+                    position.quantity * position.average_entry_price
+                ),
+            }
+        )
+    return rows
+
+
 def managed_live_portfolio(settings: Settings) -> dict[str, Any]:
     """Return shared actual and potential exposure across both live engines.
 
@@ -278,6 +319,9 @@ def managed_live_portfolio(settings: Settings) -> dict[str, Any]:
         ),
         "EVENT_PLAYBOOK": (
             settings.paths.output_dir / "live" / "event_driven_execution_state.json"
+        ),
+        "SWING_LAYER": (
+            settings.paths.output_dir / "live" / "swing_layer_live_state.json"
         ),
     }
     rows: list[dict[str, Any]] = []
@@ -314,6 +358,15 @@ def managed_live_portfolio(settings: Settings) -> dict[str, Any]:
                     "notional_eur": str(_notional(row)),
                 }
             )
+    represented_swing_markets = {
+        str(row.get("market") or "")
+        for row in rows
+        if row.get("source") == "SWING_LAYER"
+    }
+    for recovered in _canonical_swing_layer_positions(settings):
+        if recovered["market"] not in represented_swing_markets:
+            rows.append(recovered)
+
     rr_path = settings.paths.output_dir / "reports" / "current_position.json"
     rr_state = dict(read_json(rr_path)) if rr_path.is_file() else {}
     rr_position = dict(rr_state.get("position") or {})

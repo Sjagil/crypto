@@ -67,6 +67,11 @@ LOGGER = logging.getLogger("crypto.data_loader")
 BITVAVO_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
 
+def _is_windows() -> bool:
+    """Return platform state without letting tests mutate global os.name."""
+    return os.name == "nt"
+
+
 def _bitvavo_week_boundary_ms(value_ms: int) -> int:
     """Floor to Bitvavo's Monday 00:00 Europe/Amsterdam request boundary."""
     instant = datetime.fromtimestamp(max(0, value_ms) / 1_000, tz=UTC)
@@ -4828,7 +4833,7 @@ class ContinuousDataService:
     def _process_alive(process_id: int) -> bool:
         if process_id <= 0:
             return False
-        if os.name == "nt":
+        if _is_windows():
             process_query_limited_information = 0x1000
             handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
                 process_query_limited_information,

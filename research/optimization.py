@@ -248,26 +248,53 @@ def _run_candidates(
 ) -> OptimizationResult:
     resumed = _load_checkpoint(checkpoint_path)
     trials: dict[str, SearchTrial] = dict(resumed)
+
     for candidate in candidates:
-        trial_id = _candidate_id(strategy, strategy.parameters(candidate))
+        raw_trial_id = stable_hash(
+            {"strategy_id": strategy.strategy_id, "parameters": candidate},
+            length=24,
+        )
+        try:
+            selected = strategy.parameters(candidate)
+        except ValueError as exc:
+            if raw_trial_id not in trials:
+                failed = SearchTrial(
+                    trial_id=raw_trial_id,
+                    parameters=dict(candidate),
+                    status="FAILED",
+                    score=None,
+                    metrics={},
+                    error_code=type(exc).__name__,
+                )
+                trials[raw_trial_id] = failed
+                if checkpoint_path is not None:
+                    append_jsonl(checkpoint_path, asdict(failed))
+            continue
+
+        trial_id = _candidate_id(strategy, selected)
         if trial_id in trials:
             continue
+
         trial = _evaluate_candidate(
             data_by_market,
             strategy,
             config,
-            candidate,
+            selected,
             settings=settings,
             minimum_trades=minimum_trades,
         )
         trials[trial.trial_id] = trial
         if checkpoint_path is not None:
             append_jsonl(checkpoint_path, asdict(trial))
+
     successful = [
-        trial for trial in trials.values() if trial.status == "COMPLETE" and trial.score is not None
+        trial
+        for trial in trials.values()
+        if trial.status == "COMPLETE" and trial.score is not None
     ]
     if not successful:
         raise RuntimeError("no optimization trial completed successfully")
+
     best = max(successful, key=lambda trial: (float(trial.score), trial.trial_id))
     return OptimizationResult(
         method=method,
@@ -277,6 +304,7 @@ def _run_candidates(
         trials=tuple(sorted(trials.values(), key=lambda trial: trial.trial_id)),
         resumed_trials=len(resumed),
     )
+
 
 
 def grid_search(
@@ -324,19 +352,34 @@ def random_search(
 ) -> OptimizationResult:
     if trials < 1:
         raise ValueError("trials must be positive")
+
     randomizer = random.Random(seed)
     names = sorted(strategy.parameter_space)
-    seen: set[str] = set()
-    candidates: list[dict[str, Any]] = []
     maximum_unique = (
-        math.prod(len(strategy.parameter_space[name]) for name in names) if names else 1
+        math.prod(len(strategy.parameter_space[name]) for name in names)
+        if names
+        else 1
     )
-    while len(candidates) < min(trials, maximum_unique):
-        candidate = {name: randomizer.choice(strategy.parameter_space[name]) for name in names}
+    target = min(trials, maximum_unique)
+
+    baseline = strategy.parameters()
+    candidates: list[dict[str, Any]] = [dict(baseline)]
+    seen: set[str] = {stable_hash(baseline)}
+
+    attempts = 0
+    maximum_attempts = max(100, target * 100)
+    while len(candidates) < target and attempts < maximum_attempts:
+        attempts += 1
+        candidate = {
+            name: randomizer.choice(strategy.parameter_space[name])
+            for name in names
+        }
         key = stable_hash(candidate)
-        if key not in seen:
-            seen.add(key)
-            candidates.append(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+
     return _run_candidates(
         candidates,
         method="random",
@@ -347,6 +390,7 @@ def random_search(
         minimum_trades=minimum_trades,
         checkpoint_path=checkpoint_path,
     )
+
 
 
 def coordinate_search(

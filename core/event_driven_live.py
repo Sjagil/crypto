@@ -22,6 +22,10 @@ from core.contracts import (
     ReconciliationRequired,
     ResearchStatus,
 )
+from core.active_portfolio_live_bridge import (
+    active_entry_budget_eur,
+    active_exit_quantity,
+)
 from core.economics import CanonicalCostModel
 from core.event_driven_playbooks import PLAYBOOKS
 from core.inventory_risk_override import evaluate_inventory_risk_override
@@ -1322,6 +1326,31 @@ def _protective_stop_intent(
     )
 
 
+
+def _tp1_partial_quantity(
+    *,
+    quantity: Decimal,
+    best_bid: Decimal,
+    breakeven_stop: Decimal,
+    rules: Any,
+    fraction: Decimal = Decimal("0.50"),
+) -> Decimal:
+    """Return a venue-valid TP1 partial while leaving a protected runner."""
+
+    desired = rules.amount(quantity * fraction)
+    remaining = quantity - desired
+    if desired <= 0 or remaining <= 0:
+        return Decimal("0")
+    if desired * best_bid < rules.minimum_order_value_eur:
+        return Decimal("0")
+    if not quantity_is_protectable_at_stop(
+        quantity=remaining,
+        stop_price=breakeven_stop,
+        rules=rules,
+    ):
+        return Decimal("0")
+    return desired
+
 def _supports_order_type(
     supported_order_types: Iterable[str],
     expected: str,
@@ -1912,11 +1941,36 @@ async def execute_event_driven_live_once(
                 and price <= entry_price
                 and (structure_no_longer_supported or bool(microstructure_exit))
             )
+            (
+                planned_active_exit_quantity,
+                planned_active_exit_action,
+                _,
+            ) = active_exit_quantity(
+                settings,
+                market,
+                current_quantity=quantity,
+                mark_price=price,
+            )
+            planned_exit_quantity_override = (
+                planned_active_exit_quantity
+                if planned_active_exit_quantity > 0
+                else None
+            )
             reason: str | None = None
             if price <= stop:
                 reason = "HARD_STOP"
             elif price >= tp2:
                 reason = "TAKE_PROFIT_2"
+            elif (
+                planned_active_exit_action == "FULL_EXIT"
+                and planned_exit_quantity_override is not None
+            ):
+                reason = "ACTIVE_PORTFOLIO_FULL_EXIT"
+            elif (
+                planned_active_exit_action == "REDUCE"
+                and planned_exit_quantity_override is not None
+            ):
+                reason = "ACTIVE_PORTFOLIO_REDUCE"
             elif time_exit_confirmed:
                 reason = "TIME_AND_STRUCTURE_EXIT"
             elif _soft_exit_confirmed(
@@ -1942,11 +1996,220 @@ async def execute_event_driven_live_once(
                 )
                 continue
             elif price >= tp1 and not position.get("tp1_reached"):
-                # A bounded canary exit must not assume that half the original
-                # notional remains above Bitvavo's €5 venue minimum after
-                # fees, price movement and quantity rounding.  Preserve the
-                # runner and make risk-free instead.
-                tightened_stop = Decimal(str(position["entry_price"]))
+                try:
+                    rules = await client.execution_market_rules(market)
+                except ExecutionBlocked:
+                    state.update(
+                        {
+                            "status": "EXECUTION_RULES_BLOCKED",
+                            "reason_code": "TP1_MARKET_RULES_TEMPORARILY_UNAVAILABLE",
+                            "positions": positions,
+                        }
+                    )
+                    _save(settings, state)
+                    return state
+                original_stop = Decimal(str(position["stop_loss"]))
+                tightened_stop = rules.price(
+                    Decimal(str(position["entry_price"]))
+                )
+                tp1_quantity = _tp1_partial_quantity(
+                    quantity=quantity,
+                    best_bid=best_bid,
+                    breakeven_stop=tightened_stop,
+                    rules=rules,
+                )
+                if tp1_quantity > 0:
+                    if protective_client_id:
+                        protective = await client.get_order(
+                            market=market,
+                            client_order_id=protective_client_id,
+                        )
+                        protective_status = str(
+                            protective.get("status") or ""
+                        ).replace("_", "").replace("-", "").casefold()
+                        if protective_status == "filled":
+                            client.record_final_fill(
+                                protective,
+                                fallback_market=market,
+                                fallback_side=OrderSide.SELL,
+                                fallback_quantity=quantity,
+                                fallback_price=original_stop,
+                            )
+                            positions.pop(identity, None)
+                            state["fills_verified_this_cycle"] += 1
+                            state["fills_verified"] = int(
+                                state.get("fills_verified") or 0
+                            ) + 1
+                            state["status"] = "POSITION_CLOSED"
+                            state["reason_code"] = "NATIVE_PROTECTIVE_STOP_FILLED"
+                            state["positions"] = positions
+                            _save(settings, state)
+                            return state
+                        if protective_status in {
+                            "new",
+                            "awaitingtrigger",
+                            "partiallyfilled",
+                        }:
+                            await client.cancel_order(
+                                market=market,
+                                order_id=str(protective["orderId"]),
+                                capability=capability,
+                            )
+                    balances = await client.balances()
+                    owned = _balance(
+                        balances,
+                        market.split("-")[0],
+                        include_in_order=True,
+                    )
+                    sell_quantity = rules.amount(min(tp1_quantity, owned))
+                    if (
+                        sell_quantity <= 0
+                        or sell_quantity * best_bid
+                        < rules.minimum_order_value_eur
+                    ):
+                        position.update(
+                            await _replace_native_protective_stop(
+                                client,
+                                capability=capability,
+                                position=position,
+                                quantity=quantity,
+                                trigger_price=original_stop,
+                                estimated_price=price,
+                            )
+                        )
+                        positions[identity] = position
+                        state["events"].append(
+                            {
+                                "event": "TP1_PARTIAL_BELOW_VENUE_MINIMUM_STOP_RESTORED",
+                                "opportunity_id": identity,
+                                "market": market,
+                            }
+                        )
+                        continue
+                    tp1_exit_price = rules.price(best_bid * Decimal("0.999"))
+                    try:
+                        tp1_order = await client.submit_order(
+                            _exit_intent(
+                                position,
+                                quantity=sell_quantity,
+                                limit_price=tp1_exit_price,
+                                reason="TAKE_PROFIT_1",
+                            ),
+                            capability=capability,
+                            estimated_price=price,
+                            reconciled_owned_quantity=owned,
+                            exchange_minimum_order_eur=(
+                                rules.minimum_order_value_eur
+                            ),
+                        )
+                    except ExecutionBlocked as exc:
+                        position.update(
+                            await _replace_native_protective_stop(
+                                client,
+                                capability=capability,
+                                position=position,
+                                quantity=quantity,
+                                trigger_price=original_stop,
+                                estimated_price=price,
+                            )
+                        )
+                        positions[identity] = position
+                        return _blocked_cycle(
+                            settings,
+                            state,
+                            exc,
+                            phase="TP1_EXIT",
+                            positions=positions,
+                        )
+                    state["orders_generated_this_cycle"] += 1
+                    state["orders_submitted_this_cycle"] += 1
+                    state["orders_generated"] = int(
+                        state.get("orders_generated") or 0
+                    ) + 1
+                    state["orders_submitted"] = int(
+                        state.get("orders_submitted") or 0
+                    ) + 1
+                    filled = Decimal(str(tp1_order.get("filledAmount") or "0"))
+                    if (
+                        str(tp1_order.get("status") or "").casefold() == "filled"
+                        or filled > 0
+                    ):
+                        executed = filled if filled > 0 else sell_quantity
+                        remaining = max(Decimal("0"), quantity - executed)
+                        state["fills_verified_this_cycle"] += 1
+                        state["fills_verified"] = int(
+                            state.get("fills_verified") or 0
+                        ) + 1
+                        if remaining <= 0:
+                            positions.pop(identity, None)
+                            state["status"] = "POSITION_CLOSED"
+                            state["reason_code"] = "TAKE_PROFIT_1"
+                            state["positions"] = positions
+                            state["events"].append(
+                                {
+                                    "event": "LIVE_TAKE_PROFIT_1_FILLED",
+                                    "opportunity_id": identity,
+                                    "market": market,
+                                    "quantity": str(executed),
+                                    "remaining_quantity": "0",
+                                }
+                            )
+                            _save(settings, state)
+                            return state
+                        position["quantity"] = str(remaining)
+                        position["tp1_reached"] = True
+                        position["stop_loss"] = str(tightened_stop)
+                        position.update(
+                            await _replace_native_protective_stop(
+                                client,
+                                capability=capability,
+                                position=position,
+                                quantity=remaining,
+                                trigger_price=tightened_stop,
+                                estimated_price=price,
+                            )
+                        )
+                        positions[identity] = position
+                        state["status"] = "POSITION_REDUCED"
+                        state["reason_code"] = "TAKE_PROFIT_1"
+                        state["positions"] = positions
+                        state["events"].append(
+                            {
+                                "event": "LIVE_TAKE_PROFIT_1_FILLED",
+                                "opportunity_id": identity,
+                                "market": market,
+                                "quantity": str(executed),
+                                "remaining_quantity": str(remaining),
+                                "native_stop_moved_to_breakeven": True,
+                            }
+                        )
+                        _save(settings, state)
+                        return state
+                    position.update(
+                        await _replace_native_protective_stop(
+                            client,
+                            capability=capability,
+                            position=position,
+                            quantity=quantity,
+                            trigger_price=original_stop,
+                            estimated_price=price,
+                        )
+                    )
+                    position["exit_attempt"] = int(
+                        position.get("exit_attempt") or 0
+                    ) + 1
+                    positions[identity] = position
+                    state["events"].append(
+                        {
+                            "event": "TP1_IOC_NO_FILL_STOP_RESTORED",
+                            "opportunity_id": identity,
+                            "market": market,
+                        }
+                    )
+                    continue
+
+                # If half cannot be sold while leaving a venue-protectable
+                # runner, retain all units and move the native stop to entry.
                 position.update(
                     await _replace_native_protective_stop(
                         client,
@@ -2022,6 +2285,34 @@ async def execute_event_driven_live_once(
             exit_price = rules.price(
                 best_bid * Decimal("0.999")
             )
+            planned_sell_quantity = quantity
+            if (
+                planned_exit_quantity_override is not None
+                and reason
+                in {"ACTIVE_PORTFOLIO_REDUCE", "ACTIVE_PORTFOLIO_FULL_EXIT"}
+            ):
+                planned_sell_quantity = rules.amount(
+                    min(quantity, planned_exit_quantity_override)
+                )
+                if (
+                    planned_sell_quantity <= 0
+                    or planned_sell_quantity * exit_price
+                    < rules.minimum_order_value_eur
+                ):
+                    state["events"].append(
+                        {
+                            "event": (
+                                "ACTIVE_PORTFOLIO_PARTIAL_EXIT_BELOW_VENUE_MINIMUM"
+                            ),
+                            "opportunity_id": identity,
+                            "market": market,
+                            "reason": reason,
+                            "requested_quantity": str(
+                                planned_exit_quantity_override
+                            ),
+                        }
+                    )
+                    continue
             if protective_client_id:
                 protective = await client.get_order(
                     market=market,
@@ -2069,7 +2360,9 @@ async def execute_event_driven_live_once(
                 market.split("-")[0],
                 include_in_order=True,
             )
-            sell_quantity = min(quantity, owned)
+            sell_quantity = rules.amount(
+                min(planned_sell_quantity, owned)
+            )
             if sell_quantity <= 0:
                 state.update(
                     {
@@ -2094,6 +2387,26 @@ async def execute_event_driven_live_once(
                     exchange_minimum_order_eur=rules.minimum_order_value_eur,
                 )
             except ExecutionBlocked as exc:
+                if protective_client_id:
+                    position.update(
+                        await _replace_native_protective_stop(
+                            client,
+                            capability=capability,
+                            position=position,
+                            quantity=quantity,
+                            trigger_price=Decimal(
+                                str(position["stop_loss"])
+                            ),
+                            estimated_price=price,
+                        )
+                    )
+                    position["reprotection_reason"] = (
+                        "EXIT_BLOCKED_NATIVE_STOP_RESTORED"
+                    )
+                position["exit_attempt"] = int(
+                    position.get("exit_attempt") or 0
+                ) + 1
+                positions[identity] = position
                 return _blocked_cycle(
                     settings,
                     state,
@@ -2132,6 +2445,26 @@ async def execute_event_driven_live_once(
                     position["exit_attempt"] = int(
                         position.get("exit_attempt") or 0
                     ) + 1
+                    if protective_client_id:
+                        position.update(
+                            await _replace_native_protective_stop(
+                                client,
+                                capability=capability,
+                                position=position,
+                                quantity=remaining,
+                                trigger_price=Decimal(
+                                    str(position["stop_loss"])
+                                ),
+                                estimated_price=price,
+                            )
+                        )
+                        position["reprotection_reason"] = (
+                            "REARM_NATIVE_STOP_AFTER_PARTIAL_EXIT"
+                        )
+                    else:
+                        position["reprotection_reason"] = (
+                            "LEGACY_POSITION_WITHOUT_NATIVE_STOP"
+                        )
                     positions[identity] = position
                     event_name = "LIVE_POSITION_REDUCED"
                     cycle_status = "POSITION_REDUCED"
@@ -2171,6 +2504,26 @@ async def execute_event_driven_live_once(
                 state["reason_code"] = reason
                 _save(settings, state)
                 return state
+            if protective_client_id:
+                position.update(
+                    await _replace_native_protective_stop(
+                        client,
+                        capability=capability,
+                        position=position,
+                        quantity=quantity,
+                        trigger_price=Decimal(
+                            str(position["stop_loss"])
+                        ),
+                        estimated_price=price,
+                    )
+                )
+                position["reprotection_reason"] = (
+                    "EXIT_IOC_NO_FILL_NATIVE_STOP_RESTORED"
+                )
+            position["exit_attempt"] = int(
+                position.get("exit_attempt") or 0
+            ) + 1
+            positions[identity] = position
             state.update(
                 {
                     "status": "EXIT_NOT_FILLED",
@@ -2293,6 +2646,43 @@ async def execute_event_driven_live_once(
         entry_notional_eur = (
             MAXIMUM_ORDER_EUR * playbook_risk_multiplier
         )
+        (
+            active_portfolio_budget_eur,
+            active_portfolio_budget_reason,
+            active_portfolio_plan,
+        ) = active_entry_budget_eur(
+            settings,
+            market,
+            default_budget_eur=entry_notional_eur,
+        )
+        selected["active_portfolio_budget_eur"] = str(
+            active_portfolio_budget_eur
+        )
+        selected["active_portfolio_budget_reason"] = (
+            active_portfolio_budget_reason
+        )
+        if active_portfolio_budget_eur <= 0:
+            state.update(
+                {
+                    "status": "READY",
+                    "reason_code": active_portfolio_budget_reason,
+                    "positions": positions,
+                    "active_portfolio_plan": {
+                        "status": active_portfolio_plan.get("status"),
+                        "reason": active_portfolio_plan.get("reason"),
+                        "generated_at": active_portfolio_plan.get(
+                            "generated_at"
+                        ),
+                    },
+                    "protective_exits_allowed": True,
+                }
+            )
+            _save(settings, state)
+            return state
+        entry_notional_eur = min(
+            entry_notional_eur,
+            active_portfolio_budget_eur,
+        )
         realtime = prices.get(market) or {}
         book = dict(realtime.get("book") or {})
         public_price = Decimal(str(realtime.get("price") or "0"))
@@ -2369,10 +2759,36 @@ async def execute_event_driven_live_once(
                 phase="ENTRY",
                 positions=positions,
             )
-        entry_notional_eur = max(
-            entry_notional_eur,
+        safe_entry_floor_eur = max(
             safe_minimum_order_eur,
             protectable_minimum_order_eur,
+        )
+        if safe_entry_floor_eur > active_portfolio_budget_eur:
+            budget_reason_code = (
+                "ACTIVE_PORTFOLIO_BUDGET_BELOW_SAFE_VENUE_MINIMUM"
+                if active_portfolio_budget_reason
+                == "ACTIVE_PORTFOLIO_ENTRY_BUDGET_APPLIED"
+                else "SAFE_VENUE_MINIMUM_EXCEEDS_LIVE_CAP"
+            )
+            state.update(
+                {
+                    "status": "ENTRY_BLOCKED",
+                    "reason_code": budget_reason_code,
+                    "protectable_minimum_order_eur": str(
+                        protectable_minimum_order_eur
+                    ),
+                    "positions": positions,
+                    "active_portfolio_budget_eur": str(
+                        active_portfolio_budget_eur
+                    ),
+                    "safe_entry_floor_eur": str(safe_entry_floor_eur),
+                }
+            )
+            _save(settings, state)
+            return state
+        entry_notional_eur = max(
+            entry_notional_eur,
+            safe_entry_floor_eur,
         )
         if entry_notional_eur > MAXIMUM_ORDER_EUR:
             state.update(

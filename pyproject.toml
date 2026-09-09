@@ -8,6 +8,7 @@ requires-python = ">=3.11,<3.13"
 addopts = "-ra -m 'not network'"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+norecursedirs = [".git", ".venv", ".round*_backups", "crypto-references", "reference_repos"]
 markers = [
   "network: opt-in tests that access public network services",
 ]

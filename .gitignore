@@ -104,3 +104,12 @@ desktop.ini
 tmp/
 temp/
 *.tmp
+.round*_backups/
+
+# Local concept/reference checkouts; exact pins are verified by reporting/reference_integration_phase_a.py
+/crypto-references/
+
+# Generated Rust/Nautilus build output
+/tools/reference_probes/nautilus/target/
+/config/live_swing_layer_authority.json
+/config/reference_local_checkouts.json

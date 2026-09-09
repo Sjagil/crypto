@@ -17,7 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from config.settings import Settings
+from config.settings import Settings, normalize_timeframe
 from execution.canonical_state import (
     assert_replay_deterministic,
     replay_execution_events,
@@ -1230,8 +1230,12 @@ def _data_report(settings: Settings) -> dict[str, Any]:
         if "_" not in stem:
             continue
         market, timeframe = stem.rsplit("_", 1)
+        try:
+            normalized_timeframe = normalize_timeframe(timeframe)
+        except ValueError:
+            continue
         markets.add(market)
-        timeframes[timeframe] += 1
+        timeframes[normalized_timeframe] += 1
     sync = _json_mapping(
         settings.paths.output_dir / "research" / "data_sync_progress.json"
     )

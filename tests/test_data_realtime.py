@@ -61,10 +61,11 @@ def test_continuous_service_windows_pid_check_rejects_exited_handle(
             self.closed.append(handle)
 
     kernel32 = _Kernel32()
-    monkeypatch.setattr("data.data_loader.os.name", "nt")
+    monkeypatch.setattr("data.data_loader._is_windows", lambda: True)
     monkeypatch.setattr(
         "data.data_loader.ctypes.windll",
         SimpleNamespace(kernel32=kernel32),
+        raising=False,
     )
 
     assert ContinuousDataService._process_alive(25712) is False
@@ -208,7 +209,18 @@ def test_raw_batches_are_content_addressed_across_retrieval_runs(
 
 def test_storage_estimate_accounts_for_all_compressed_projections(
     isolated_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Validate estimator arithmetic independently of the host Mac's current
+    # free-space state. Production continues to use real shutil.disk_usage.
+    monkeypatch.setattr(
+        "data.data_loader.shutil.disk_usage",
+        lambda _: SimpleNamespace(
+            total=500 * 1024**3,
+            used=100 * 1024**3,
+            free=400 * 1024**3,
+        ),
+    )
     loader = DataLoader(isolated_settings)
     estimate = loader.estimate_fetch(
         providers=("bitvavo", "kraken", "mexc"),

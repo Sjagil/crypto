@@ -197,26 +197,20 @@ class BitvavoProvider:
         )
         interval_ms = int(timeframe_delta(timeframe).total_seconds() * 1_000)
         start_ms = int(start.timestamp() * 1_000) // interval_ms * interval_ms
-        cursor_end = int(end.timestamp() * 1_000) // interval_ms * interval_ms
+        requested_end_ms = int(end.timestamp() * 1_000)
+        cursor_end = requested_end_ms // interval_ms * interval_ms
         if timeframe == "1W":
             start_ms = _bitvavo_week_boundary_ms(start_ms)
-            cursor_boundary = _bitvavo_week_boundary_ms(cursor_end)
-            cursor_end = cursor_boundary - interval_ms
+            cursor_end = _bitvavo_week_boundary_ms(requested_end_ms)
         rows: list[list[Any]] = []
         seen: set[int] = set()
-        while cursor_end >= start_ms:
-            query_end = (
-                cursor_end
-                if cursor_end > start_ms
-                else start_ms + interval_ms - 1
-            )
+        while cursor_end > start_ms:
             payload = await self.client.get_json(
                 f"{BITVAVO_BASE_URL}/{quote(normalized)}/candles",
                 params={
                     "interval": provider_interval,
                     "limit": 1_440,
-                    "start": start_ms,
-                    "end": query_end,
+                    "end": cursor_end,
                 },
                 headers={"Accept": "application/json", "User-Agent": "crypto-spot-research/1"},
             )
@@ -227,13 +221,13 @@ class BitvavoProvider:
                 raise DataValidationError("Bitvavo returned an invalid candle payload")
             for row in valid:
                 timestamp = int(row[0])
-                if timestamp not in seen:
+                if start_ms <= timestamp < cursor_end and timestamp not in seen:
                     rows.append(row[:6])
                     seen.add(timestamp)
             oldest = min(int(row[0]) for row in valid)
             if oldest <= start_ms:
                 break
-            next_end = oldest - interval_ms
+            next_end = oldest
             if next_end >= cursor_end:
                 raise DataValidationError("Bitvavo candle pagination did not advance")
             cursor_end = next_end
@@ -270,7 +264,7 @@ class KrakenProvider:
         payload = await self.client.get_json(
             f"{KRAKEN_BASE_URL}/OHLC",
             params={
-                "pair": f"{pair_base}/{quote_currency}",
+                "pair": f"{pair_base}{quote_currency}",
                 "interval": interval,
                 "since": int(start.timestamp()),
                 "assetVersion": 1,
@@ -376,6 +370,19 @@ def merge_candles(existing: pd.DataFrame | None, downloaded: pd.DataFrame) -> pd
     return combined
 
 
+
+def _is_historical_prefix_absence(exc: DataValidationError) -> bool:
+    """Return true only when a historical prefix predates provider history."""
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "returned no candles",
+            "returned no usable candles",
+            "must be a non-empty dataframe",
+        )
+    )
+
 class CanonicalDownloader:
     def __init__(
         self,
@@ -412,29 +419,39 @@ class CanonicalDownloader:
             existing = load_ohlcv(target, market=normalized, validate=True)
             resumed = True
         interval = timeframe_delta(timeframe)
-        missing_ranges: list[tuple[datetime, datetime]] = []
+        missing_ranges: list[tuple[str, datetime, datetime]] = []
         if existing is None or existing.empty:
-            missing_ranges.append((start, end))
+            missing_ranges.append(("FULL", start, end))
         else:
             existing_start = existing.index[0].to_pydatetime()
             existing_end = existing.index[-1].to_pydatetime()
             # Include one overlap candle at each boundary. merge_candles
             # reconciles that overlap and fails closed on provider drift.
             if start < existing_start:
-                missing_ranges.append((start, min(end, existing_start)))
+                missing_ranges.append(("PREFIX", start, min(end, existing_start)))
             if end > existing_end + interval:
-                missing_ranges.append((max(start, existing_end), end))
+                missing_ranges.append(("SUFFIX", max(start, existing_end), end))
 
         combined = existing
-        for range_start, range_end in missing_ranges:
+        for range_kind, range_start, range_end in missing_ranges:
             if range_start >= range_end:
                 continue
-            downloaded = await provider.fetch_candles(
-                normalized,
-                timeframe,
-                start=range_start,
-                end=range_end,
-            )
+            try:
+                downloaded = await provider.fetch_candles(
+                    normalized,
+                    timeframe,
+                    start=range_start,
+                    end=range_end,
+                )
+            except DataValidationError as exc:
+                if (
+                    range_kind == "PREFIX"
+                    and combined is not None
+                    and not combined.empty
+                    and _is_historical_prefix_absence(exc)
+                ):
+                    continue
+                raise
             downloaded.attrs["provider"] = provider.name
             downloaded.attrs["exchange"] = provider.name
             downloaded = drop_open_candles(
@@ -457,12 +474,57 @@ class CanonicalDownloader:
             target,
             market=normalized,
             timeframe=timeframe,
-            maximum_staleness=self.settings.market_data.maximum_staleness,
+            maximum_staleness=max(
+                self.settings.market_data.maximum_staleness,
+                timeframe_delta(timeframe) * 2,
+            ),
             now=end,
             provider=provider.name,
             exchange=provider.name,
             requested_start=start,
             requested_end=end,
+        )
+        providers_used = sorted(
+            {
+                str(segment.get("provider"))
+                for segment in manifest.source_segments
+                if isinstance(segment, dict) and segment.get("provider")
+            }
+            or {provider.name}
+        )
+        atomic_write_json(
+            target.with_suffix(f"{target.suffix}.provenance.json"),
+            {
+                "schema_version": "canonical_market_data_provenance_v1",
+                "source_type": "REAL_PROVIDER_DATA",
+                "market": normalized,
+                "timeframe": timeframe,
+                "provider": provider.name,
+                "providers_requested": [provider.name],
+                "providers_used": providers_used,
+                "provider_hashes": {},
+                "exchange": provider.name,
+                "closed_candles_only": True,
+                "retrieved_at": utc_iso(),
+                "data_file": str(target),
+                "data_sha256": manifest.sha256,
+                "dataset_hash": manifest.dataset_hash,
+                "rows": manifest.rows,
+                "start": manifest.start.isoformat(),
+                "end": manifest.end.isoformat(),
+                "requested_start": start.isoformat(),
+                "requested_end": end.isoformat(),
+                "listing_date_if_known": (
+                    manifest.listing_date_if_known.isoformat()
+                    if manifest.listing_date_if_known
+                    else None
+                ),
+                "source_segments": list(manifest.source_segments),
+                "seven_year_eligible": manifest.seven_year_eligible,
+                "history_coverage_ratio": manifest.history_coverage_ratio,
+                "reconciliation_conflicts": [],
+                "reconciliation_conflict_count": 0,
+            },
         )
         return DownloadResult(
             market=normalized,
@@ -526,7 +588,7 @@ class CanonicalDownloader:
                                 resume=resume,
                             )
                         except (ConnectionError, DataValidationError) as exc:
-                            errors.append(f"{name}:{type(exc).__name__}")
+                            errors.append(f"{name}:{type(exc).__name__}:{exc}")
                     raise ConnectionError(
                         f"all public candle providers failed for "
                         f"{normalize_market(market)} {timeframe}: {errors}"

@@ -6718,46 +6718,49 @@ class LabRunner:
             try:
                 block_id, parameter_name = key.split(".", 1)
             except ValueError as exc:
-                raise ValueError(f"parameter override requires BLOCK.PARAMETER: {key}") from exc
+                raise ValueError(
+                    f"parameter override requires BLOCK.PARAMETER: {key}"
+                ) from exc
             if block_id in combination.block_ids:
                 relevant.append((block_id, parameter_name, tuple(values)))
+
         if not relevant:
-            generated_sensitivity: list[
-                tuple[str | None, dict[str, Any]]
-            ] = [
+            generated: list[tuple[str | None, dict[str, Any]]] = [
                 (
                     None,
                     {
-                        **base,
-                        "__strategy__": {
-                            "exit__profile": (
-                                ExitProfile.FIXED_R.value
-                            ),
+                        **{
+                            block_id: dict(parameters)
+                            for block_id, parameters in base.items()
                         },
+                        "__strategy__": {"exit__profile": ExitProfile.FIXED_R.value},
                     },
                 )
             ]
             for profile in ExitProfile:
                 if profile is ExitProfile.FIXED_R:
                     continue
-                generated_sensitivity.append(
+                generated.append(
                     (
                         "CLI_OVERRIDE",
                         {
                             **{
-                                selected_block: dict(parameters)
-                                for selected_block, parameters in base.items()
+                                block_id: dict(parameters)
+                                for block_id, parameters in base.items()
                             },
-                            "__strategy__": {
-                                "exit__profile": profile.value,
-                            },
+                            "__strategy__": {"exit__profile": profile.value},
                         },
                     )
                 )
             for block_id in combination.block_ids:
-                for spec in self.registry[block_id].parameter_specs:
+                block = self.registry[block_id]
+                for spec in block.parameter_specs:
                     non_default = next(
-                        (value for value in spec.values() if value != spec.validate(spec.default)),
+                        (
+                            value
+                            for value in spec.values()
+                            if value != spec.validate(spec.default)
+                        ),
                         None,
                     )
                     if non_default is None:
@@ -6767,45 +6770,60 @@ class LabRunner:
                         for selected_block, parameters in base.items()
                     }
                     selected[block_id][spec.name] = non_default
-                    generated_sensitivity.append(
+                    try:
+                        normalized = {
+                            selected_block: self.registry[selected_block].parameters(parameters)
+                            for selected_block, parameters in selected.items()
+                        }
+                    except ValueError:
+                        continue
+                    generated.append(
                         (
                             f"{block_id}__{spec.name}",
-                            {
-                                selected_block: self.registry[selected_block].parameters(parameters)
-                                for selected_block, parameters in selected.items()
-                            }
+                            normalized
                             | {
                                 "__strategy__": {
-                                    "exit__profile": (
-                                        ExitProfile.FIXED_R.value
-                                    ),
+                                    "exit__profile": ExitProfile.FIXED_R.value
                                 }
                             },
                         )
                     )
-            return generated_sensitivity
-        generated: list[dict[str, Any]] = []
+            deduplicated: dict[
+                str, tuple[str | None, dict[str, Any]]
+            ] = {}
+            for label, parameters in generated:
+                deduplicated.setdefault(
+                    parameter_hash(parameters), (label, parameters)
+                )
+            return [deduplicated[key] for key in sorted(deduplicated)]
+
+        generated_overrides: dict[str, dict[str, Any]] = {}
         for values in itertools.product(*(item[2] for item in relevant)):
-            selected = {block_id: dict(parameters) for block_id, parameters in base.items()}
+            selected = {
+                block_id: dict(parameters)
+                for block_id, parameters in base.items()
+            }
             for (block_id, parameter_name, _), value in zip(
-                relevant,
-                values,
-                strict=True,
+                relevant, values, strict=True
             ):
                 selected[block_id][parameter_name] = value
-            generated.append(
-                {
+            try:
+                normalized = {
                     block_id: self.registry[block_id].parameters(parameters)
                     for block_id, parameters in selected.items()
                 }
-                | {
-                    "__strategy__": {
-                        "exit__profile": ExitProfile.FIXED_R.value,
-                    }
-                }
-            )
-        unique = {parameter_hash(parameters): parameters for parameters in generated}
-        return [("CLI_OVERRIDE", unique[key]) for key in sorted(unique)]
+            except ValueError:
+                continue
+            payload = normalized | {
+                "__strategy__": {"exit__profile": ExitProfile.FIXED_R.value}
+            }
+            generated_overrides[parameter_hash(payload)] = payload
+        return [
+            ("CLI_OVERRIDE", generated_overrides[key])
+            for key in sorted(generated_overrides)
+        ]
+
+
 
     def _frames(
         self,

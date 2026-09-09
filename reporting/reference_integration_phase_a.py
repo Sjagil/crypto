@@ -95,7 +95,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="Apache-2.0",
         expected_license_sha256=(
-            "1c752ade7a9db6c100bf9a9f57225b52e138a92d2cd9dfe71c0af09af85366f7"
+            "522cf0a716ce03f67d46f8fceb5bf78c5b84400ec5cd8d14bf9f02cddc1cb6ba"
         ),
         primary_responsibility="strategy intent to portfolio target boundary",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -138,7 +138,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE.md",
         license="Apache-2.0 with Commons Clause",
         expected_license_sha256=(
-            "8543a6018b754731325d61ed366763d5b6800bba1d5ddf56fb464e5ac7a8246e"
+            "a914859a115b70e80956a3cbd613139ad74c04e5d1bd38da8bcc16725822ec84"
         ),
         primary_responsibility="approximate vectorized Stage-0 research screening",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -176,7 +176,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="Apache-2.0 with Commons Clause",
         expected_license_sha256=(
-            "8ef0c743408bcf350e8f9318f9a6447faeeda40d81fb973dfa52cbf6610f7951"
+            "da959ac23cb6eb2636b9389acc0cfec35e7ffa79a0420bb5469a132a2db18650"
         ),
         primary_responsibility="chronological walk-forward validation contract",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -210,7 +210,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="MIT",
         expected_license_sha256=(
-            "9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b"
+            "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
         ),
         primary_responsibility="immutable ML dataset experiment and model lifecycle",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -254,7 +254,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="GPL-3.0",
         expected_license_sha256=(
-            "53927bd0b739d38c87a0a82236fd9b070c2dfff11c0c119be50372005d5047ad"
+            "589ed823e9a84c56feb95ac58e7cf384626b9cbf4fda2a907bc36e103de1bad2"
         ),
         primary_responsibility="crypto ML lifecycle and causal bias controls",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -299,7 +299,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="Apache-2.0",
         expected_license_sha256=(
-            "afae3377fdbd0537635360e91585f3c5b478ffe8eb5308f1ddcb37b76a7325d2"
+            "ef3d97b5113a0f224425680aceb7a9ed3baaa4fd9aa21e8ff445cb963fddcbf5"
         ),
         primary_responsibility="bounded position-management RL environment and baseline contract",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -338,7 +338,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="MIT",
         expected_license_sha256=(
-            "9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b"
+            "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
         ),
         primary_responsibility="preregistered autonomous research hypothesis experiment feedback memory loop",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",
@@ -377,7 +377,7 @@ REFERENCE_ASSIGNMENTS: tuple[ReferenceAssignment, ...] = (
         license_file="LICENSE",
         license="Apache-2.0",
         expected_license_sha256=(
-            "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+            "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         ),
         primary_responsibility="structured multi-perspective market intelligence evidence",
         integration_mode="C_CONCEPT_REFERENCE_ONLY_NATIVE_IMPLEMENTATION",

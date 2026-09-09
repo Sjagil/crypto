@@ -166,6 +166,19 @@ def _dataset_identity(path: Path) -> tuple[str, str]:
     return match.group("market").upper(), normalize_timeframe(match.group("timeframe"))
 
 
+
+
+def _is_canonical_ohlcv_dataset(path: Path) -> bool:
+    """Accept only files whose suffix token is a real candle timeframe."""
+    if path.suffix.casefold() not in {".parquet", ".csv"}:
+        return False
+    try:
+        _market, timeframe = _dataset_identity(path)
+        timeframe_delta(timeframe)
+    except Exception:
+        return False
+    return True
+
 def _load_source_manifest(path: Path) -> tuple[dict[str, Any], Path | None]:
     candidates = (
         path.with_suffix(f"{path.suffix}.manifest.json"),
@@ -1879,6 +1892,7 @@ def build_seven_year_rankings(
     """Reconcile completed runs into explicit evidence and status rankings."""
 
     directory = output_directory or root / "output" / "research" / "seven_year"
+    directory.mkdir(parents=True, exist_ok=True)
     run_paths = sorted((directory / "runs").glob("**/seven_year_result.json"))
     completed: list[dict[str, Any]] = []
     for path in run_paths:

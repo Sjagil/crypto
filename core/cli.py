@@ -301,10 +301,28 @@ def load_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.D
     from data.market_data import load_ohlcv
 
     markets = selected_markets(args)
+
+    def bounded(frame: pd.DataFrame) -> pd.DataFrame:
+        maximum_rows = getattr(args, "max_rows", None)
+        if maximum_rows is None:
+            return frame
+        if maximum_rows < 300:
+            raise ValueError("research --max-rows requires at least 300 rows")
+        if len(frame) <= maximum_rows:
+            return frame
+        result = frame.tail(maximum_rows).copy()
+        result.attrs.update(frame.attrs)
+        return result
+
     if getattr(args, "data", None):
         if len(markets) != 1:
             raise ValueError("one --data file can only be paired with one market")
-        return {markets[0]: load_ohlcv(args.data, market=markets[0], validate=True)}
+        return {
+            markets[0]: bounded(
+                load_ohlcv(args.data, market=markets[0], validate=True)
+            )
+        }
+
     if getattr(args, "providers", None):
         timeframes = csv_values(getattr(args, "timeframes", None))
         selected_timeframe = (
@@ -313,22 +331,29 @@ def load_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.D
             else timeframes[0]
         )
         return {
-            market: load_ohlcv(
-                settings.paths.processed_data_dir / f"{market}_{selected_timeframe}.parquet",
-                market=market,
-                timeframe=selected_timeframe,
-                validate=True,
+            market: bounded(
+                load_ohlcv(
+                    settings.paths.processed_data_dir
+                    / f"{market}_{selected_timeframe}.parquet",
+                    market=market,
+                    timeframe=selected_timeframe,
+                    validate=True,
+                )
             )
             for market in markets
         }
+
     return {
-        market: synthetic_ohlcv(
-            getattr(args, "rows", 900),
-            seed=settings.app.random_seed + index,
-            market=market,
+        market: bounded(
+            synthetic_ohlcv(
+                getattr(args, "rows", 900),
+                seed=settings.app.random_seed + index,
+                market=market,
+            )
         )
         for index, market in enumerate(markets)
     }
+
 
 
 def feature_sources(args: argparse.Namespace, settings: Settings) -> dict[str, pd.DataFrame]:
@@ -1264,7 +1289,11 @@ async def command_research_async(
     settings: Settings,
 ) -> int:
     selected_settings = settings_with_overrides(args, settings)
-    if args.providers and not args.data:
+    if (
+        args.providers
+        and not args.data
+        and not getattr(args, "skip_download", False)
+    ):
         from data.downloader import CanonicalDownloader
 
         await CanonicalDownloader(selected_settings).download_all(
@@ -22558,6 +22587,8 @@ def build_parser() -> argparse.ArgumentParser:
     research.add_argument("--promote-to-paper", action="store_true")
     research.add_argument("--providers")
     research.add_argument("--scrapers", default="none")
+    research.add_argument("--skip-download", action="store_true")
+    research.add_argument("--max-rows", type=int)
     research.add_argument("--timeframes")
     research.add_argument("--strategies")
     research.add_argument("--profile", default="standard")

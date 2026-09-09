@@ -1,0 +1,19 @@
+{
+  "schema_version": "active_portfolio_policy_v1",
+  "paper": {
+    "entry_score": 0.20,
+    "reduce_score": 0.00,
+    "exit_score": -0.25,
+    "minimum_alignment": 0.66,
+    "maximum_positions": 3,
+    "required_entry_timeframes": ["15m", "1h", "4h"],
+    "risk_reduce_fraction": 0.50
+  },
+  "live": {
+    "require_selector_qualified": true,
+    "require_market_selector_pass": true,
+    "require_research_survivor": true,
+    "require_positive_stressed_edge": true,
+    "required_entry_timeframes": ["15m", "1h", "4h"]
+  }
+}

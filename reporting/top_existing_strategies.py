@@ -1096,6 +1096,11 @@ def _campaign_candidates(root: Path) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for filename, meta_key, timeframe, assets in CAMPAIGN_SOURCES:
         path = directory / filename
+        if not path.is_file():
+            # Campaign outputs are evidence inputs, not prerequisites for the
+            # general repository/history report. Missing evidence is skipped,
+            # never fabricated.
+            continue
         report = read_json(path)
         collection_key = ""
         rows: list[dict[str, Any]] = []
@@ -1156,9 +1161,14 @@ def _campaign_candidates(root: Path) -> list[dict[str, Any]]:
 
 def _volume_candidates(root: Path) -> list[dict[str, Any]]:
     directory = root / "output" / "lab" / "reports"
-    report = read_json(directory / "volume_strategy_catalog_campaign_v1.json")
-    frame = pd.read_csv(directory / "volume_strategy_catalog_campaign_v1.csv")
-    regime = pd.read_csv(directory / "volume_strategy_catalog_regimes_v1.csv")
+    report_path = directory / "volume_strategy_catalog_campaign_v1.json"
+    frame_path = directory / "volume_strategy_catalog_campaign_v1.csv"
+    regime_path = directory / "volume_strategy_catalog_regimes_v1.csv"
+    if not all(path.is_file() for path in (report_path, frame_path, regime_path)):
+        return []
+    report = read_json(report_path)
+    frame = pd.read_csv(frame_path)
+    regime = pd.read_csv(regime_path)
     eligible = frame.loc[
         (frame["full_net_return"] > 0) & (frame["full_profit_factor"] > 1.0)
     ]
@@ -1178,8 +1188,11 @@ def _volume_candidates(root: Path) -> list[dict[str, Any]]:
 def collect_longlist(root: Path) -> list[dict[str, Any]]:
     """Collect every comparable positive-cost result without new research."""
 
+    lead_path = (
+        root / "output" / "lab" / "candidates" / "rotation_research_lead_v1.json"
+    )
     candidates = [
-        _rotation_candidate(root),
+        *([_rotation_candidate(root)] if lead_path.is_file() else []),
         *_campaign_candidates(root),
         *_volume_candidates(root),
     ]
@@ -1376,10 +1389,6 @@ def select_top_strategies(
         family_counts[cluster] += 1
         if len(selected) == limit:
             break
-    if len(selected) != limit:
-        raise ValueError(
-            f"only {len(selected)} non-duplicate top strategies available for top {limit}"
-        )
     for rank, row in enumerate(selected, 1):
         row["rank"] = rank
         if not row.get("phase_reason"):
@@ -1430,48 +1439,98 @@ def _database_identity(root: Path) -> dict[str, Any]:
 
 
 def _audit_inventory(root: Path) -> dict[str, Any]:
-    global_accounting = read_json(
-        root / "output" / "lab" / "reports" / "global_trial_accounting_v1.json"
-    )
-    forward = read_json(
-        root / "output" / "lab" / "reports" / "forward_evidence_accounting_v1.json"
-    )
-    volume = pd.read_csv(
-        root / "output" / "lab" / "reports" / "volume_strategy_catalog_campaign_v1.csv"
-    )
-    leaderboard = pd.read_parquet(
+    """Inventory immutable evidence without inventing missing artifacts."""
+
+    reports = root / "output" / "lab" / "reports"
+    leaderboard_path = (
         root / "output" / "lab" / "leaderboards" / "leaderboard.parquet"
     )
+    global_path = reports / "global_trial_accounting_v1.json"
+    forward_path = reports / "forward_evidence_accounting_v1.json"
+    volume_path = reports / "volume_strategy_catalog_campaign_v1.csv"
+    missing: list[str] = []
+
+    def optional_json(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            missing.append(str(path.resolve()))
+            return {}
+        try:
+            return dict(read_json(path))
+        except (OSError, ValueError, TypeError):
+            missing.append(str(path.resolve()))
+            return {}
+
+    global_accounting = optional_json(global_path)
+    forward = optional_json(forward_path)
+
+    volume_columns = [
+        "full_net_return",
+        "full_profit_factor",
+        "universe_role",
+        "validation_net_return",
+        "confirmation_net_return",
+        "stressed_confirmation_net_return",
+        "stressed_full_net_return",
+    ]
+    if volume_path.is_file():
+        volume = pd.read_csv(volume_path)
+    else:
+        missing.append(str(volume_path.resolve()))
+        volume = pd.DataFrame(columns=volume_columns)
+    for column in volume_columns:
+        if column not in volume.columns:
+            volume[column] = pd.Series(dtype=float)
+
+    leaderboard_columns = [
+        "net_return",
+        "profit_factor",
+        "lookahead_status",
+        "repainting_status",
+        "source_type",
+    ]
+    if leaderboard_path.is_file():
+        leaderboard = pd.read_parquet(leaderboard_path)
+    else:
+        missing.append(str(leaderboard_path.resolve()))
+        leaderboard = pd.DataFrame(columns=leaderboard_columns)
+    for column in leaderboard_columns:
+        if column not in leaderboard.columns:
+            leaderboard[column] = pd.Series(dtype=object)
+
     positive_volume = volume.loc[
-        (volume["full_net_return"] > 0) & (volume["full_profit_factor"] > 1)
+        (pd.to_numeric(volume["full_net_return"], errors="coerce") > 0)
+        & (pd.to_numeric(volume["full_profit_factor"], errors="coerce") > 1)
     ]
     strict_volume = positive_volume.loc[
         (positive_volume["universe_role"] == "ALLOWED_PROMOTION_UNIVERSE")
-        & (positive_volume["validation_net_return"] > 0)
-        & (positive_volume["confirmation_net_return"] > 0)
-        & (positive_volume["stressed_confirmation_net_return"] > 0)
-        & (positive_volume["stressed_full_net_return"] > 0)
+        & (pd.to_numeric(positive_volume["validation_net_return"], errors="coerce") > 0)
+        & (pd.to_numeric(positive_volume["confirmation_net_return"], errors="coerce") > 0)
+        & (
+            pd.to_numeric(
+                positive_volume["stressed_confirmation_net_return"],
+                errors="coerce",
+            )
+            > 0
+        )
+        & (pd.to_numeric(positive_volume["stressed_full_net_return"], errors="coerce") > 0)
     ]
     positive_leaderboard = leaderboard.loc[
-        (leaderboard["net_return"] > 0)
-        & (leaderboard["profit_factor"] > 1)
+        (pd.to_numeric(leaderboard["net_return"], errors="coerce") > 0)
+        & (pd.to_numeric(leaderboard["profit_factor"], errors="coerce") > 1)
         & (leaderboard["lookahead_status"] == "PASSED")
         & (leaderboard["repainting_status"] == "PASSED")
         & (leaderboard["source_type"] == "REAL_PROVIDER_DATA")
     ]
-    # The live data store can contain millions of candle/order-flow partition
-    # files.  Walking that mutable runtime tree is neither reproducible nor
-    # relevant to this ranking, and made a bounded evidence report take longer
-    # than fifteen minutes.  Inventory only the immutable research result roots
-    # and identify the canonical database explicitly.
+
     audited_roots = [
-        root / "output" / "lab" / "reports",
+        reports,
         root / "output" / "lab" / "leaderboards",
     ]
     output_files = [
         path
         for audited_root in audited_roots
-        for path in audited_root.rglob("*") if audited_root.is_dir()
+        if audited_root.is_dir()
+        for path in audited_root.rglob("*")
         if path.is_file()
     ]
     result_extensions = {".json", ".csv", ".html", ".parquet", ".md", ".db"}
@@ -1479,32 +1538,53 @@ def _audit_inventory(root: Path) -> dict[str, Any]:
     result_files = [
         path for path in output_files if path.suffix.lower() in result_extensions
     ] + ([canonical_database] if canonical_database.is_file() else [])
+    campaign_sources_available = sum(
+        (reports / filename).is_file() for filename, *_ in CAMPAIGN_SOURCES
+    )
+
     return {
-        "historical_evaluation_trials": global_accounting["evaluation_trial_count"],
-        "global_multiple_testing_denominator": global_accounting[
-            "global_multiple_testing_denominator"
-        ],
-        "unique_strategy_dna_equivalent_count": global_accounting[
-            "unique_strategy_dna_equivalent_count"
-        ],
-        "forward_observer_count": forward["forward_observer_count"],
-        "forward_observation_count": forward["forward_observation_count"],
-        "forward_decision_count": forward["forward_decision_count"],
+        "historical_evaluation_trials": int(
+            global_accounting.get("evaluation_trial_count") or 0
+        ),
+        "global_multiple_testing_denominator": int(
+            global_accounting.get("global_multiple_testing_denominator")
+            or global_accounting.get("evaluation_trial_count")
+            or 0
+        ),
+        "unique_strategy_dna_equivalent_count": int(
+            global_accounting.get("unique_strategy_dna_equivalent_count")
+            or global_accounting.get("unique_strategy_dna_count")
+            or 0
+        ),
+        "forward_observer_count": int(forward.get("forward_observer_count") or 0),
+        "forward_observation_count": int(forward.get("forward_observation_count") or 0),
+        "forward_decision_count": int(forward.get("forward_decision_count") or 0),
         "volume_catalog_rows": int(len(volume)),
         "volume_full_sample_positive_after_costs": int(len(positive_volume)),
         "volume_full_sample_stressed_positive": int(
-            (positive_volume["stressed_full_net_return"] > 0).sum()
+            (
+                pd.to_numeric(
+                    positive_volume["stressed_full_net_return"], errors="coerce"
+                )
+                > 0
+            ).sum()
         ),
         "volume_strict_allowed_all_splits_positive": int(len(strict_volume)),
         "leaderboard_rows": int(len(leaderboard)),
         "leaderboard_real_positive_after_costs": int(len(positive_leaderboard)),
-        "campaign_sources_ranked": len(CAMPAIGN_SOURCES),
+        "campaign_sources_ranked": int(campaign_sources_available),
+        "evidence_artifacts_available": {
+            "global_trial_accounting": global_path.is_file(),
+            "forward_evidence_accounting": forward_path.is_file(),
+            "volume_catalog": volume_path.is_file(),
+            "leaderboard": leaderboard_path.is_file(),
+        },
+        "missing_evidence_artifacts": sorted(set(missing)),
+        "evidence_completeness": "COMPLETE" if not missing else "PARTIAL_EVIDENCE",
         "sqlite_database_files_scanned": sum(
             path.suffix.lower() == ".db" for path in result_files
         ),
-        "result_roots_scanned": [
-            str(path.resolve()) for path in audited_roots
-        ],
+        "result_roots_scanned": [str(path.resolve()) for path in audited_roots],
         "inventory_scope": "BOUNDED_IMMUTABLE_RESEARCH_EVIDENCE",
         "output_result_files_scanned": len(result_files),
         "output_result_extension_counts": dict(
@@ -1515,76 +1595,40 @@ def _audit_inventory(root: Path) -> dict[str, Any]:
                 "Candle/order-flow partitions are runtime inputs, not research-result "
                 "artifacts; the canonical SQLite database is identified explicitly."
             ),
-            "test_runs": "All output/test_runs databases and reports are unit/integration evidence.",
+            "test_runs": (
+                "All output/test_runs databases and reports are unit/integration evidence."
+            ),
             "synthetic_features": (
-                "output/reports/indicator/synthetic_features.parquet is feature smoke data."
+                "Synthetic feature smoke data is not ranked as real evidence."
             ),
-            "storm_survivors": (
-                "Portfolio storms had no positive confirmation survivors; signal storms "
-                "lacked triggered canonical exact confirmation."
-            ),
-            "leaderboard_baselines": (
-                "Positive real leaderboard rows remain economically weak "
-                "(best CAGR below 1%, PF below 1.08)."
-            ),
-            "package_copies": (
-                "Acceptance-package copies are supporting duplicates of canonical reports."
+            "missing_evidence_policy": (
+                "Missing immutable evidence remains zero-count and explicitly listed; "
+                "it is never fabricated."
             ),
         },
     }
 
 
+
+
 def _canary_proposal(selected: list[dict[str, Any]]) -> dict[str, Any]:
-    primary = next(
-        row for row in selected if row["strategy_name"] == "RR_B60_H5_Z20"
+    from core.live_capital import (
+        CAPITAL_LEVEL,
+        MAXIMUM_MANAGED_POSITIONS,
+        MAXIMUM_NEW_ORDERS_PER_DAY,
+        MAXIMUM_ORDER_EUR,
+        MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR,
     )
-    rotation = next(
-        row for row in selected if row["strategy_name"] == "ROTATION_FROZEN_CONTROL"
-    )
-    secondary = next(
-        row
-        for row in selected
-        if row["strategy_name"] not in {primary["strategy_name"], rotation["strategy_name"]}
-        and row["bitvavo_spot_long_only_compatible"]
-        and row["timeframe"] == "1d"
-        and (row["maximum_drawdown"] or 1.0) <= 0.20
-        and (row["stressed_profit_factor"] or 0.0) > 1.0
-        and (row["stressed_total_return"] or 0.0) > 0.0
-    )
-    shadows = [rotation, secondary]
-    for row in shadows:
-        row["recommended_phase"] = "FROZEN_SHADOW"
-        row["phase_reason"] = (
-            "Historically strong enough for orderless prospective observation, but "
-            "untouched holdout and forward-decision evidence remain insufficient."
-        )
-    return {
+
+    by_name = {row["strategy_name"]: row for row in selected}
+    primary = by_name.get("RR_B60_H5_Z20")
+    rotation = by_name.get("ROTATION_FROZEN_CONTROL")
+    common = {
         "proposal_only": True,
         "execution_activated": False,
-        "primary": {
-            "strategy_name": primary["strategy_name"],
-            "strategy_dna_hash": primary["strategy_dna_hash"],
-            "market": "ETH-EUR",
-            "timeframe": primary["timeframe"],
-            "fixed_parameters": primary["parameters"],
-            "maximum_order_eur": 5,
-            "maximum_total_exposure_eur": 10,
-            "maximum_open_positions": 1,
-            "maximum_new_orders_per_day": 1,
-            "autoscaling": False,
-            "reason": (
-                "Best capital protection and cost robustness in the audited longlist; "
-                "PBO/WRC/SPA pass, but DSR/sample/holdout remain insufficient. This is "
-                "an execution-chain proposal, not a profitability approval."
-            ),
-        },
-        "frozen_shadow": [
-            {
-                "strategy_name": row["strategy_name"],
-                "strategy_dna_hash": row["strategy_dna_hash"],
-            }
-            for row in shadows
-        ],
+        "capital_level": CAPITAL_LEVEL,
+        "automatic_live_promotion": False,
+        "autoscaling": False,
         "kill_switch_conditions": [
             "stale or incomplete market data",
             "unknown order/fill/position state",
@@ -1603,24 +1647,62 @@ def _canary_proposal(selected: list[dict[str, Any]]) -> dict[str, Any]:
             "fills, fees, slippage, stop and exit",
             "post-order reconciliation",
         ],
-        "pre_order_checks": [
-            "explicit operator approval",
-            "spot-only ETH-EUR allowlist",
-            "private API scope and withdrawals-disabled confirmation",
-            "fresh data and healthy provider",
-            "zero unknown orders/positions",
-            "valid quantity, precision, minimum order, stop and exit",
-        ],
-        "post_order_checks": [
-            "fetch and reconcile order state",
-            "reconcile balances/position/fills/fees",
-            "persist append-only audit record",
-            "verify stop/exit supervision",
-            "block any second entry",
+    }
+    if primary is None:
+        return {
+            **common,
+            "status": "INSUFFICIENT_RANKED_EVIDENCE",
+            "reason": "preferred historical canary is absent from current immutable evidence",
+            "primary": None,
+            "frozen_shadow": [],
+        }
+
+    secondary = next(
+        (
+            row
+            for row in selected
+            if row["strategy_name"] != primary["strategy_name"]
+            and row.get("bitvavo_spot_long_only_compatible")
+            and row.get("timeframe") == "1d"
+            and (row.get("maximum_drawdown") or 1.0) <= 0.20
+            and (row.get("stressed_profit_factor") or 0.0) > 1.0
+            and (row.get("stressed_total_return") or 0.0) > 0.0
+        ),
+        None,
+    )
+    shadows = [row for row in (rotation, secondary) if row is not None]
+    for row in shadows:
+        row["recommended_phase"] = "FROZEN_SHADOW"
+        row["phase_reason"] = (
+            "Historically interesting enough for orderless prospective observation, "
+            "but untouched holdout and forward evidence remain insufficient."
+        )
+    return {
+        **common,
+        "status": "PROPOSAL_ONLY",
+        "primary": {
+            "strategy_name": primary["strategy_name"],
+            "strategy_dna_hash": primary["strategy_dna_hash"],
+            "market": "ETH-EUR",
+            "timeframe": primary["timeframe"],
+            "fixed_parameters": primary["parameters"],
+            "maximum_order_eur": str(MAXIMUM_ORDER_EUR),
+            "maximum_total_exposure_eur": str(MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR),
+            "maximum_open_positions": MAXIMUM_MANAGED_POSITIONS,
+            "maximum_new_orders_per_day": MAXIMUM_NEW_ORDERS_PER_DAY,
+            "reason": (
+                "Reporting proposal only; canonical live authority, account health, "
+                "reconciliation and prospective evidence remain independent gates."
+            ),
+        },
+        "frozen_shadow": [
+            {
+                "strategy_name": row["strategy_name"],
+                "strategy_dna_hash": row["strategy_dna_hash"],
+            }
+            for row in shadows
         ],
     }
-
-
 def _executive_summary(
     inventory: dict[str, Any],
     longlist: list[dict[str, Any]],
@@ -1654,7 +1736,7 @@ def _executive_summary(
             "costs, but none has an untouched holdout plus sufficient prospective evidence. "
             "No proven profitable or capital-deployment-ready strategy exists yet."
         ),
-        "primary_five_euro_canary_proposal": "RR_B60_H5_Z20 on ETH-EUR",
+        "primary_five_euro_canary_proposal": "DEPRECATED; use canonical Level-2 authority and current evidence",
         "ranked_strategy_count": len(selected),
         **({"top_ten_count": 10} if len(selected) == 10 else {}),
     }
@@ -1961,6 +2043,8 @@ def build_report(
     report = {
         "schema_version": report_basename,
         "ranking_limit": limit,
+        "available_ranked_strategy_count": len(selected),
+        "ranking_status": "COMPLETE" if len(selected) == limit else "PARTIAL_EVIDENCE",
         "generated_at": datetime.now(UTC).isoformat(),
         "repository_root": str(root.resolve()),
         "report_type": "READ_ONLY_EXISTING_EVIDENCE_RANKING",
@@ -2132,8 +2216,13 @@ def verify_reports(root: Path, paths: dict[str, Path]) -> dict[str, Any]:
     csv_names = [row["strategy_name"] for row in csv_rows]
     if json_names != csv_names:
         raise ValueError(f"JSON and CSV top {limit} differ")
-    if len(json_names) != limit or len(set(json_names)) != limit:
+    if len(json_names) > limit or len(set(json_names)) != len(json_names):
         raise ValueError(f"top {limit} identity invariant failed")
+    expected_count = int(
+        report.get("available_ranked_strategy_count", len(json_names))
+    )
+    if len(json_names) != expected_count:
+        raise ValueError("ranked strategy count does not reconcile with report metadata")
     if max(Counter(row["family_cluster"] for row in ranked_rows).values()) > 2:
         raise ValueError("family clustering invariant failed")
     if any(row["recommended_phase"] not in ALLOWED_PHASES for row in ranked_rows):
