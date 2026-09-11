@@ -156,6 +156,13 @@ def test_scoped_operator_authority_never_stores_phrase(
 
 def test_operator_authority_only_overrides_legacy_global_toggles() -> None:
     settings = Settings.load()
+    settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"bitvavo_ip_whitelist_confirmed": True}
+            )
+        }
+    )
     passed = LivePreflight.evaluate(
         settings,
         markets=("ETH-EUR",),
@@ -345,6 +352,13 @@ def test_live_capital_evidence_ignores_other_strategy_fills(
 
 def test_capital_level_two_preflight_caps_are_enforced() -> None:
     settings = Settings.load()
+    settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"bitvavo_ip_whitelist_confirmed": True}
+            )
+        }
+    )
     allowed = LivePreflight.evaluate(
         settings,
         markets=("ETH-EUR",),

@@ -207,6 +207,67 @@ class Level2OrderBook:
             raise SequenceGap("book invalidated; snapshot refresh requested")
         return False
 
+    async def apply_delta_range(
+        self,
+        *,
+        bids: Iterable[Iterable[Any]] = (),
+        asks: Iterable[Iterable[Any]] = (),
+        start_sequence: int,
+        end_sequence: int,
+        message_id: str | None = None,
+        checksum: Any | None = None,
+        timestamp: datetime | None = None,
+    ) -> bool:
+        """Apply one Market Data Pro range without pretending it is one nonce."""
+
+        if start_sequence < 0 or end_sequence < start_sequence:
+            raise ValueError("invalid sequence range")
+        refresh = False
+        async with self._lock:
+            if not self.valid:
+                raise InvalidOrderBook("book requires a fresh snapshot")
+            if message_id and message_id in self._message_ids:
+                self.statistics["duplicates"] += 1
+                return False
+            if self.sequence is not None:
+                if end_sequence <= self.sequence:
+                    self.statistics["out_of_order"] += 1
+                    return False
+                if start_sequence != self.sequence + 1:
+                    self.statistics["sequence_gaps"] += 1
+                    self._invalidate_locked()
+                    refresh = True
+            if not refresh:
+                prior_bids = self._bids.copy()
+                prior_asks = self._asks.copy()
+                prior_depth = self.cumulative_bid_depth + self.cumulative_ask_depth
+                try:
+                    self._apply(self._bids, bids)
+                    self._apply(self._asks, asks)
+                    self._trim()
+                    self._validate_cross()
+                    self._validate_checksum(checksum)
+                except Exception:
+                    self._bids = prior_bids
+                    self._asks = prior_asks
+                    self._invalidate_locked()
+                    refresh = True
+                if not refresh:
+                    self.sequence = int(end_sequence)
+                    if message_id:
+                        self._message_ids.add(message_id)
+                    self.last_valid_update = timestamp or utc_now()
+                    new_depth = self.cumulative_bid_depth + self.cumulative_ask_depth
+                    if prior_depth > 0:
+                        self._resiliency = min(Decimal("1"), new_depth / prior_depth)
+                    self._previous_depth = new_depth
+                    self.statistics["deltas"] += 1
+                    return True
+        if refresh:
+            await self._request_refresh()
+            raise SequenceGap("book invalidated by Market Data Pro range gap")
+        return False
+
     @staticmethod
     def _apply(
         side: dict[Decimal, Decimal], values: Iterable[Iterable[Any]]

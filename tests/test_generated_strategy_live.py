@@ -932,6 +932,13 @@ def test_grandfathered_inventory_does_not_consume_managed_level_two_slot(
 
 def test_level_one_portfolio_canary_allows_three_tiny_positions() -> None:
     settings = Settings.load()
+    settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"bitvavo_ip_whitelist_confirmed": True}
+            )
+        }
+    )
     passed = LivePreflight.evaluate(
         settings,
         markets=("BTC-EUR", "ETH-EUR"),

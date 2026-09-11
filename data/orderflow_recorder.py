@@ -3170,12 +3170,14 @@ class ProspectiveOrderflowRecorder:
             assert isinstance(asks, dict)
             payload = dict(event.payload)
             last_sequence = state.get("last_sequence")
-            if event.sequence is None or last_sequence is None:
+            range_start = payload.get("from_sequence", event.sequence)
+            range_end = payload.get("to_sequence", event.sequence)
+            if range_start is None or range_end is None or last_sequence is None:
                 state["valid"] = False
                 sequence_status = "SEQUENCE_UNAVAILABLE"
-            elif event.sequence <= int(last_sequence):
+            elif int(range_end) <= int(last_sequence):
                 sequence_status = "STALE_BEFORE_SNAPSHOT"
-            elif event.sequence != int(last_sequence) + 1:
+            elif int(range_start) != int(last_sequence) + 1:
                 state["valid"] = False
                 sequence_status = "SEQUENCE_GAP"
             else:
@@ -3214,7 +3216,7 @@ class ProspectiveOrderflowRecorder:
                         side.pop(price, None)
                     else:
                         side[price] = quantity
-            state["last_sequence"] = event.sequence
+            state["last_sequence"] = int(range_end)
             state_bucket = int(event.observed_at.timestamp()) // 5
             include_book_state = (
                 self._last_book_state_bucket.get(
