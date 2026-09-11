@@ -5,8 +5,13 @@ import argparse
 import asyncio
 import json
 import signal
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from config.settings import get_settings
 from data.bitvavo_market_data_pro import BitvavoMarketDataProManager
