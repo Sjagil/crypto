@@ -2095,6 +2095,15 @@ class DataLoader:
                 market=canonical_market,
                 timeframe=target,
             )
+        self._update_watermark_from_parquet(
+            provider=name,
+            market=canonical_market,
+            timeframe=target,
+            data_kind="ohlcv",
+            path=normalized_path,
+            completed_ranges=completed_ranges,
+        )
+
         summary = final_cache_summary
         notify(
             "NATIVE_HISTORY_COMPLETE",
@@ -2687,13 +2696,34 @@ class DataLoader:
         )
         if native or not source_summary.get("rows"):
             return source_summary
-        return self._resample_cached_ohlcv_compact(
+
+        result = self._resample_cached_ohlcv_compact(
             provider=name,
             market=market,
             source_timeframe=source,
             target_timeframe=target,
             progress_callback=progress_callback,
         )
+
+        canonical_market = normalize_market(market)
+        normalized_path = (
+            self.settings.paths.processed_data_dir
+            / name
+            / canonical_market
+            / f"{target}.parquet"
+        )
+
+        if result.get("rows") and normalized_path.is_file():
+            self._update_watermark_from_parquet(
+                provider=name,
+                market=canonical_market,
+                timeframe=target,
+                data_kind="ohlcv_resampled",
+                path=normalized_path,
+                completed_ranges=((start, end),),
+            )
+
+        return result
 
     def materialize_provider_ohlcv_compact(
         self,
@@ -4176,6 +4206,226 @@ class DataLoader:
                 )
         return outputs
 
+    @staticmethod
+    def _watermark_gap_classification(
+        *,
+        provider: str,
+        timeframe: str,
+        ordered_timestamps: Iterable[datetime],
+    ) -> tuple[list[list[str]], list[list[str]]]:
+        """Separate retryable gaps from provider-defined sparse intervals."""
+
+        timestamps = sorted(set(ordered_timestamps))
+        missing_ranges: list[list[str]] = []
+        sparse_ranges: list[list[str]] = []
+
+        if timeframe == "1mo":
+            return missing_ranges, sparse_ranges
+
+        interval = timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
+
+        for previous, current in zip(
+            timestamps,
+            timestamps[1:],
+            strict=False,
+        ):
+            if current - previous <= interval:
+                continue
+
+            gap = [
+                (previous + interval).isoformat(),
+                (current - interval).isoformat(),
+            ]
+
+            # Bitvavo does not emit a candlestick for an interval in which
+            # no trades occurred. Such an interval is sparse source data,
+            # not evidence that a successful history request failed.
+            if provider.casefold() == "bitvavo":
+                sparse_ranges.append(gap)
+            else:
+                missing_ranges.append(gap)
+
+        return missing_ranges, sparse_ranges
+
+    def _update_watermark_from_parquet(
+        self,
+        *,
+        provider: str,
+        market: str,
+        timeframe: str,
+        data_kind: str,
+        path: Path,
+        completed_ranges: Iterable[tuple[datetime, datetime]],
+    ) -> None:
+        """Build a bounded-memory watermark from a durable Parquet series."""
+
+        if self.database is None or not path.is_file():
+            return
+
+        parquet = pq.ParquetFile(path)
+        if parquet.metadata.num_rows <= 0:
+            return
+
+        schema_names = set(parquet.schema_arrow.names)
+        if "timestamp" not in schema_names:
+            raise ValueError(
+                f"watermark source {path} has no timestamp column"
+            )
+
+        columns = [
+            name
+            for name in (
+                "timestamp",
+                "observed_at",
+                "available_at",
+            )
+            if name in schema_names
+        ]
+
+        earliest: datetime | None = None
+        latest: datetime | None = None
+        latest_observed: datetime | None = None
+        latest_available: datetime | None = None
+        previous: datetime | None = None
+
+        missing_ranges: list[list[str]] = []
+        sparse_ranges: list[list[str]] = []
+
+        interval = (
+            None
+            if timeframe == "1mo"
+            else timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
+        )
+
+        for batch in parquet.iter_batches(
+            batch_size=100_000,
+            columns=columns,
+        ):
+            frame = batch.to_pandas()
+
+            timestamps = (
+                pd.to_datetime(
+                    frame["timestamp"],
+                    utc=True,
+                    errors="raise",
+                )
+                .dropna()
+                .drop_duplicates()
+                .sort_values()
+            )
+
+            for value in timestamps:
+                current = value.to_pydatetime()
+
+                if (
+                    previous is not None
+                    and interval is not None
+                    and current - previous > interval
+                ):
+                    gap = [
+                        (previous + interval).isoformat(),
+                        (current - interval).isoformat(),
+                    ]
+
+                    if provider.casefold() == "bitvavo":
+                        sparse_ranges.append(gap)
+                    else:
+                        missing_ranges.append(gap)
+
+                if earliest is None:
+                    earliest = current
+
+                latest = current
+                previous = current
+
+            if "observed_at" in frame:
+                observed = pd.to_datetime(
+                    frame["observed_at"],
+                    utc=True,
+                    errors="coerce",
+                ).dropna()
+
+                if not observed.empty:
+                    candidate = observed.max().to_pydatetime()
+                    latest_observed = (
+                        candidate
+                        if latest_observed is None
+                        else max(latest_observed, candidate)
+                    )
+
+            if "available_at" in frame:
+                available = pd.to_datetime(
+                    frame["available_at"],
+                    utc=True,
+                    errors="coerce",
+                ).dropna()
+
+                if not available.empty:
+                    candidate = available.max().to_pydatetime()
+                    latest_available = (
+                        candidate
+                        if latest_available is None
+                        else max(latest_available, candidate)
+                    )
+
+        if earliest is None or latest is None:
+            return
+
+        observed_at = latest_observed or latest
+        available_at = latest_available or observed_at
+
+        external_id = stable_hash(
+            [provider, market, timeframe, data_kind],
+            length=64,
+        )
+
+        record = {
+            "external_id": external_id,
+            "provider": provider,
+            "market": market,
+            "timeframe": timeframe,
+            "timestamp": latest,
+            "observed_at": observed_at,
+            "available_at": available_at,
+            "status": (
+                ProviderStatus.READY.value
+                if not missing_ranges
+                else ProviderStatus.PARTIAL.value
+            ),
+            "data_kind": data_kind,
+            "earliest_stored_timestamp": earliest.isoformat(),
+            "latest_stored_timestamp": latest.isoformat(),
+            "last_successful_cursor": latest.isoformat(),
+            "next_cursor": (
+                latest
+                + timedelta(
+                    seconds=TIMEFRAME_SECONDS[timeframe]
+                )
+            ).isoformat(),
+            "completed_page_ranges": [
+                [left.isoformat(), right.isoformat()]
+                for left, right in completed_ranges
+            ],
+            "missing_ranges": missing_ranges,
+            "retry_ranges": [],
+            "sparse_ranges": sparse_ranges,
+            "sparse_range_count": len(sparse_ranges),
+            "sparse_range_semantics": (
+                "BITVAVO_NO_TRADE_INTERVAL_OMITTED"
+                if provider.casefold() == "bitvavo"
+                else None
+            ),
+            "gap_classification_version": "provider-aware-v1",
+            "watermark_source": "PARQUET_SCAN_V1",
+            "source_hash": sha256_file(path),
+            "updated_at": utc_now().isoformat(),
+        }
+
+        self.database.upsert_records(
+            "data_watermarks",
+            [record],
+        )
+
     def _update_watermark(
         self,
         *,
@@ -4191,21 +4441,13 @@ class DataLoader:
             return
         external_id = stable_hash([provider, market, timeframe, data_kind], length=64)
         ordered_timestamps = sorted({item.timestamp for item in selected})
-        missing_ranges: list[list[str]] = []
-        if timeframe != "1mo":
-            interval = timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
-            for previous, current in zip(
-                ordered_timestamps,
-                ordered_timestamps[1:],
-                strict=False,
-            ):
-                if current - previous > interval:
-                    missing_ranges.append(
-                        [
-                            (previous + interval).isoformat(),
-                            (current - interval).isoformat(),
-                        ]
-                    )
+        missing_ranges, sparse_ranges = (
+            self._watermark_gap_classification(
+                provider=provider,
+                timeframe=timeframe,
+                ordered_timestamps=ordered_timestamps,
+            )
+        )
         record = {
             "external_id": external_id,
             "provider": provider,
@@ -4230,6 +4472,14 @@ class DataLoader:
             ],
             "missing_ranges": missing_ranges,
             "retry_ranges": [],
+            "sparse_ranges": sparse_ranges,
+            "sparse_range_count": len(sparse_ranges),
+            "sparse_range_semantics": (
+                "BITVAVO_NO_TRADE_INTERVAL_OMITTED"
+                if provider.casefold() == "bitvavo"
+                else None
+            ),
+            "gap_classification_version": "provider-aware-v1",
             "source_hash": stable_hash([item.raw_hash for item in selected], length=64),
             "updated_at": utc_now().isoformat(),
         }
