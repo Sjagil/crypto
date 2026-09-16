@@ -2516,13 +2516,16 @@ def _watermark_report(
                 **{
                     key: value
                     for key, value in row.items()
-                    if key not in {"missing_ranges", "retry_ranges"}
+                    if key not in {"missing_ranges", "retry_ranges", "sparse_ranges"}
                 },
                 "missing_range_count": len(
                     row.get("missing_ranges") or ()
                 ),
                 "retry_range_count": len(
                     row.get("retry_ranges") or ()
+                ),
+                "sparse_range_count": len(
+                    row.get("sparse_ranges") or ()
                 ),
             }
             for row in rows
@@ -2547,6 +2550,12 @@ def _watermark_report(
             int(row.get("retry_range_count", 0)) > 0
             if compact
             else bool(row.get("retry_ranges"))
+            for row in rows
+        ),
+        "series_with_sparse_ranges": sum(
+            int(row.get("sparse_range_count", 0)) > 0
+            if compact
+            else bool(row.get("sparse_ranges"))
             for row in rows
         ),
     }
