@@ -27,6 +27,7 @@ from core.live_capital import (
     APPROVAL_PHRASE as LEVEL_2_APPROVAL_PHRASE,
     AUTOSCALE as LEVEL_2_AUTOSCALE,
     CAPITAL_LEVEL,
+    FULL_LIVE,
     MAXIMUM_MANAGED_POSITIONS,
     MAXIMUM_NEW_ORDERS_PER_DAY,
     MAXIMUM_ORDER_EUR,
@@ -47,6 +48,7 @@ from utils.common import atomic_write_json, read_json, stable_hash, utc_iso
 SCHEMA = "swing_layer_live_canary_v1"
 AUTHORITY_PATH = ROOT / "config" / "live_swing_layer_authority.json"
 DEFAULT_MARKETS = ("BTC-EUR", "ETH-EUR", "SOL-EUR", "LINK-EUR")
+FULL_LIVE_APPROVAL_PHRASE = "I APPROVE FULL LIVE QUANT TRADING"
 
 
 def _decimal(value: Any, default: str = "0") -> Decimal:
@@ -124,6 +126,17 @@ def _authority() -> dict[str, Any]:
     payload["leverage"] = False
     payload["shorting"] = False
     payload["withdrawals"] = False
+    if FULL_LIVE:
+        payload["mode"] = "FULL_LIVE"
+        payload["maximum_order_eur"] = str(MAXIMUM_ORDER_EUR)
+        payload["maximum_total_exposure_eur"] = str(
+            MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR
+        )
+        payload["maximum_open_positions"] = MAXIMUM_MANAGED_POSITIONS
+        payload["maximum_new_orders_per_day"] = MAXIMUM_NEW_ORDERS_PER_DAY
+        payload["maximum_risk_per_trade_eur"] = str(
+            MAXIMUM_RISK_PER_TRADE_EUR
+        )
     payload["markets"] = list(
         dict.fromkeys(
             str(market).strip().upper()
@@ -354,6 +367,55 @@ def approve_swing_layer_canary(
             "markets": list(normalized),
             "approval_phrase_stored": False,
             "operator_approval_reference": "explicit_capital_level_2_swing_canary",
+        }
+    )
+    return {
+        **_persist_authority(body),
+        "orders_generated": 0,
+        "orders_submitted": 0,
+    }
+
+
+def approve_swing_layer_full_live(
+    *,
+    markets: tuple[str, ...],
+    approval: str,
+) -> dict[str, Any]:
+    if not FULL_LIVE:
+        raise PermissionError(
+            "CRYPTO_FULL_LIVE=YES is required before full-live approval"
+        )
+    if approval.strip() != FULL_LIVE_APPROVAL_PHRASE:
+        raise PermissionError("full-live approval phrase mismatch")
+    settings = _settings()
+    normalized = tuple(
+        dict.fromkeys(
+            str(value).strip().upper()
+            for value in markets
+            if str(value).strip()
+        )
+    )
+    if not normalized:
+        raise ValueError("full-live swing requires at least one market")
+    for market in normalized:
+        if settings.shariah.eligibility(market).status.value != "ALLOWED":
+            raise PermissionError(f"market is not eligible: {market}")
+    body = _defaults()
+    body.update(
+        {
+            "active": True,
+            "mode": "FULL_LIVE",
+            "activated_at": utc_iso(),
+            "markets": list(normalized),
+            "approval_phrase_stored": False,
+            "operator_approval_reference": "explicit_full_live_quant_trading",
+            "maximum_order_eur": str(MAXIMUM_ORDER_EUR),
+            "maximum_total_exposure_eur": str(
+                MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR
+            ),
+            "maximum_open_positions": MAXIMUM_MANAGED_POSITIONS,
+            "maximum_new_orders_per_day": MAXIMUM_NEW_ORDERS_PER_DAY,
+            "maximum_risk_per_trade_eur": str(MAXIMUM_RISK_PER_TRADE_EUR),
         }
     )
     return {
