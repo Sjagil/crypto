@@ -12,12 +12,32 @@ from typing import Any, Awaitable, Callable, Mapping, TypeVar
 from config.settings import Settings
 from utils.common import read_json, stable_hash
 
+FULL_LIVE = os.getenv("CRYPTO_FULL_LIVE", "").strip().upper() == "YES"
 CAPITAL_LEVEL = 2
-MAXIMUM_ORDER_EUR = Decimal("25")
-MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR = Decimal("75")
-MAXIMUM_MANAGED_POSITIONS = 3
-MAXIMUM_NEW_ORDERS_PER_DAY = 3
-MAXIMUM_RISK_PER_TRADE_EUR = Decimal("2")
+
+# These are absolute circuit-breaker ceilings, not position-sizing targets.
+# In FULL_LIVE, actual order size remains controlled by RiskManager, Kelly,
+# correlation, available cash, portfolio heat and canonical cost/edge gates.
+MAXIMUM_ORDER_EUR = Decimal(
+    os.getenv("CRYPTO_FULL_LIVE_MAXIMUM_ORDER_EUR", "100000")
+    if FULL_LIVE else "25"
+)
+MAXIMUM_TOTAL_MANAGED_EXPOSURE_EUR = Decimal(
+    os.getenv("CRYPTO_FULL_LIVE_MAXIMUM_EXPOSURE_EUR", "250000")
+    if FULL_LIVE else "75"
+)
+MAXIMUM_MANAGED_POSITIONS = int(
+    os.getenv("CRYPTO_FULL_LIVE_MAXIMUM_POSITIONS", "5")
+    if FULL_LIVE else "3"
+)
+MAXIMUM_NEW_ORDERS_PER_DAY = int(
+    os.getenv("CRYPTO_FULL_LIVE_MAXIMUM_NEW_ORDERS_PER_DAY", "12")
+    if FULL_LIVE else "3"
+)
+MAXIMUM_RISK_PER_TRADE_EUR = Decimal(
+    os.getenv("CRYPTO_FULL_LIVE_MAXIMUM_RISK_EUR", "5000")
+    if FULL_LIVE else "2"
+)
 AUTOSCALE = False
 APPROVAL_PHRASE = "I APPROVE LIVE CAPITAL LEVEL 2"
 
@@ -557,6 +577,7 @@ async def submit_level_2_buy_atomically(
 
 __all__ = [
     "APPROVAL_PHRASE",
+    "FULL_LIVE",
     "AUTOSCALE",
     "CAPITAL_LEVEL",
     "MAXIMUM_MANAGED_POSITIONS",
